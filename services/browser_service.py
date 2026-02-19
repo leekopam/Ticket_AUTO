@@ -39,9 +39,11 @@ class BrowserService:
         self,
         login_url: str = "https://witchform.com/w/login",
         user_data_dir: str = ".runtime/pw_profile",
+        require_login_each_run: bool = True,
     ):
         self._login_url = login_url
         self._user_data_dir = user_data_dir
+        self._require_login_each_run = require_login_each_run
         self._task_queue: queue.Queue = queue.Queue()
         self._current_page: Page | None = None
         self._auth_page: Page | None = None
@@ -94,6 +96,12 @@ class BrowserService:
             )
         )
 
+    def wait_until_authenticated(self, timeout_sec: int = 600) -> bool:
+        return self.ensure_authenticated(timeout_sec=timeout_sec)
+
+    def clear_auth_state_for_domain(self) -> bool:
+        return bool(self._invoke_rpc({"action": "clear_auth_state_for_domain"}, timeout_sec=20))
+
     def resolve_qr_redirect(
         self,
         qr_url: str,
@@ -142,6 +150,9 @@ class BrowserService:
                     headless=False,
                 )
                 self._context = context
+                self._open_initial_witchform_page()
+                if self._require_login_each_run:
+                    self._handle_clear_auth_state_for_domain()
                 self._ready_event.set()
 
                 while self._is_running:
@@ -154,13 +165,13 @@ class BrowserService:
             self._startup_error = exc
             if not self._ready_event.is_set():
                 self._ready_event.set()
-            print(f"Playwright startup error: {exc}")
+            print(f"Playwright 시작 오류: {exc}")
         finally:
             if context is not None:
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._warn(f"CONTEXT_CLOSE_FAILED: {exc}")
             self._context = None
             self._current_page = None
             self._auth_page = None
@@ -189,6 +200,10 @@ class BrowserService:
                 return
             if action == "ensure_authenticated":
                 result = self._handle_ensure_authenticated(task.get("timeout_sec", 180))
+                finish(result, None)
+                return
+            if action == "clear_auth_state_for_domain":
+                result = self._handle_clear_auth_state_for_domain()
                 finish(result, None)
                 return
             if action == "resolve_qr_redirect":
@@ -221,7 +236,7 @@ class BrowserService:
 
     def _handle_click_receipt(self) -> None:
         if not self._current_page or self._current_page.is_closed():
-            print("No active order page to click receipt button.")
+            print("수령 완료 버튼을 누를 활성 주문 페이지가 없습니다.")
             self._invoke_receipt_complete_callback()
             return
 
@@ -239,13 +254,13 @@ class BrowserService:
                 try:
                     self._current_page.click("text=수령 완료 처리", timeout=1000)
                 except Exception:
-                    print("Could not find popup confirm button.")
+                    print("팝업 확인 버튼을 찾지 못했습니다.")
 
             self._current_page.wait_for_timeout(1500)
             self._current_page.close()
             self._current_page = None
         except Exception as exc:
-            print(f"Playwright click error: {exc}")
+            print(f"Playwright 클릭 오류: {exc}")
 
         self._invoke_receipt_complete_callback()
 
@@ -275,7 +290,7 @@ class BrowserService:
             return BrowserResolveResult(
                 ok=False,
                 error_code="BROWSER_NOT_READY",
-                error_message="Browser context is not ready.",
+                error_message="브라우저 컨텍스트가 준비되지 않았습니다.",
             )
 
         try:
@@ -289,13 +304,13 @@ class BrowserService:
             return BrowserResolveResult(
                 ok=False,
                 error_code="NETWORK_TIMEOUT",
-                error_message="Request timed out while resolving QR redirect.",
+                error_message="QR 리다이렉트 확인 요청 시간이 초과되었습니다.",
             )
         except Error as exc:
             return BrowserResolveResult(
                 ok=False,
                 error_code="NETWORK_ERROR",
-                error_message=f"Browser request failed: {exc}",
+                error_message=f"브라우저 요청 실패: {exc}",
             )
 
         status_code = response.status
@@ -308,7 +323,7 @@ class BrowserService:
                 status_code=status_code,
                 location=location,
                 error_code="AUTH_REQUIRED",
-                error_message="Authentication required. Please log in.",
+                error_message="로그인이 필요합니다.",
             )
 
         if status_code == 200:
@@ -323,7 +338,7 @@ class BrowserService:
                     ok=False,
                     status_code=status_code,
                     error_code="AUTH_REQUIRED",
-                    error_message="Authentication required. Please log in.",
+                    error_message="로그인이 필요합니다.",
                 )
 
         print(f"QR_RESOLVE_OK status={status_code} location={location}")
@@ -354,47 +369,21 @@ class BrowserService:
         return snapshot
 
     def _is_authenticated(self) -> bool:
+        """PHPSESSID 쿠키 존재 여부로 인증 상태 판단.
+
+        시작 시 쿠키를 전부 삭제하므로 PHPSESSID가 존재하면 이번 세션에서 로그인한 것.
+        세션 만료 시 QR 처리 흐름에서 AUTH_REQUIRED로 감지되어 재로그인 유도.
+        """
         if not self._context:
             return False
 
-        cookies = self._context.cookies(["https://witchform.com"])
-        has_phpsessid = False
-        for cookie in cookies:
+        for cookie in self._context.cookies(["https://witchform.com"]):
             if (
                 cookie.get("name") == "PHPSESSID"
                 and cookie.get("value")
                 and "witchform.com" in cookie.get("domain", "")
             ):
-                has_phpsessid = True
-                break
-
-        if not has_phpsessid:
-            return False
-
-        try:
-            response = self._context.request.get(
-                self._login_url,
-                max_redirects=0,
-                fail_on_status_code=False,
-                timeout=5000,
-            )
-        except Exception:
-            return False
-
-        status_code = response.status
-        location = response.headers.get("location", "")
-
-        if status_code in REDIRECT_STATUS_CODES:
-            return "/w/login" not in (location or "").lower()
-
-        if status_code == 200:
-            final_url = (response.url or "").lower()
-            body = ""
-            try:
-                body = response.text()
-            except Exception:
-                body = ""
-            return not self._looks_like_login_page(final_url, body)
+                return True
 
         return False
 
@@ -404,8 +393,87 @@ class BrowserService:
         if self._auth_page and not self._auth_page.is_closed():
             return
 
-        self._auth_page = self._context.new_page()
+        reusable_page = None
+        for page in self._context.pages:
+            if page.is_closed():
+                continue
+            if self._current_page and page == self._current_page:
+                continue
+            reusable_page = page
+            break
+
+        self._auth_page = reusable_page or self._context.new_page()
         self._auth_page.goto(self._login_url, timeout=15000)
+
+    def _open_initial_witchform_page(self) -> None:
+        """Open only the witchform login page and remove blank tabs on startup."""
+        if not self._context:
+            return
+
+        pages = [page for page in self._context.pages if not page.is_closed()]
+        if pages:
+            target_page = pages[0]
+        else:
+            target_page = self._context.new_page()
+
+        try:
+            target_page.goto(self._login_url, timeout=15000)
+        except Exception as exc:
+            self._warn(f"INITIAL_LOGIN_GOTO_FAILED: {exc}")
+        self._auth_page = target_page
+
+        for page in list(self._context.pages):
+            if page.is_closed() or page == target_page:
+                continue
+            try:
+                page.close()
+            except Exception as exc:
+                self._warn(f"INITIAL_EXTRA_PAGE_CLOSE_FAILED: {exc}")
+
+    def _handle_clear_auth_state_for_domain(self) -> bool:
+        """Clear witchform auth state for this run."""
+        if not self._context:
+            return False
+
+        for domain in (".witchform.com", "witchform.com"):
+            try:
+                self._context.clear_cookies(domain=domain)
+            except Exception as exc:
+                self._warn(f"CLEAR_COOKIES_FAILED domain={domain}: {exc}")
+
+        if self._auth_page and not self._auth_page.is_closed():
+            target_page = self._auth_page
+        elif self._context.pages:
+            target_page = next((p for p in self._context.pages if not p.is_closed()), None)
+        else:
+            target_page = None
+
+        if target_page is None:
+            target_page = self._context.new_page()
+
+        try:
+            target_page.goto("https://witchform.com", timeout=15000)
+            target_page.evaluate(
+                "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }"
+            )
+        except Exception as exc:
+            self._warn(f"AUTH_STATE_STORAGE_CLEAR_FAILED: {exc}")
+
+        try:
+            target_page.goto(self._login_url, timeout=15000)
+        except Exception as exc:
+            self._warn(f"AUTH_STATE_LOGIN_GOTO_FAILED: {exc}")
+        self._auth_page = target_page
+
+        for page in list(self._context.pages):
+            if page.is_closed() or page == target_page:
+                continue
+            try:
+                page.close()
+            except Exception as exc:
+                self._warn(f"AUTH_STATE_EXTRA_PAGE_CLOSE_FAILED: {exc}")
+
+        return True
 
     def _close_auth_page_if_possible(self) -> None:
         if not self._auth_page or self._auth_page.is_closed():
@@ -413,8 +481,8 @@ class BrowserService:
             return
         try:
             self._auth_page.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn(f"AUTH_PAGE_CLOSE_FAILED: {exc}")
         self._auth_page = None
 
     @staticmethod
@@ -447,3 +515,7 @@ class BrowserService:
     def _invoke_receipt_complete_callback(self) -> None:
         if self._on_receipt_complete:
             self._on_receipt_complete()
+
+    @staticmethod
+    def _warn(message: str) -> None:
+        print(f"BROWSER_WARN {message}")

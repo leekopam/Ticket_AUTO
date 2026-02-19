@@ -1,8 +1,7 @@
-﻿"""
-QR redirect parsing service.
+﻿"""QR 리다이렉트 파싱 서비스.
 
-This service no longer performs authenticated HTTP requests directly.
-The browser service is responsible for network/auth state.
+이 서비스는 인증/네트워크를 수행하지 않고,
+브라우저 계층이 전달한 응답 정보만 해석한다.
 """
 from __future__ import annotations
 
@@ -26,16 +25,8 @@ class ApiService:
     WITCHFORM_BASE = "https://witchform.com"
     QR_PREFIX = "https://witchform.com/qrcode_link.php"
 
-    def __init__(self, php_session_id: str = ""):
-        # kept for backward compatibility; runtime auth source is browser context.
-        self._php_session_id = php_session_id
-
-    def set_session(self, session_id: str) -> None:
-        # kept for backward compatibility.
-        self._php_session_id = session_id
-
     def parse_qr_redirect(self, qr_url: str, status_code: int, location: str) -> QRParseResult:
-        """Parse redirect result and extract order info."""
+        """리다이렉트 응답에서 주문번호를 추출한다."""
         if not qr_url.startswith(self.QR_PREFIX):
             return QRParseResult(
                 success=False,
@@ -78,16 +69,16 @@ class ApiService:
 
             last_part = path_parts[-1]
             query_params = parse_qs(parsed.query)
-            uuid = query_params.get("idx", [""])[0].strip()
+            idx_value = query_params.get("idx", [""])[0].strip()
 
-            if not uuid:
+            if not idx_value:
                 return QRParseResult(
                     success=False,
                     error_code="ORDER_IDX_MISSING",
                     error_message="주문 식별자(idx)가 누락되었습니다.",
                 )
 
-            order_number = f"{uuid}_{last_part}"
+            order_number = f"{idx_value}_{last_part}"
             full_url = (
                 f"{self.WITCHFORM_BASE}{location}"
                 if location.startswith("/")
@@ -115,7 +106,7 @@ class ApiService:
         )
 
     def parse_qr_url(self, url: str) -> QRParseResult:
-        """Legacy API. Kept to avoid hard break of external callers."""
+        """하위 호환용 메서드. 사용하지 않는다."""
         return QRParseResult(
             success=False,
             error_code="LEGACY_METHOD_DISABLED",

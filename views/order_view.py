@@ -1,97 +1,129 @@
-"""
-주문 정보 표시 창
-"""
+﻿"""주문 정보 창 뷰 (Tk UI 스레드 모델)."""
+from __future__ import annotations
+
+import queue
+import threading
 import tkinter as tk
 from tkinter import font
-from typing import Callable
+
 from models.order_model import Order
-from viewmodels.order_viewmodel import OrderViewModel
+
+
+_STOP_SENTINEL = object()
 
 
 class OrderView:
-    """주문 정보 표시 UI"""
-    
-    def __init__(self, viewmodel: OrderViewModel):
-        self._viewmodel = viewmodel
+    """스레드 안전 주문 정보 UI."""
+
+    def __init__(self):
+        self._root: tk.Tk | None = None
+
+        self._name_label: tk.Label | None = None
+        self._phone_label: tk.Label | None = None
+        self._seat_label: tk.Label | None = None
+        self._goods_label: tk.Label | None = None
+
+        self._ui_thread: threading.Thread | None = None
+        self._ui_ready = threading.Event()
+        self._ui_queue: queue.Queue = queue.Queue()
+
+    def start(self) -> None:
+        if self._ui_thread and self._ui_thread.is_alive():
+            return
+
+        self._ui_ready.clear()
+        self._ui_thread = threading.Thread(target=self._ui_loop, daemon=True)
+        self._ui_thread.start()
+        self._ui_ready.wait(timeout=5)
+
+    def stop(self) -> None:
+        if not self._ui_thread or not self._ui_thread.is_alive():
+            return
+
+        self._ui_queue.put(_STOP_SENTINEL)
+        self._ui_thread.join(timeout=5)
+
+    def show_or_update(self, order: Order) -> None:
+        """UI 스레드에서 렌더링하도록 주문 정보를 큐에 넣는다."""
+        self.start()
+        self._ui_queue.put(order)
+
+    def _ui_loop(self) -> None:
+        self._root = tk.Tk()
+        self._root.title("주문 정보")
+        self._root.geometry("600x600")
+
+        large_font = font.Font(size=20, weight="bold")
+        medium_font = font.Font(size=15, weight="bold")
+
+        self._name_label = tk.Label(self._root, text="주문자명:", font=large_font)
+        self._name_label.pack(pady=20)
+
+        self._phone_label = tk.Label(self._root, text="주문자연락처:", font=large_font)
+        self._phone_label.pack(pady=20)
+
+        self._seat_label = tk.Label(self._root, text="좌석번호:", font=large_font)
+        self._seat_label.pack(pady=20)
+
+        self._goods_label = tk.Label(self._root, text="굿즈:", font=medium_font)
+        self._goods_label.pack(pady=20)
+
+        # 창 닫기 버튼은 무시하고 창을 유지한다.
+        self._root.protocol("WM_DELETE_WINDOW", self._ignore_close)
+        self._root.withdraw()
+
+        self._ui_ready.set()
+        self._poll_queue()
+        self._root.mainloop()
+
         self._root = None
-        
-        # Label 인스턴스 변수 (데이터 갱신용)
         self._name_label = None
         self._phone_label = None
         self._seat_label = None
         self._goods_label = None
-        
-        # 수령완료 처리 완료 후 콜백
-        self._on_receipt_complete: Callable[[], None] | None = None
-    
-    def set_on_receipt_complete(self, callback: Callable[[], None]) -> None:
-        """수령완료 처리 완료 시 호출할 콜백 설정"""
-        self._on_receipt_complete = callback
-    
-    def show_or_update(self, order: Order) -> None:
-        """
-        주문 정보 표시:
-        - 창이 없으면 새로 생성
-        - 창이 있으면 데이터만 갱신
-        """
-        if self._root is None or not self._is_window_alive():
-            self._create_window(order)
-        else:
-            self._update_data(order)
-        
-        # 자동으로 수령완료 처리 시작
-        self._viewmodel.complete_receipt()
-    
-    def _is_window_alive(self) -> bool:
-        """창이 살아있는지 확인"""
-        try:
-            return self._root.winfo_exists()
-        except:
-            return False
-    
-    def _create_window(self, order: Order) -> None:
-        """새 창 생성"""
-        self._root = tk.Tk()
-        self._root.title("주문 정보")
-        self._root.geometry("600x600")
-        
-        large_font = font.Font(size=20, weight="bold")
-        medium_font = font.Font(size=15, weight="bold")
-        
-        # Label 생성 및 인스턴스 변수에 저장
-        self._name_label = tk.Label(self._root, text=f"주문자명: {order.name}", font=large_font)
-        self._name_label.pack(pady=20)
-        
-        self._phone_label = tk.Label(self._root, text=f"주문자연락처: {order.phone}", font=large_font)
-        self._phone_label.pack(pady=20)
-        
-        self._seat_label = tk.Label(self._root, text=f"좌석번호: {order.seat}", font=large_font)
-        self._seat_label.pack(pady=20)
-        
-        self._goods_label = tk.Label(self._root, text=f"굿즈: \n{order.goods_display}", font=medium_font)
-        self._goods_label.pack(pady=20)
-        
-        self._root.protocol("WM_DELETE_WINDOW", self._close)
-        self._root.update()
-    
-    def _update_data(self, order: Order) -> None:
-        """기존 창의 데이터만 갱신"""
-        self._name_label.config(text=f"주문자명: {order.name}")
-        self._phone_label.config(text=f"주문자연락처: {order.phone}")
-        self._seat_label.config(text=f"좌석번호: {order.seat}")
-        self._goods_label.config(text=f"굿즈: \n{order.goods_display}")
-        
-        # 창을 앞으로 가져오기
-        self._root.lift()
-        self._root.update()
-    
-    def on_receipt_complete_callback(self) -> None:
-        """수령완료 처리가 완료되었을 때 호출 (BrowserService에서 호출)"""
-        if self._on_receipt_complete:
-            self._on_receipt_complete()
-    
-    def _close(self) -> None:
-        """창 닫기"""
-        if self._root:
+
+    def _poll_queue(self) -> None:
+        if not self._root:
+            return
+
+        stop_requested = False
+        while True:
+            try:
+                item = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if item is _STOP_SENTINEL:
+                stop_requested = True
+                continue
+
+            if isinstance(item, Order):
+                self._apply_order(item)
+
+        if stop_requested:
             self._root.destroy()
-            self._root = None
+            return
+
+        self._root.after(50, self._poll_queue)
+
+    def _apply_order(self, order: Order) -> None:
+        if not self._root:
+            return
+
+        if self._name_label:
+            self._name_label.config(text=f"주문자명: {order.name}")
+        if self._phone_label:
+            self._phone_label.config(text=f"주문자연락처: {order.phone}")
+        if self._seat_label:
+            self._seat_label.config(text=f"좌석번호: {order.seat}")
+        if self._goods_label:
+            self._goods_label.config(text=f"굿즈:\n{order.goods_display}")
+
+        self._root.deiconify()
+        self._root.lift()
+        self._root.update_idletasks()
+
+    def _ignore_close(self) -> None:
+        if self._root:
+            self._root.deiconify()
+            self._root.lift()
