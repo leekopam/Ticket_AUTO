@@ -107,6 +107,10 @@ class BrowserService:
         qr_url: str,
         timeout_ms: int = 8000,
     ) -> BrowserResolveResult:
+        """Playwright 컨텍스트 세션 쿠키로만 QR 리다이렉트를 해석한다.
+
+        외부 쿠키/헤더 주입을 허용하지 않는다.
+        """
         timeout_ms = max(1000, timeout_ms)
         return self._invoke_rpc(
             {
@@ -293,12 +297,19 @@ class BrowserService:
                 error_message="브라우저 컨텍스트가 준비되지 않았습니다.",
             )
 
+        request_options = self._build_qr_resolve_request_options(timeout_ms)
+        forbidden_keys = {"cookies", "headers"} & set(request_options.keys())
+        if forbidden_keys:
+            return BrowserResolveResult(
+                ok=False,
+                error_code="REQUEST_OPTION_INVALID",
+                error_message="QR 요청 옵션에 허용되지 않은 키가 포함되었습니다.",
+            )
+
         try:
             response = self._context.request.get(
                 qr_url,
-                max_redirects=0,
-                fail_on_status_code=False,
-                timeout=timeout_ms,
+                **request_options,
             )
         except PlaywrightTimeoutError:
             return BrowserResolveResult(
@@ -343,6 +354,15 @@ class BrowserService:
 
         print(f"QR_RESOLVE_OK status={status_code} location={location}")
         return BrowserResolveResult(ok=True, status_code=status_code, location=location)
+
+    @staticmethod
+    def _build_qr_resolve_request_options(timeout_ms: int) -> dict[str, Any]:
+        """QR 요청 고정 옵션을 생성한다. 외부 쿠키/헤더 주입은 금지한다."""
+        return {
+            "max_redirects": 0,
+            "fail_on_status_code": False,
+            "timeout": timeout_ms,
+        }
 
     def _handle_get_auth_cookie_snapshot(self) -> dict[str, str]:
         if not self._context:
@@ -452,17 +472,12 @@ class BrowserService:
             target_page = self._context.new_page()
 
         try:
-            target_page.goto("https://witchform.com", timeout=15000)
+            target_page.goto(self._login_url, timeout=15000)
             target_page.evaluate(
                 "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }"
             )
         except Exception as exc:
-            self._warn(f"AUTH_STATE_STORAGE_CLEAR_FAILED: {exc}")
-
-        try:
-            target_page.goto(self._login_url, timeout=15000)
-        except Exception as exc:
-            self._warn(f"AUTH_STATE_LOGIN_GOTO_FAILED: {exc}")
+            self._warn(f"AUTH_STATE_LOGIN_PREP_FAILED: {exc}")
         self._auth_page = target_page
 
         for page in list(self._context.pages):

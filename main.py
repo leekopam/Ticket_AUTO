@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 from enum import Enum, auto
 
-from models.session_model import SessionModel
 from services.api_service import ApiService
 from services.browser_service import BrowserResolveResult, BrowserService
 from services.excel_service import ExcelService
@@ -29,7 +28,6 @@ class Application:
     def __init__(self):
         self._state = AppState.AUTH_WAIT
 
-        self._session = SessionModel()
         self._excel_service = ExcelService("data.xlsx")
         self._browser_service = BrowserService(require_login_each_run=True)
         self._api_service = ApiService()
@@ -120,18 +118,11 @@ class Application:
                 continue
 
             if is_authenticated:
-                self._backup_session_cookie()
                 self._enter_ready()
                 return True
 
         self._enter_auth_wait("로그인 대기 시간 초과")
         return False
-
-    def _backup_session_cookie(self) -> None:
-        snapshot = self._browser_service.get_auth_cookie_snapshot()
-        session_id = snapshot.get("PHPSESSID", "").strip()
-        if session_id:
-            self._session.save_session(session_id)
 
     def _main_loop(self) -> None:
         while self._scanner_view.is_running():
