@@ -22,6 +22,10 @@ class QRParseResult:
 
 
 class ApiService:
+    """브라우저 응답 파싱 전용 서비스.
+
+    인증 상태/세션 쿠키는 보관하지 않는다.
+    """
     WITCHFORM_BASE = "https://witchform.com"
     QR_PREFIX = "https://witchform.com/qrcode_link.php"
 

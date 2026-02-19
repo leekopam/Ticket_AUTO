@@ -1,3 +1,5 @@
 ﻿.runtime/
 __pycache__/
 *.pyc
+data.xlsx
+session.txt
