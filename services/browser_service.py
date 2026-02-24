@@ -34,6 +34,13 @@ class BrowserResolveResult:
     error_message: str = ""
 
 
+@dataclass
+class ReceiptClickResult:
+    success: bool
+    error_code: str = ""
+    error_message: str = ""
+
+
 class BrowserService:
     def __init__(
         self,
@@ -84,8 +91,8 @@ class BrowserService:
     def open_page(self, url: str) -> None:
         self._task_queue.put({"action": "open_page", "url": url})
 
-    def click_receipt_button(self) -> None:
-        self._task_queue.put({"action": "click_receipt"})
+    def click_receipt_button(self) -> ReceiptClickResult:
+        return self._invoke_rpc({"action": "click_receipt"}, timeout_sec=30)
 
     def ensure_authenticated(self, timeout_sec: int = 180) -> bool:
         timeout_sec = max(1, timeout_sec)
@@ -101,6 +108,10 @@ class BrowserService:
 
     def clear_auth_state_for_domain(self) -> bool:
         return bool(self._invoke_rpc({"action": "clear_auth_state_for_domain"}, timeout_sec=20))
+
+    def request_relogin(self) -> bool:
+        """Force authentication reset and keep login page open for user interaction."""
+        return bool(self._invoke_rpc({"action": "request_relogin"}, timeout_sec=20))
 
     def resolve_qr_redirect(
         self,
@@ -199,8 +210,8 @@ class BrowserService:
                 finish(True, None)
                 return
             if action == "click_receipt":
-                self._handle_click_receipt()
-                finish(True, None)
+                result = self._handle_click_receipt()
+                finish(result, None)
                 return
             if action == "ensure_authenticated":
                 result = self._handle_ensure_authenticated(task.get("timeout_sec", 180))
@@ -208,6 +219,10 @@ class BrowserService:
                 return
             if action == "clear_auth_state_for_domain":
                 result = self._handle_clear_auth_state_for_domain()
+                finish(result, None)
+                return
+            if action == "request_relogin":
+                result = self._handle_request_relogin()
                 finish(result, None)
                 return
             if action == "resolve_qr_redirect":
@@ -238,35 +253,70 @@ class BrowserService:
         self._current_page.goto(url, timeout=15000)
         print(f"PAGE_OPEN {url}")
 
-    def _handle_click_receipt(self) -> None:
+    def _handle_click_receipt(self) -> ReceiptClickResult:
         if not self._current_page or self._current_page.is_closed():
-            print("수령 완료 버튼을 누를 활성 주문 페이지가 없습니다.")
+            message = "수령 완료 버튼을 누를 활성 주문 페이지가 없습니다."
+            print(message)
             self._invoke_receipt_complete_callback()
-            return
+            return ReceiptClickResult(
+                success=False,
+                error_code="NO_ACTIVE_PAGE",
+                error_message=message,
+            )
 
         try:
             # keep existing selectors to avoid UI regression
-            self._current_page.click("text=수령 완료 처리")
-            self._current_page.wait_for_timeout(500)
+            self._current_page.click("text=수령 완료 처리", timeout=5000)
+        except Exception as exc:
+            message = f"수령 완료 1차 버튼 클릭 실패: {exc}"
+            print(message)
+            self._invoke_receipt_complete_callback()
+            return ReceiptClickResult(
+                success=False,
+                error_code="PRIMARY_CLICK_FAIL",
+                error_message=message,
+            )
 
+        self._current_page.wait_for_timeout(500)
+
+        confirm_clicked = False
+        for selector in (
+            "button.modal-alert_statusUpdateBtn__RABK9",
+            "text=확인",
+            "text=수령 완료 처리",
+        ):
             try:
-                self._current_page.click(
-                    "button.modal-alert_statusUpdateBtn__RABK9",
-                    timeout=3000,
-                )
+                self._current_page.click(selector, timeout=3000)
+                confirm_clicked = True
+                break
             except Exception:
-                try:
-                    self._current_page.click("text=수령 완료 처리", timeout=1000)
-                except Exception:
-                    print("팝업 확인 버튼을 찾지 못했습니다.")
+                continue
 
-            self._current_page.wait_for_timeout(1500)
+        if not confirm_clicked:
+            message = "수령 완료 확인 팝업 버튼 클릭 실패"
+            print(message)
+            self._invoke_receipt_complete_callback()
+            return ReceiptClickResult(
+                success=False,
+                error_code="CONFIRM_CLICK_FAIL",
+                error_message=message,
+            )
+
+        try:
+            self._current_page.wait_for_timeout(1200)
             self._current_page.close()
             self._current_page = None
         except Exception as exc:
             print(f"Playwright 클릭 오류: {exc}")
+            self._invoke_receipt_complete_callback()
+            return ReceiptClickResult(
+                success=False,
+                error_code="CONFIRM_CLICK_FAIL",
+                error_message=f"수령 완료 처리 후 페이지 종료 실패: {exc}",
+            )
 
         self._invoke_receipt_complete_callback()
+        return ReceiptClickResult(success=True)
 
     def _handle_ensure_authenticated(self, timeout_sec: int) -> bool:
         timeout_sec = max(1, timeout_sec)
@@ -488,6 +538,14 @@ class BrowserService:
             except Exception as exc:
                 self._warn(f"AUTH_STATE_EXTRA_PAGE_CLOSE_FAILED: {exc}")
 
+        return True
+
+    def _handle_request_relogin(self) -> bool:
+        """Public runtime-safe relogin trigger."""
+        ok = self._handle_clear_auth_state_for_domain()
+        if not ok:
+            return False
+        self._ensure_login_page_open()
         return True
 
     def _close_auth_page_if_possible(self) -> None:

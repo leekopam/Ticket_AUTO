@@ -14,6 +14,7 @@ class Order:
     seat: str = ""
     goods: list[str] = field(default_factory=list)
     url: str = ""
+    received_at: str = ""
 
     @property
     def goods_display(self) -> str:
@@ -24,3 +25,8 @@ class Order:
     def is_valid(self) -> bool:
         """주문 데이터의 최소 유효성을 확인한다."""
         return bool(self.order_number and self.name)
+
+    @property
+    def is_received(self) -> bool:
+        """수령 완료 여부를 반환한다."""
+        return bool((self.received_at or "").strip())
