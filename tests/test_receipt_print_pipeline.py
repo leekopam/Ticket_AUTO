@@ -57,7 +57,8 @@ class ReceiptPrintPipelineTest(unittest.TestCase):
             settings = ReceiptSettings(template_path=str(layout_path), paper_width="80")
             rendered = render_order_receipt(_dummy_order(), settings)
 
-            self.assertEqual(rendered.image.width, 576)
+            # 기본 DPI 300 기준: round(576 * 300 / 203) = 851
+            self.assertEqual(rendered.image.width, 851)
             self.assertEqual(rendered.context["order_number"], "ORDER-001")
 
     def test_legacy_tpl_template_branch(self) -> None:
@@ -68,7 +69,8 @@ class ReceiptPrintPipelineTest(unittest.TestCase):
             settings = ReceiptSettings(template_path=str(tpl_path), paper_width="58")
             rendered = render_order_receipt(_dummy_order(), settings)
 
-            self.assertEqual(rendered.image.width, 384)
+            # 기본 DPI 300 기준: round(384 * 300 / 203) = 567
+            self.assertEqual(rendered.image.width, 567)
             self.assertEqual(rendered.context["order_number"], "ORDER-001")
 
 

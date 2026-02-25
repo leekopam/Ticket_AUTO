@@ -17,10 +17,12 @@ class RenderConfig:
     paper_width: str = "80"  # "58" or "80"
     margin: int = 16
     line_gap: int = 6
+    dpi: int = 203
 
 
-def _paper_width_px(paper_width: str) -> int:
-    return 384 if paper_width == "58" else 576
+def _paper_width_px(paper_width: str, dpi: int = 203) -> int:
+    from models.receipt_canvas_model import paper_width_to_px
+    return paper_width_to_px(paper_width, dpi=dpi)
 
 
 def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -86,7 +88,7 @@ class ReceiptRenderer:
 
     def __init__(self, config: RenderConfig):
         self._config = config
-        self._width = _paper_width_px(config.paper_width)
+        self._width = _paper_width_px(config.paper_width, dpi=config.dpi)
 
         if config.paper_width == "58":
             self._font_normal = _load_font(20)

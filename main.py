@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Callable
 
+from models.order_model import Order
 from models.receipt_settings_model import ReceiptSettings
 from services.api_service import ApiService
 from services.browser_service import BrowserResolveResult, BrowserService
@@ -48,6 +49,7 @@ class Application:
 
         self._scanner_view = ScannerView()
         self._order_view = OrderView()
+        self._order_view.set_print_request_callback(self._handle_manual_print)
 
         self._last_qr_url = ""
         self._last_qr_timestamp = 0.0
@@ -167,6 +169,18 @@ class Application:
         self._scanner_view.set_scanning_enabled(True)
         self._scanner_view.set_status_message(message)
         self._emit_status(self._state.name, message)
+
+    def _handle_manual_print(self, order: Order) -> None:
+        """구매자 정보 창에서 수동 영수증 출력 요청을 처리한다."""
+        try:
+            self._receipt_settings = self._settings_store.load()
+        except Exception:
+            pass
+        try:
+            print_order_receipt(order, self._receipt_settings)
+            self._emit_status("READY", "영수증 수동 출력 완료")
+        except Exception as exc:
+            self._emit_status("ERROR", f"영수증 수동 출력 실패: {exc}")
 
     def _wait_for_initial_login(self) -> bool:
         return self._wait_for_login(timeout_sec=0)

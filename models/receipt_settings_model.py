@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 
 PaperWidth = Literal["58", "80"]
+PrinterDpi = Literal[180, 203, 300]
+VALID_DPI: set[int] = {180, 203, 300}
 
 
 @dataclass
@@ -23,6 +25,7 @@ class ReceiptSettings:
     qr_payload_template: str = "{{order_number}}|{{url}}"
     margin_top: int = 0
     margin_bottom: int = 0
+    printer_dpi: int = 300
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +39,7 @@ class ReceiptSettings:
             "qr_payload_template": self.qr_payload_template,
             "margin_top": self.margin_top,
             "margin_bottom": self.margin_bottom,
+            "printer_dpi": self.printer_dpi,
         }
 
     @classmethod
@@ -43,6 +47,9 @@ class ReceiptSettings:
         data = payload or {}
         paper_width_raw = str(data.get("paper_width", "80")).strip()
         paper_width: PaperWidth = "58" if paper_width_raw == "58" else "80"
+
+        dpi_raw = int(data.get("printer_dpi", 300))
+        printer_dpi = dpi_raw if dpi_raw in VALID_DPI else 203
 
         return cls(
             printer_name=str(data.get("printer_name", "")).strip(),
@@ -57,4 +64,5 @@ class ReceiptSettings:
             or "{{order_number}}|{{url}}",
             margin_top=max(0, int(data.get("margin_top", 0))),
             margin_bottom=max(0, int(data.get("margin_bottom", 0))),
+            printer_dpi=printer_dpi,
         )

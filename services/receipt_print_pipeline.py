@@ -40,11 +40,12 @@ def render_order_receipt(order: Order, settings: ReceiptSettings) -> RenderedRec
             paper_width=settings.paper_width,
             margin_top=settings.margin_top,
             margin_bottom=settings.margin_bottom,
+            dpi=settings.printer_dpi,
         )
         return RenderedReceipt(image=image, context=context, template=layout)
 
     template = load_template(settings.template_path)
-    renderer = ReceiptRenderer(RenderConfig(paper_width=settings.paper_width))
+    renderer = ReceiptRenderer(RenderConfig(paper_width=settings.paper_width, dpi=settings.printer_dpi))
     image = renderer.render(template, context)
     return RenderedReceipt(image=image, context=context, template=template)
 
@@ -62,17 +63,16 @@ def print_order_receipt(
         job_name=f"Receipt_{order.order_number or 'Order'}",
     )
 
-
+# For testing purposes: render and print a dummy receipt with hardcoded data.
 def print_test_receipt(
     settings: ReceiptSettings,
     printer_service: PrinterBackend | None = None,
 ) -> None:
     dummy_order = Order(
-        order_number="TEST-ORDER-001",
-        name="테스트구매자",
-        phone="010-1234-5678",
-        seat="토요일 A-12\n일요일 B-07",
-        goods=["테스트 굿즈 x2", "스페셜 카드 x1"],
-        url="https://example.com/order/test",
+        order_number="TEST-ORDER-01",
+        name="하츠네 미쿠",
+        phone="010-2007-0831",
+        seat="토요일 A-466\n일요일 B-467",
+        goods=["야채 주스 x200", "대파 x1"],
     )
     print_order_receipt(dummy_order, settings, printer_service=printer_service)

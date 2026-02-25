@@ -9,6 +9,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import flet as ft
 
+from services.excel_service import ExcelService
 from services.ticket_runtime_manager import TicketRuntimeManager
 from views.settings_flet_view import build_receipt_settings_panel
 
@@ -34,7 +35,9 @@ def resolve_tab_content(
     receipt_panel: ft.Control,
 ) -> ft.Control:
     """Return panel for selected tab."""
-    return ticket_panel if tab_key == "ticket" else receipt_panel
+    if tab_key == "ticket":
+        return ticket_panel
+    return receipt_panel
 
 
 class DashboardFletView:
@@ -50,14 +53,31 @@ class DashboardFletView:
         page.title = "Ticket_AUTO Control Center"
         page.window_width = 1440
         page.window_height = 920
+        page.window_resizable = False
         page.padding = 0
         page.bgcolor = "#EDEDED"
         page.theme_mode = ft.ThemeMode.LIGHT
         page.theme = ft.Theme(font_family="Segoe UI")
 
+        # 캔버스 미리보기용 폰트 등록
+        page.fonts = {
+            "malgun":      r"C:\Windows\Fonts\malgun.ttf",
+            "gulim":       r"C:\Windows\Fonts\gulim.ttc",
+            "batang":      r"C:\Windows\Fonts\batang.ttc",
+            "nanumgothic": r"C:\Windows\Fonts\NanumGothic.ttf",
+            "arial":       r"C:\Windows\Fonts\arial.ttf",
+            "times":       r"C:\Windows\Fonts\times.ttf",
+            "calibri":     r"C:\Windows\Fonts\calibri.ttf",
+            "comic":       r"C:\Windows\Fonts\comic.ttf",
+            "georgia":     r"C:\Windows\Fonts\georgia.ttf",
+            "verdana":     r"C:\Windows\Fonts\verdana.ttf",
+            "consolas":    r"C:\Windows\Fonts\consola.ttf",
+            "impact":      r"C:\Windows\Fonts\impact.ttf",
+        }
+
         current_tab = {"value": "ticket"}
         current_state = {"value": "IDLE"}
-        logs: list[str] = []
+        excel_service = ExcelService()
 
         state_text = ft.Text("IDLE", size=18, weight=ft.FontWeight.BOLD, color="#1F1F1F")
         state_badge = ft.Container(
@@ -68,22 +88,46 @@ class DashboardFletView:
         )
         last_event_text = ft.Text("마지막 이벤트: -", color="#505050")
         runtime_hint_text = ft.Text("런타임 대기 중", color="#606060", size=13)
-        log_list = ft.ListView(expand=True, spacing=4, auto_scroll=False)
 
-        btn_start = ft.ElevatedButton(
+        # 주문 검색 UI
+        search_field = ft.TextField(
+            hint_text="주문번호, 이름, 연락처로 검색",
+            expand=True,
+            border_radius=8,
+            height=42,
+        )
+        filter_dropdown = ft.Dropdown(
+            value="전체",
+            options=[
+                ft.dropdown.Option("전체"),
+                ft.dropdown.Option("수령완료"),
+                ft.dropdown.Option("미수령"),
+            ],
+            width=120,
+            height=42,
+            border_radius=8,
+            content_padding=ft.padding.symmetric(horizontal=10, vertical=0),
+        )
+        filter_count_text = ft.Text("", size=13, color="#666666")
+        search_result_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("주문번호", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("이름", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("연락처", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("좌석번호", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("상품목록", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("처리완료", weight=ft.FontWeight.BOLD)),
+            ],
+            rows=[],
+            column_spacing=40,
+            expand=True,
+        )
+
+        btn_start_stop = ft.ElevatedButton(
             "티켓 확인 시작",
             icon=ICONS.PLAY_ARROW_ROUNDED,
             style=ft.ButtonStyle(
                 bgcolor="#2A7FFF",
-                color="#FFFFFF",
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-        )
-        btn_stop = ft.ElevatedButton(
-            "중지",
-            icon=ICONS.STOP_CIRCLE_ROUNDED,
-            style=ft.ButtonStyle(
-                bgcolor="#DD4C4C",
                 color="#FFFFFF",
                 shape=ft.RoundedRectangleBorder(radius=8),
             ),
@@ -97,18 +141,52 @@ class DashboardFletView:
         btn_receipt_tab = ft.TextButton("영수증 양식 설정", icon=ICONS.RECEIPT_LONG_ROUNDED)
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
 
-        def append_log(message: str) -> None:
-            logs.append(message)
-            if len(logs) > 50:
-                del logs[:-50]
-            log_list.controls = [
-                ft.Text(item, size=13, color="#2E2E2E", selectable=True) for item in logs
+        def do_search(_=None) -> None:
+            """검색어 + 필터 조건으로 주문 조회 후 테이블 갱신."""
+            keyword = search_field.value or ""
+            filter_value = filter_dropdown.value or "전체"
+            try:
+                orders = excel_service.search_orders(keyword)
+            except Exception:
+                orders = []
+            # 인원수 카운트 산출
+            total = len(orders)
+            received = sum(1 for o in orders if o.is_received)
+            unreceived = total - received
+            if filter_value == "전체":
+                filter_count_text.value = f"{total}명"
+            elif filter_value == "수령완료":
+                filter_count_text.value = f"{received} / {total}명"
+            else:
+                filter_count_text.value = f"{unreceived} / {total - received}명"
+            # 수령 상태 필터 적용
+            if filter_value == "수령완료":
+                orders = [o for o in orders if o.is_received]
+            elif filter_value == "미수령":
+                orders = [o for o in orders if not o.is_received]
+            search_result_table.rows = [
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(o.order_number, size=13)),
+                    ft.DataCell(ft.Text(o.name, size=13)),
+                    ft.DataCell(ft.Text(o.phone, size=13)),
+                    ft.DataCell(ft.Text(o.seat, size=13)),
+                    ft.DataCell(ft.Text("\n".join(o.goods), size=13)),
+                    ft.DataCell(ft.Text(o.received_at if o.received_at else "-", size=13)),
+                ])
+                for o in orders
             ]
+            page.update()
+
+        search_field.on_submit = do_search
+        filter_dropdown.on_change = do_search
 
         def set_tab(tab_key: str) -> None:
             current_tab["value"] = tab_key
             content_host.content = resolve_tab_content(tab_key, ticket_panel, receipt_settings_panel)
             apply_sidebar_styles()
+            if tab_key == "ticket":
+                do_search()
+                return
             page.update()
 
         def state_to_color(state: str) -> str:
@@ -126,9 +204,26 @@ class DashboardFletView:
 
         def apply_button_state(state: str) -> None:
             start_enabled, stop_enabled, relogin_enabled = compute_button_enabled(state)
-            btn_start.disabled = not start_enabled
-            btn_stop.disabled = not stop_enabled
             btn_relogin.disabled = not relogin_enabled
+            # 실행 중 → 중지 버튼 / 그 외 → 시작 버튼으로 토글
+            if stop_enabled:
+                btn_start_stop.text = "중지"
+                btn_start_stop.icon = ICONS.STOP_CIRCLE_ROUNDED
+                btn_start_stop.style = ft.ButtonStyle(
+                    bgcolor="#DD4C4C", color="#FFFFFF",
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                )
+                btn_start_stop.disabled = False
+                btn_start_stop.on_click = on_stop
+            else:
+                btn_start_stop.text = "티켓 확인 시작"
+                btn_start_stop.icon = ICONS.PLAY_ARROW_ROUNDED
+                btn_start_stop.style = ft.ButtonStyle(
+                    bgcolor="#2A7FFF", color="#FFFFFF",
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                )
+                btn_start_stop.disabled = not start_enabled
+                btn_start_stop.on_click = on_start
 
         def apply_sidebar_styles() -> None:
             active_bg = "#DDE8FF"
@@ -152,7 +247,6 @@ class DashboardFletView:
             state_badge.bgcolor = state_to_color(state)
             runtime_hint_text.value = message
             last_event_text.value = f"마지막 이벤트: {timestamp}"
-            append_log(f"[{timestamp}] [{state}] {message}")
             apply_button_state(state)
             page.update()
 
@@ -166,22 +260,15 @@ class DashboardFletView:
                 update_ui()
 
         def on_start(_: ft.ControlEvent) -> None:
-            started = self._runtime_manager.start()
-            if not started:
-                append_log("[로컬] 이미 실행 중입니다.")
-                page.update()
+            self._runtime_manager.start()
 
         def on_stop(_: ft.ControlEvent) -> None:
             self._runtime_manager.stop()
 
         def on_relogin(_: ft.ControlEvent) -> None:
-            ok = self._runtime_manager.relogin()
-            if not ok:
-                append_log("[로컬] 실행 중이 아니라 재로그인할 수 없습니다.")
-                page.update()
+            self._runtime_manager.relogin()
 
-        btn_start.on_click = on_start
-        btn_stop.on_click = on_stop
+        btn_start_stop.on_click = on_start
         btn_relogin.on_click = on_relogin
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
@@ -197,28 +284,55 @@ class DashboardFletView:
                     ),
                     ft.Row(controls=[state_badge, last_event_text], spacing=14, wrap=True),
                     runtime_hint_text,
-                    ft.Row(controls=[btn_start, btn_stop, btn_relogin], spacing=10),
+                    ft.Row(controls=[btn_start_stop, btn_relogin], spacing=10),
                     ft.Container(
                         content=ft.Column(
                             controls=[
-                                ft.Text("최근 로그 (최대 50개)", weight=ft.FontWeight.BOLD, size=16),
+                                ft.Text("주문 검색", weight=ft.FontWeight.BOLD, size=16),
+                                ft.Row(
+                                    controls=[
+                                        search_field,
+                                        filter_dropdown,
+                                        filter_count_text,
+                                        ft.ElevatedButton(
+                                            "검색",
+                                            icon=ICONS.SEARCH_ROUNDED,
+                                            on_click=do_search,
+                                            style=ft.ButtonStyle(
+                                                bgcolor="#2A7FFF",
+                                                color="#FFFFFF",
+                                                shape=ft.RoundedRectangleBorder(radius=8),
+                                            ),
+                                        ),
+                                    ],
+                                    spacing=8,
+                                ),
                                 ft.Container(
-                                    content=log_list,
+                                    content=ft.Column(
+                                        controls=[search_result_table],
+                                        scroll=ft.ScrollMode.AUTO,
+                                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                    ),
                                     bgcolor="#FFFFFF",
                                     border=ft.border.all(1, "#D2D2D2"),
                                     border_radius=8,
                                     padding=ft.padding.all(10),
-                                    height=520,
+                                    expand=True,
                                 ),
                             ],
                             spacing=8,
+                            expand=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                         margin=ft.margin.only(top=14),
+                        expand=True,
                     ),
                 ],
                 spacing=8,
+                expand=True,
             ),
             padding=ft.padding.all(8),
+            expand=True,
         )
 
         receipt_settings_panel = build_receipt_settings_panel(page)

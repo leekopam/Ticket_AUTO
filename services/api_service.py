@@ -108,11 +108,3 @@ class ApiService:
             error_code="HTTP_STATUS_INVALID",
             error_message=f"예상하지 못한 응답 코드입니다: {status_code}",
         )
-
-    def parse_qr_url(self, url: str) -> QRParseResult:
-        """하위 호환용 메서드. 사용하지 않는다."""
-        return QRParseResult(
-            success=False,
-            error_code="LEGACY_METHOD_DISABLED",
-            error_message="parse_qr_redirect를 사용하세요.",
-        )

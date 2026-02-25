@@ -27,6 +27,7 @@ from services.receipt_canvas_editor_state import (
     remove_element_by_id,
     update_element_in_list,
 )
+from services.qr_generator_service import QrConfig, QrType, build_payload, calculate_qr_native_size
 from services.receipt_canvas_store import ReceiptCanvasStore
 from services.receipt_print_pipeline import print_test_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
@@ -34,6 +35,22 @@ from services.windows_printer_service import WindowsPrinterService
 
 
 ICONS = getattr(ft, "Icons", ft.icons)
+
+# 폰트 선택 옵션: (key, 표시명)
+FONT_OPTIONS: list[tuple[str, str]] = [
+    ("malgun", "맑은 고딕"),
+    ("gulim", "굴림"),
+    ("batang", "바탕"),
+    ("nanumgothic", "나눔고딕"),
+    ("arial", "Arial"),
+    ("times", "Times New Roman"),
+    ("calibri", "Calibri"),
+    ("comic", "Comic Sans"),
+    ("georgia", "Georgia"),
+    ("verdana", "Verdana"),
+    ("consolas", "Consolas"),
+    ("impact", "Impact"),
+]
 FIELD_BINDINGS = [
     ("order_number", "주문번호"),
     ("buyer_name", "주문자명"),
@@ -154,10 +171,6 @@ def build_receipt_settings_panel(
         "canvas_frame_body_ctrl": None,
         "snap_guides": [],
         "inline_edit_id": None,
-        "selected_ids": set(),          # 다중 선택 ID 집합
-        "multi_drag_origins": {},       # {id: (x, y)} 다중 드래그 원본 좌표
-        "ctrl_pressed": False,          # Ctrl 키 눌림 상태
-        "element_detectors": {},        # {id: detector} 다중 드래그 시 위치 갱신용
         "insertion_indicator": None,    # ft.Container - 삽입 위치 표시선
         "insertion_target_y": None,     # int | None - 드롭 시 삽입할 Y 좌표
         "last_element_tap_time": 0.0,  # 요소 탭 시각 (배경 클릭 전파 차단용)
@@ -174,6 +187,16 @@ def build_receipt_settings_panel(
         width=120,
         value=settings.paper_width,
         options=[ft.dropdown.Option("58", "58mm"), ft.dropdown.Option("80", "80mm")],
+    )
+    dpi_dropdown = ft.Dropdown(
+        label="DPI",
+        width=120,
+        value=str(settings.printer_dpi),
+        options=[
+            ft.dropdown.Option("180", "180 DPI"),
+            ft.dropdown.Option("203", "203 DPI"),
+            ft.dropdown.Option("300", "300 DPI"),
+        ],
     )
     margin_top_field = ft.TextField(
         label="상단 여백(px)",
@@ -197,7 +220,6 @@ def build_receipt_settings_panel(
 
     btn_add_text = ft.ElevatedButton("텍스트 추가", icon=ICONS.TEXT_FIELDS_ROUNDED)
     btn_add_image = ft.ElevatedButton("이미지 추가", icon=ICONS.IMAGE_ROUNDED)
-    btn_add_qr = ft.ElevatedButton("QR 추가", icon=ICONS.QR_CODE_2_ROUNDED)
     btn_add_divider = ft.ElevatedButton("구분선 추가", icon=ICONS.HORIZONTAL_RULE_ROUNDED)
     btn_delete = ft.OutlinedButton("삭제", icon=ICONS.DELETE_OUTLINE_ROUNDED)
     btn_save = ft.ElevatedButton("저장", icon=ICONS.SAVE_ROUNDED)
@@ -229,30 +251,6 @@ def build_receipt_settings_panel(
         if state["selected_id"] != value:
             state["inline_edit_id"] = None
         state["selected_id"] = value
-        # 단일 선택 시 selected_ids 동기화
-        state["selected_ids"] = {value} if value else set()
-
-    def _selected_ids() -> set[str]:
-        return state["selected_ids"]  # type: ignore[return-value]
-
-    def _is_multi_selected() -> bool:
-        return len(state["selected_ids"]) >= 2  # type: ignore[arg-type]
-
-    def _toggle_selection(element_id: str) -> None:
-        """Ctrl+클릭 시 선택 토글"""
-        ids: set[str] = state["selected_ids"]  # type: ignore[assignment]
-        if element_id in ids:
-            ids.discard(element_id)
-            # primary 선택도 갱신
-            state["selected_id"] = next(iter(ids), None) if ids else None
-        else:
-            ids.add(element_id)
-            state["selected_id"] = element_id
-        state["inline_edit_id"] = None
-
-    def _clear_multi_selection() -> None:
-        state["selected_ids"] = set()
-        state["element_detectors"] = {}
 
     def _active_binding_target() -> str | None:
         return state["active_binding_target"]  # type: ignore[return-value]
@@ -333,7 +331,6 @@ def build_receipt_settings_panel(
             if time.monotonic() - float(state["last_element_tap_time"]) < 0.05:
                 return
             _set_selected_id(None)
-            _clear_multi_selection()
             _set_active_binding_target(None)
             _refresh_all()
 
@@ -367,11 +364,13 @@ def build_receipt_settings_panel(
             controls=[canvas_frame, scroll_gutter],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.START,
+            alignment=ft.MainAxisAlignment.CENTER,
         )
         scrollable_canvas = ft.Column(
             controls=[canvas_with_gutter],
             height=viewport_h,
             scroll=ft.ScrollMode.AUTO if needs_scroll else None,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
         canvas_meta_text = ft.Text(color="#666666", size=12)
 
@@ -529,9 +528,9 @@ def build_receipt_settings_panel(
                     elements[i] = replace(cur, y=new_y)
                     changed = True
             else:
-                # 위에 X겹침 요소가 없으면 상단 여백 아래로 당김
+                # 위에 X겹침 요소가 없으면 상단 여백 위치로 당김
                 mt = _margin_top_px()
-                if mt > 0 and cur.y > mt + gap:
+                if cur.y > mt:
                     new_y = _clamp_y_to_reserved_margins(mt, cur.h, exclude_ids={cur.id})
                     elements[i] = replace(cur, y=new_y)
                     changed = True
@@ -566,24 +565,16 @@ def build_receipt_settings_panel(
         _set_selected_id(element.id)
 
     def _remove_selected_element() -> None:
-        ids = _selected_ids()
-        if not ids:
-            selected = _selected_id()
-            if not selected:
-                _show_status("삭제할 요소를 먼저 선택하세요.")
-                return
-            ids = {selected}
-        # 다중/단일 삭제 통합
-        elements = _doc().elements
-        for eid in ids:
-            elements = remove_element_by_id(elements, eid)
+        selected = _selected_id()
+        if not selected:
+            _show_status("삭제할 요소를 먼저 선택하세요.")
+            return
+        elements = remove_element_by_id(_doc().elements, selected)
         _set_doc(replace(_doc(), elements=elements))
         _set_selected_id(None)
-        _clear_multi_selection()
         _set_active_binding_target(None)
         _refresh_all()
-        count = len(ids)
-        _show_status(f"{count}개 요소를 삭제했습니다." if count > 1 else "선택 요소를 삭제했습니다.")
+        _show_status("선택 요소를 삭제했습니다.")
 
     def _apply_align_to_selected(align: str) -> None:
         element = _find_selected_element()
@@ -654,7 +645,7 @@ def build_receipt_settings_panel(
             w=140,
             h=qr_h,
             align="center",
-            data_template="{{order_number}}|{{url}}",
+            data_template="",
             box_size=4,
         )
 
@@ -728,13 +719,21 @@ def build_receipt_settings_panel(
         _add_element(new_el)
         _set_active_binding_target("text_template")
         _refresh_all()
+    def _current_dpi() -> int:
+        """현재 선택된 DPI 값"""
+        try:
+            val = int(dpi_dropdown.value or "203")
+            return val if val in {180, 203, 300} else 203
+        except (ValueError, TypeError):
+            return 203
+
     def _set_paper_width(new_width: str) -> None:
         if new_width not in {"58", "80"}:
             return
 
         doc = _doc()
         old_real_width = max(1, int(doc.meta.canvas_width_px))
-        new_real_width = paper_width_to_px(new_width)
+        new_real_width = paper_width_to_px(new_width)  # 항상 203 DPI 기준
         if old_real_width != new_real_width:
             ratio = new_real_width / old_real_width
             resized: list[ReceiptCanvasElement] = []
@@ -779,7 +778,7 @@ def build_receipt_settings_panel(
                 meta=replace(
                     current_doc.meta,
                     paper_width=paper_width,
-                    canvas_width_px=paper_width_to_px(paper_width),
+                    canvas_width_px=paper_width_to_px(paper_width),  # 항상 203 DPI 기준
                 ),
             )
             _set_doc(current_doc)
@@ -797,6 +796,7 @@ def build_receipt_settings_panel(
                 qr_payload_template=settings.qr_payload_template,
                 margin_top=max(0, _coerce_int(margin_top_field.value, 0)),
                 margin_bottom=max(0, _coerce_int(margin_bottom_field.value, 0)),
+                printer_dpi=_current_dpi(),
             )
             settings_store.save(settings_obj)
             if show_message:
@@ -808,19 +808,6 @@ def build_receipt_settings_panel(
             return None
 
     def _refresh_property_panel() -> None:
-        # 다중 선택 시 요약 표시
-        if _is_multi_selected():
-            count = len(_selected_ids())
-            property_panel.content = ft.Column(
-                controls=[
-                    ft.Text("속성", size=20, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"{count}개 요소 선택됨", size=14, color="#333333"),
-                    ft.Text("개별 속성 편집은 단일 선택 시 가능합니다.", size=12, color="#666666"),
-                ],
-                spacing=8,
-            )
-            return
-
         selected = _find_selected_element()
         if not selected:
             property_panel.content = ft.Column(
@@ -855,12 +842,11 @@ def build_receipt_settings_panel(
                 current,
                 text_template=text_template_field.value or "",
                 font_size=_coerce_int(font_size_field.value, current.font_size, minimum=8),
-                bold=bool(bold_switch.value),
+                bold=bool(bold_btn.selected),
+                font_family=font_family_dropdown.value or "malgun",
             )
             _upsert_element(updated)
-            _auto_fit_to_content(updated.id)
             _refresh_canvas()
-            _refresh_property_panel()
             page.update()
 
         def commit_image(_: ft.ControlEvent | None = None) -> None:
@@ -880,13 +866,23 @@ def build_receipt_settings_panel(
             current = _find_selected_element()
             if not current or current.type != "qr":
                 return
+            new_box_size = _coerce_int(box_size_field.value, current.box_size, minimum=1)
+            data = qr_data_field.value or ""
+            # box_size 변경 시 w/h를 QR 네이티브 크기로 자동 업데이트
+            new_w, new_h = current.w, current.h
+            if new_box_size != current.box_size and data.strip():
+                native = calculate_qr_native_size(data.strip(), new_box_size)
+                new_w = native
+                new_h = native
             updated = replace(
                 current,
-                data_template=qr_data_field.value or "",
-                box_size=_coerce_int(box_size_field.value, current.box_size, minimum=1),
+                data_template=data,
+                box_size=new_box_size,
+                w=new_w,
+                h=new_h,
             )
             _upsert_element(updated)
-            _refresh_canvas()
+            _refresh_all()
             page.update()
 
         def pick_image_for_selected(_: ft.ControlEvent) -> None:
@@ -921,17 +917,46 @@ def build_receipt_settings_panel(
                 on_change=commit_text,
                 on_focus=lambda _e: (_set_active_binding_target("text_template"), _set_canvas_focus(False)),
             )
+            font_family_dropdown = ft.Dropdown(
+                label="폰트",
+                width=180,
+                value=selected.font_family,
+                options=[ft.dropdown.Option(key, label) for key, label in FONT_OPTIONS],
+                on_change=commit_text,
+                dense=True,
+            )
             font_size_field = ft.TextField(
-                label="font_size",
+                label="크기",
                 value=str(selected.font_size),
-                width=120,
+                width=65,
                 on_blur=commit_text,
                 on_focus=_on_field_focus,
+                dense=True,
             )
-            bold_switch = ft.Switch(label="bold", value=selected.bold, on_change=commit_text)
+            bold_btn = ft.IconButton(
+                content=ft.Text("B", size=14, weight=ft.FontWeight.BOLD),
+                selected=selected.bold,
+                style=ft.ButtonStyle(
+                    bgcolor={
+                        ft.ControlState.SELECTED: "#DDDDDD",
+                        ft.ControlState.DEFAULT: "transparent",
+                    },
+                    shape=ft.RoundedRectangleBorder(radius=4),
+                    side={
+                        ft.ControlState.SELECTED: ft.BorderSide(1.5, "#333333"),
+                        ft.ControlState.DEFAULT: ft.BorderSide(1, "#AAAAAA"),
+                    },
+                ),
+                width=36,
+                height=36,
+                on_click=lambda _e: (
+                    setattr(bold_btn, "selected", not bold_btn.selected),
+                    commit_text(),
+                ),
+            )
             controls.extend([
                 text_template_field,
-                ft.Row([font_size_field, bold_switch, align_left_btn, align_center_btn, align_right_btn], spacing=8),
+                ft.Row([font_family_dropdown, font_size_field, bold_btn, align_left_btn, align_center_btn, align_right_btn], spacing=4),
             ])
         elif selected.type == "image":
             image_path_field = ft.TextField(
@@ -971,7 +996,7 @@ def build_receipt_settings_panel(
                 on_focus=lambda _e: (_set_active_binding_target("data_template"), _set_canvas_focus(False)),
             )
             box_size_field = ft.TextField(
-                label="box_size",
+                label="QR 크기",
                 value=str(selected.box_size),
                 width=120,
                 on_blur=commit_qr,
@@ -979,6 +1004,14 @@ def build_receipt_settings_panel(
             )
             controls.extend([qr_data_field, box_size_field])
         elif selected.type == "divider":
+            # 연결 필드 옵션 (visibility_tag용)
+            _visibility_tag_options = [
+                ft.dropdown.Option("", "(없음)"),
+            ] + [
+                ft.dropdown.Option(key, f"{key}({label})")
+                for key, label in FIELD_BINDINGS
+            ]
+
             def commit_divider(_: ft.ControlEvent | None = None) -> None:
                 current = _find_selected_element()
                 if not current or current.type != "divider":
@@ -989,7 +1022,9 @@ def build_receipt_settings_panel(
                     line_thickness=_coerce_int(line_thickness_field.value, current.line_thickness, minimum=1),
                     text_template=divider_text_field.value or "",
                     font_size=_coerce_int(div_font_size_field.value, current.font_size, minimum=8),
-                    bold=bool(div_bold_switch.value),
+                    bold=bool(div_bold_btn.selected),
+                    font_family=div_font_family_dropdown.value or "malgun",
+                    visibility_tag=visibility_tag_dropdown.value or "",
                 )
                 _upsert_element(updated)
                 _refresh_canvas()
@@ -1003,6 +1038,7 @@ def build_receipt_settings_panel(
                     ft.dropdown.Option("solid", "실선"),
                     ft.dropdown.Option("dashed", "파선"),
                     ft.dropdown.Option("dotted", "점선"),
+                    ft.dropdown.Option("none", "선 없음"),
                 ],
                 on_change=commit_divider,
             )
@@ -1021,18 +1057,55 @@ def build_receipt_settings_panel(
                 on_change=commit_divider,
                 on_focus=_on_field_focus,
             )
+            div_font_family_dropdown = ft.Dropdown(
+                label="폰트",
+                width=180,
+                value=selected.font_family,
+                options=[ft.dropdown.Option(key, label) for key, label in FONT_OPTIONS],
+                on_change=commit_divider,
+                dense=True,
+            )
             div_font_size_field = ft.TextField(
-                label="font_size",
+                label="크기",
                 value=str(selected.font_size),
-                width=120,
+                width=65,
                 on_blur=commit_divider,
                 on_focus=_on_field_focus,
+                dense=True,
             )
-            div_bold_switch = ft.Switch(label="bold", value=selected.bold, on_change=commit_divider)
+            div_bold_btn = ft.IconButton(
+                content=ft.Text("B", size=14, weight=ft.FontWeight.BOLD),
+                selected=selected.bold,
+                style=ft.ButtonStyle(
+                    bgcolor={
+                        ft.ControlState.SELECTED: "#DDDDDD",
+                        ft.ControlState.DEFAULT: "transparent",
+                    },
+                    shape=ft.RoundedRectangleBorder(radius=4),
+                    side={
+                        ft.ControlState.SELECTED: ft.BorderSide(1.5, "#333333"),
+                        ft.ControlState.DEFAULT: ft.BorderSide(1, "#AAAAAA"),
+                    },
+                ),
+                width=36,
+                height=36,
+                on_click=lambda _e: (
+                    setattr(div_bold_btn, "selected", not div_bold_btn.selected),
+                    commit_divider(),
+                ),
+            )
+            visibility_tag_dropdown = ft.Dropdown(
+                label="연결 필드",
+                width=200,
+                value=selected.visibility_tag,
+                options=_visibility_tag_options,
+                on_change=commit_divider,
+            )
             controls.extend([
                 ft.Row([line_style_dropdown, line_thickness_field], spacing=10),
                 divider_text_field,
-                ft.Row([div_font_size_field, div_bold_switch], spacing=10),
+                ft.Row([div_font_family_dropdown, div_font_size_field, div_bold_btn], spacing=4),
+                visibility_tag_dropdown,
             ])
 
         property_panel.content = ft.Column(controls=controls, spacing=8, scroll=ft.ScrollMode.AUTO)
@@ -1329,7 +1402,7 @@ def build_receipt_settings_panel(
         preview_element_w = max(8, real_to_preview(element.w, real_width=real_w, preview_width=preview_w))
         preview_element_h = max(8, real_to_preview(element.h, real_width=real_w, preview_width=preview_w))
 
-        is_selected = element.id == _selected_id() or element.id in _selected_ids()
+        is_selected = element.id == _selected_id()
         border_color = "#FF4B4B" if is_selected else "#A5A5A5"
         bg_color = "#FFF7E0" if is_selected else "#FFFFFF"
 
@@ -1354,6 +1427,7 @@ def build_receipt_settings_panel(
                     min_lines=1,
                     max_lines=5,
                     text_size=max(10, int(element.font_size * _preview_scale() * 0.9)),
+                    text_style=ft.TextStyle(font_family=element.font_family),
                     text_align=_align_to_text_align(element.align),
                     border_color="#4A90D9",
                     focused_border_color="#4A90D9",
@@ -1378,6 +1452,7 @@ def build_receipt_settings_panel(
                 text_widget = ft.Text(
                     text_preview,
                     size=max(10, int(element.font_size * _preview_scale() * 0.9)),
+                    font_family=element.font_family,
                     weight=ft.FontWeight.BOLD if element.bold else ft.FontWeight.NORMAL,
                     text_align=_align_to_text_align(element.align),
                     max_lines=5,
@@ -1409,6 +1484,7 @@ def build_receipt_settings_panel(
                 div_inline_field = ft.TextField(
                     value=element.text_template,
                     text_size=max(9, int(12 * _preview_scale())),
+                    text_style=ft.TextStyle(font_family=element.font_family),
                     text_align=ft.TextAlign.CENTER,
                     border_color="#4A90D9",
                     content_padding=ft.padding.all(2),
@@ -1434,6 +1510,9 @@ def build_receipt_settings_panel(
 
                 def _make_line_ctrl(w: float) -> ft.Control:
                     """선 스타일에 따른 프리뷰 컨트롤 생성"""
+                    if style == "none":
+                        # 선 없음: 투명 여백만 차지
+                        return ft.Container(width=w, height=line_h)
                     if style == "dashed":
                         segs: list[ft.Control] = []
                         cx = 0.0
@@ -1464,6 +1543,7 @@ def build_receipt_settings_panel(
                                 content=ft.Text(
                                     div_text,
                                     size=max(9, int(element.font_size * _preview_scale() * 0.9)),
+                                    font_family=element.font_family,
                                     weight=ft.FontWeight.BOLD if element.bold else ft.FontWeight.NORMAL,
                                     color="#333333",
                                     text_align=ft.TextAlign.CENTER,
@@ -1537,28 +1617,21 @@ def build_receipt_settings_panel(
             content=body,
         )
 
-        # 선택된 요소의 참조 저장 (리사이즈/다중 드래그 시 시각 갱신용)
+        # 선택된 요소의 참조 저장 (리사이즈 시 시각 갱신용)
         if is_selected:
             state["selected_detector"] = detector
             state["selected_body"] = body
-            state["element_detectors"][element.id] = detector
 
         def on_tap(_: ft.ControlEvent) -> None:
             state["last_element_tap_time"] = time.monotonic()
             _set_canvas_focus(True)
-            if state["ctrl_pressed"]:
-                # Ctrl+클릭: 다중 선택 토글
-                _toggle_selection(element.id)
-                _refresh_all()
-                return
             already_selected = _selected_id() == element.id
             _set_selected_id(element.id)
             if element.type == "qr":
                 _set_active_binding_target("data_template")
             else:
                 _set_active_binding_target("text_template")
-            # 다중 선택 상태가 아닌 단일 선택일 때만 인라인 편집 진입
-            if not _is_multi_selected() and already_selected and element.type in ("text", "divider") and state["inline_edit_id"] != element.id:
+            if already_selected and element.type in ("text", "divider") and state["inline_edit_id"] != element.id:
                 state["inline_edit_id"] = element.id
             _refresh_all()
 
@@ -1572,22 +1645,8 @@ def build_receipt_settings_panel(
 
         def on_pan_start(_: ft.DragStartEvent) -> None:
             _set_canvas_focus(True)
-            ids = _selected_ids()
-            if element.id in ids and len(ids) >= 2:
-                # 다중 선택 상태에서 선택된 요소를 드래그 → 다중 드래그
-                state["selected_id"] = element.id
-                origins: dict[str, tuple[int, int]] = {}
-                for el in _doc().elements:
-                    if el.id in ids:
-                        origins[el.id] = (el.x, el.y)
-                state["multi_drag_origins"] = origins
-                moving_ids = set(origins.keys()) if origins else {element.id}
-            else:
-                # 단일 드래그 (선택도 단일로 전환)
-                _set_selected_id(element.id)
-                state["multi_drag_origins"] = {}
-                moving_ids = {element.id}
-            state["drag_bottom_start_y"] = _fixed_bottom_anchor_y(moving_ids=moving_ids)
+            _set_selected_id(element.id)
+            state["drag_bottom_start_y"] = _fixed_bottom_anchor_y(moving_ids={element.id})
             current = next((item for item in _doc().elements if item.id == element.id), None)
             if current:
                 state["drag_start_x"] = current.x
@@ -1596,8 +1655,7 @@ def build_receipt_settings_panel(
             state["drag_accum_dy"] = 0.0
 
         def on_pan_update(e: ft.DragUpdateEvent) -> None:
-            origins: dict[str, tuple[int, int]] = state["multi_drag_origins"]  # type: ignore[assignment]
-            moving_ids = set(origins.keys()) if origins else {element.id}
+            moving_ids = {element.id}
             drag_bottom_start_y = state.get("drag_bottom_start_y")
             if not isinstance(drag_bottom_start_y, int):
                 drag_bottom_start_y = _fixed_bottom_anchor_y(moving_ids=moving_ids)
@@ -1609,126 +1667,66 @@ def build_receipt_settings_panel(
             total_real_dy = preview_to_real(accum_dy, real_width=real_w, preview_width=preview_w)
             c_w = int(_doc().meta.canvas_width_px)
 
-            if origins:
-                # === 다중 드래그 모드 ===
-                primary = next((el for el in _doc().elements if el.id == element.id), None)
-                if not primary:
-                    return
-                p_origin = origins.get(element.id, (primary.x, primary.y))
-                p_raw_x = p_origin[0] + total_real_dx
-                p_raw_y = p_origin[1] + total_real_dy
-                p_clamped_x = max(0, min(int(p_raw_x), max(0, c_w - max(1, primary.w))))
-                p_clamped_y = max(0, int(p_raw_y))
-                p_snapped_x, p_snapped_y, guides = _calc_snap(
-                    primary,
-                    p_clamped_x,
-                    p_clamped_y,
-                    exclude_ids=moving_ids,
-                    margin_bottom_start_y=drag_bottom_start_y,
-                )
-                p_snapped_x = max(0, min(int(p_snapped_x), max(0, c_w - max(1, primary.w))))
-                p_snapped_y = max(0, int(p_snapped_y))
-                snap_offset_x = p_snapped_x - p_clamped_x
-                snap_offset_y = p_snapped_y - p_clamped_y
+            current = next((item for item in _doc().elements if item.id == element.id), None)
+            if current is None:
+                return
+            start_x = int(state["drag_start_x"])
+            start_y = int(state["drag_start_y"])
+            raw_x = start_x + total_real_dx
+            raw_y = start_y + total_real_dy
+            clamped_x = max(0, min(int(raw_x), max(0, c_w - max(1, current.w))))
+            clamped_y = max(0, int(raw_y))
+            new_x, new_y, guides = _calc_snap(
+                current,
+                clamped_x,
+                clamped_y,
+                exclude_ids=moving_ids,
+                margin_bottom_start_y=drag_bottom_start_y,
+            )
+            new_x = max(0, min(int(new_x), max(0, c_w - max(1, current.w))))
+            new_y = max(0, int(new_y))
+            old_guides = state["snap_guides"]
+            new_guides = _build_guide_lines(guides)
+            canvas_stack = state.get("canvas_stack")
+            if canvas_stack and old_guides:
+                for g in old_guides:
+                    if g in canvas_stack.controls:
+                        canvas_stack.controls.remove(g)
+            state["snap_guides"] = new_guides
+            if canvas_stack and new_guides:
+                canvas_stack.controls.extend(new_guides)
+            updated = _update_common_dimensions(current, x=new_x, y=new_y, bottom_start_y=drag_bottom_start_y)
+            _upsert_element(updated)
+            detector.left = real_to_preview(updated.x, real_width=real_w, preview_width=preview_w)
+            detector.top = real_to_preview(updated.y, real_width=real_w, preview_width=preview_w)
 
-                old_guides = state["snap_guides"]
-                new_guides = _build_guide_lines(guides)
-                canvas_stack = state.get("canvas_stack")
-                if canvas_stack and old_guides:
-                    for g in old_guides:
-                        if g in canvas_stack.controls:
-                            canvas_stack.controls.remove(g)
-                state["snap_guides"] = new_guides
-                if canvas_stack and new_guides:
-                    canvas_stack.controls.extend(new_guides)
+            # 삽입 인디케이터 갱신
+            canvas_stack = state.get("canvas_stack")
+            old_indicator = state["insertion_indicator"]
+            if canvas_stack and old_indicator and old_indicator in canvas_stack.controls:
+                canvas_stack.controls.remove(old_indicator)
+                state["insertion_indicator"] = None
 
-                detectors: dict = state["element_detectors"]  # type: ignore[assignment]
-                for eid, (ox, oy) in origins.items():
-                    el = next((item for item in _doc().elements if item.id == eid), None)
-                    if not el:
-                        continue
-                    raw_x = ox + total_real_dx
-                    raw_y = oy + total_real_dy
-                    cx = max(0, min(int(raw_x), max(0, c_w - max(1, el.w))))
-                    cy = max(0, int(raw_y))
-                    nx = max(0, min(cx + snap_offset_x, max(0, c_w - max(1, el.w))))
-                    ny = max(0, int(cy + snap_offset_y))
-                    updated = _update_common_dimensions(el, x=nx, y=ny, bottom_start_y=drag_bottom_start_y)
-                    _upsert_element(updated)
-                    det = detectors.get(eid)
-                    if det:
-                        det.left = real_to_preview(updated.x, real_width=real_w, preview_width=preview_w)
-                        det.top = real_to_preview(updated.y, real_width=real_w, preview_width=preview_w)
-                # 드래그 자동스크롤
-                _auto_scroll_on_drag(
-                    real_to_preview(p_snapped_y, real_width=real_w, preview_width=preview_w),
-                    real_to_preview(primary.h, real_width=real_w, preview_width=preview_w),
-                )
-                _refresh_property_panel()
-                page.update()
+            slot_y = _calc_insertion_slot(updated, new_y, {element.id})
+            if slot_y is not None:
+                indicator = _build_insertion_indicator(slot_y)
+                state["insertion_indicator"] = indicator
+                state["insertion_target_y"] = slot_y
+                if canvas_stack:
+                    canvas_stack.controls.append(indicator)
             else:
-                # === 단일 드래그 모드 ===
-                current = next((item for item in _doc().elements if item.id == element.id), None)
-                if current is None:
-                    return
-                start_x = int(state["drag_start_x"])
-                start_y = int(state["drag_start_y"])
-                raw_x = start_x + total_real_dx
-                raw_y = start_y + total_real_dy
-                clamped_x = max(0, min(int(raw_x), max(0, c_w - max(1, current.w))))
-                clamped_y = max(0, int(raw_y))
-                new_x, new_y, guides = _calc_snap(
-                    current,
-                    clamped_x,
-                    clamped_y,
-                    exclude_ids=moving_ids,
-                    margin_bottom_start_y=drag_bottom_start_y,
-                )
-                new_x = max(0, min(int(new_x), max(0, c_w - max(1, current.w))))
-                new_y = max(0, int(new_y))
-                old_guides = state["snap_guides"]
-                new_guides = _build_guide_lines(guides)
-                canvas_stack = state.get("canvas_stack")
-                if canvas_stack and old_guides:
-                    for g in old_guides:
-                        if g in canvas_stack.controls:
-                            canvas_stack.controls.remove(g)
-                state["snap_guides"] = new_guides
-                if canvas_stack and new_guides:
-                    canvas_stack.controls.extend(new_guides)
-                updated = _update_common_dimensions(current, x=new_x, y=new_y, bottom_start_y=drag_bottom_start_y)
-                _upsert_element(updated)
-                detector.left = real_to_preview(updated.x, real_width=real_w, preview_width=preview_w)
-                detector.top = real_to_preview(updated.y, real_width=real_w, preview_width=preview_w)
+                state["insertion_target_y"] = None
 
-                # 삽입 인디케이터 갱신
-                canvas_stack = state.get("canvas_stack")
-                old_indicator = state["insertion_indicator"]
-                if canvas_stack and old_indicator and old_indicator in canvas_stack.controls:
-                    canvas_stack.controls.remove(old_indicator)
-                    state["insertion_indicator"] = None
-
-                slot_y = _calc_insertion_slot(updated, new_y, {element.id})
-                if slot_y is not None:
-                    indicator = _build_insertion_indicator(slot_y)
-                    state["insertion_indicator"] = indicator
-                    state["insertion_target_y"] = slot_y
-                    if canvas_stack:
-                        canvas_stack.controls.append(indicator)
-                else:
-                    state["insertion_target_y"] = None
-
-                # 드래그 자동스크롤
-                _auto_scroll_on_drag(
-                    real_to_preview(updated.y, real_width=real_w, preview_width=preview_w),
-                    real_to_preview(updated.h, real_width=real_w, preview_width=preview_w),
-                )
-                _refresh_property_panel()
-                page.update()
+            # 드래그 자동스크롤
+            _auto_scroll_on_drag(
+                real_to_preview(updated.y, real_width=real_w, preview_width=preview_w),
+                real_to_preview(updated.h, real_width=real_w, preview_width=preview_w),
+            )
+            _refresh_property_panel()
+            page.update()
 
         def on_pan_end(_: ft.DragEndEvent) -> None:
             state["snap_guides"] = []
-            state["multi_drag_origins"] = {}
             state["drag_bottom_start_y"] = None
 
             # 삽입 인디케이터 제거
@@ -1985,7 +1983,23 @@ def build_receipt_settings_panel(
         el = next((e for e in _doc().elements if e.id == dragged_id), None)
         if not el:
             return
-        _upsert_element(replace(el, y=slot_y))
+        updated = replace(el, y=slot_y)
+        # 삽입 위치에 겹치는 기존 요소들을 먼저 아래로 밀어냄
+        gap = 4
+        push_below = slot_y + updated.h + gap
+        elements = list(_doc().elements)
+        changed = False
+        for i, other in enumerate(elements):
+            if other.id == dragged_id or not other.visible:
+                continue
+            if other.x >= updated.x + updated.w or updated.x >= other.x + other.w:
+                continue
+            if other.y >= slot_y and other.y < push_below:
+                elements[i] = replace(other, y=push_below)
+                changed = True
+        if changed:
+            _set_doc(replace(_doc(), elements=elements))
+        _upsert_element(updated)
         _resolve_overlaps()
 
     def _build_guide_lines(guides: list[dict]) -> list[ft.Control]:
@@ -2037,7 +2051,7 @@ def build_receipt_settings_panel(
 
         # 단일 선택일 때만 리사이즈 핸들 추가 (다중 선택 시 비활성)
         selected_el = _find_selected_element()
-        if selected_el and selected_el.visible and not _is_multi_selected():
+        if selected_el and selected_el.visible:
             canvas_controls.extend(_build_resize_handles(selected_el))
 
         # 스냅 가이드선 추가
@@ -2075,11 +2089,6 @@ def build_receipt_settings_panel(
     def on_add_text(_: ft.ControlEvent) -> None:
         _add_element(_new_default_element("text"))
         _set_active_binding_target("text_template")
-        _refresh_all()
-
-    def on_add_qr(_: ft.ControlEvent) -> None:
-        _add_element(_new_default_element("qr"))
-        _set_active_binding_target("data_template")
         _refresh_all()
 
     def on_add_divider(_: ft.ControlEvent) -> None:
@@ -2132,10 +2141,12 @@ def build_receipt_settings_panel(
         try:
             doc = canvas_store.load_layout(path)
             _set_doc(doc)
-            _set_layout_path(path)
+            # 외부 템플릿은 기본 경로에 저장하여 asset 경로 불일치 방지
+            _set_layout_path("templates/receipt_layout.json")
             paper_width_dropdown.value = doc.meta.paper_width
             state["selected_id"] = None
-            state["selected_ids"] = set()
+            # 즉시 기본 경로에 저장하여 embedded_data + 복원된 asset_path 보존
+            canvas_store.save_layout("templates/receipt_layout.json", doc)
             _refresh_all()
             _show_status(f"불러오기 완료: {Path(path).name}")
         except Exception as exc:
@@ -2157,6 +2168,11 @@ def build_receipt_settings_panel(
     def on_paper_width_change(_: ft.ControlEvent) -> None:
         _set_paper_width(str(paper_width_dropdown.value or "80"))
 
+    def on_dpi_change(_: ft.ControlEvent) -> None:
+        """DPI 변경 (인쇄 해상도만 변경, 캔버스 레이아웃 유지)"""
+        _show_status(f"인쇄 DPI: {_current_dpi()} (레이아웃 비율 유지)")
+        page.update()
+
     def on_image_picked(event: ft.FilePickerResultEvent) -> None:
         if not event.files:
             return
@@ -2176,7 +2192,6 @@ def build_receipt_settings_panel(
 
     btn_add_text.on_click = on_add_text
     btn_add_image.on_click = on_add_image
-    btn_add_qr.on_click = on_add_qr
     btn_add_divider.on_click = on_add_divider
     btn_delete.on_click = lambda _e: _remove_selected_element()
     btn_save.on_click = on_save
@@ -2184,6 +2199,7 @@ def build_receipt_settings_panel(
     btn_load.on_click = on_load
     btn_test_print.on_click = on_test_print
     paper_width_dropdown.on_change = on_paper_width_change
+    dpi_dropdown.on_change = on_dpi_change
     # 여백 필드 변경 시 캔버스 갱신 (실시간 + blur)
     def _on_margin_change(_e) -> None:
         _enforce_margin_boundaries()
@@ -2207,6 +2223,117 @@ def build_receipt_settings_panel(
         spacing=6,
         run_spacing=6,
     )
+    # --- QR 코드 생성기 접이식 섹션 ---
+    _qr_type_map = {
+        "URL": QrType.URL,
+        "Wi-Fi": QrType.WIFI,
+        "안내문": QrType.TEXT,
+    }
+    qr_type_dropdown = ft.Dropdown(
+        label="QR 유형",
+        value="URL",
+        options=[ft.dropdown.Option(k) for k in _qr_type_map],
+        width=200,
+        height=48,
+        border_radius=8,
+        content_padding=ft.padding.symmetric(horizontal=10, vertical=0),
+    )
+    # URL 입력
+    qr_url_field = ft.TextField(label="URL", hint_text="https://example.com", border_radius=8)
+    qr_url_container = ft.Container(content=qr_url_field, visible=True)
+    # Wi-Fi 입력
+    qr_wifi_ssid = ft.TextField(label="SSID (네트워크명)", border_radius=8)
+    qr_wifi_pw = ft.TextField(label="비밀번호", password=True, can_reveal_password=True, border_radius=8)
+    qr_wifi_enc = ft.Dropdown(
+        label="암호화",
+        value="WPA",
+        options=[ft.dropdown.Option(v) for v in ("WPA", "WPA2", "WEP", "없음")],
+        width=120,
+        height=48,
+        border_radius=8,
+        content_padding=ft.padding.symmetric(horizontal=10, vertical=0),
+    )
+    qr_wifi_container = ft.Container(
+        content=ft.Column([qr_wifi_ssid, qr_wifi_pw, qr_wifi_enc], spacing=6),
+        visible=False,
+    )
+    # 안내문 입력
+    qr_text_field = ft.TextField(label="안내문 내용", multiline=True, min_lines=2, max_lines=5, border_radius=8)
+    qr_text_container = ft.Container(content=qr_text_field, visible=False)
+    qr_status_text = ft.Text("", size=12, color="#444444")
+
+    def _on_qr_type_changed(_: ft.ControlEvent) -> None:
+        selected = qr_type_dropdown.value
+        qr_url_container.visible = selected == "URL"
+        qr_wifi_container.visible = selected == "Wi-Fi"
+        qr_text_container.visible = selected == "안내문"
+        qr_status_text.value = ""
+        page.update()
+
+    qr_type_dropdown.on_change = _on_qr_type_changed
+
+    def _on_qr_insert_to_canvas(_: ft.ControlEvent) -> None:
+        """QR 페이로드를 생성하여 캔버스에 QR 요소로 삽입."""
+        selected_label = qr_type_dropdown.value or "URL"
+        qr_type = _qr_type_map[selected_label]
+        try:
+            config = QrConfig(
+                qr_type=qr_type,
+                url=qr_url_field.value or "",
+                ssid=qr_wifi_ssid.value or "",
+                password=qr_wifi_pw.value or "",
+                encryption=qr_wifi_enc.value or "WPA",
+                text=qr_text_field.value or "",
+            )
+            payload = build_payload(config)
+        except ValueError as exc:
+            qr_status_text.value = str(exc)
+            qr_status_text.color = "#DD4444"
+            page.update()
+            return
+
+        # 캔버스에 QR 요소 생성 후 data_template에 페이로드 설정
+        new_el = _new_default_element("qr")
+        new_el = replace(new_el, data_template=payload)
+        _add_element(new_el)
+        _refresh_all()
+        qr_status_text.value = "QR 요소가 캔버스에 삽입되었습니다."
+        qr_status_text.color = "#2A7FFF"
+        page.update()
+
+    qr_insert_btn = ft.ElevatedButton(
+        "QR 생성하여 캔버스에 삽입",
+        icon=ICONS.QR_CODE_2_ROUNDED,
+        style=ft.ButtonStyle(
+            bgcolor="#2A7FFF",
+            color="#FFFFFF",
+            shape=ft.RoundedRectangleBorder(radius=8),
+        ),
+        on_click=_on_qr_insert_to_canvas,
+    )
+
+    qr_expansion_tile = ft.ExpansionTile(
+        title=ft.Text("QR 코드 생성기", weight=ft.FontWeight.BOLD),
+        leading=ft.Icon(ICONS.QR_CODE_2_ROUNDED, color="#2A7FFF"),
+        initially_expanded=False,
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    controls=[
+                        qr_type_dropdown,
+                        qr_url_container,
+                        qr_wifi_container,
+                        qr_text_container,
+                        qr_status_text,
+                        qr_insert_btn,
+                    ],
+                    spacing=12,
+                ),
+                padding=ft.padding.only(left=8, right=8, top=8, bottom=16),
+            ),
+        ],
+    )
+
     left_controls_panel = ft.Container(
         bgcolor="#FFFFFF",
         border_radius=8,
@@ -2219,6 +2346,7 @@ def build_receipt_settings_panel(
                     controls=[
                         printer_dropdown,
                         paper_width_dropdown,
+                        dpi_dropdown,
                         margin_top_field,
                         margin_bottom_field,
                     ],
@@ -2241,7 +2369,6 @@ def build_receipt_settings_panel(
                     controls=[
                         btn_add_text,
                         btn_add_image,
-                        btn_add_qr,
                         btn_add_divider,
                         btn_delete,
                     ],
@@ -2251,6 +2378,8 @@ def build_receipt_settings_panel(
                 ft.Text("필드칩: 클릭하면 선택한 텍스트/QR 템플릿에 변수 삽입", size=12, color="#666666"),
                 field_chip_row,
                 status_text,
+                ft.Divider(),
+                qr_expansion_tile,
             ],
             spacing=8,
             scroll=ft.ScrollMode.AUTO,
@@ -2297,22 +2426,12 @@ def build_receipt_settings_panel(
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
-    # 키보드 이벤트: Ctrl 추적 + Del 삭제
+    # 키보드 이벤트: Del 삭제
     def _on_keyboard(e: ft.KeyboardEvent) -> None:
-        # Ctrl 키 상태를 이벤트의 ctrl 속성으로 추적
-        state["ctrl_pressed"] = bool(e.ctrl)
-        # Del 키: 단일/다중 선택 요소 삭제
-        if e.key == "Delete" and state["canvas_focused"] and (_selected_id() or _selected_ids()):
+        if e.key == "Delete" and state["canvas_focused"] and _selected_id():
             _remove_selected_element()
 
     page.on_keyboard_event = _on_keyboard
-
-    # 윈도우 포커스 복귀 시 Ctrl 상태 리셋 (고착 방지)
-    def _on_window_event(e):
-        if str(getattr(e, "data", "")) == "focus":
-            state["ctrl_pressed"] = False
-
-    page.on_window_event = _on_window_event
 
     if _doc().meta.paper_width != str(paper_width_dropdown.value):
         _set_paper_width(str(paper_width_dropdown.value or "80"))

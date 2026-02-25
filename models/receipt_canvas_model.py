@@ -14,8 +14,16 @@ VALID_ELEMENT_TYPES: set[str] = {"text", "image", "qr", "divider"}
 VALID_ALIGN: set[str] = {"left", "center", "right"}
 
 
-def paper_width_to_px(paper_width: str) -> int:
-    return 384 if paper_width == "58" else 576
+# 203 DPI 기준 표준 픽셀 폭 (하위 호환 기준값)
+_REFERENCE_PX_203: dict[str, int] = {"58": 384, "80": 576}
+
+
+def paper_width_to_px(paper_width: str, dpi: int = 203) -> int:
+    """용지 폭과 DPI로 인쇄 가능 픽셀 폭 계산 (203 DPI 기준 비례 스케일링)"""
+    ref_px = _REFERENCE_PX_203.get(paper_width, 576)
+    if dpi == 203:
+        return ref_px
+    return round(ref_px * dpi / 203)
 
 
 @dataclass
@@ -76,11 +84,14 @@ class ReceiptCanvasElement:
     embedded_data: str = ""  # base64 인코딩된 이미지 데이터 (포터블 저장용)
     preserve_ratio: bool = True
 
-    data_template: str = "{{order_number}}|{{url}}"
+    data_template: str = ""
     box_size: int = 4
+
+    font_family: str = "malgun"  # 폰트 패밀리 키
 
     line_style: str = "solid"  # solid / dashed / dotted
     line_thickness: int = 1    # 구분선 굵기 (px)
+    visibility_tag: str = ""   # 연결 필드 태그 (빈 값이면 항상 표시)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,8 +111,10 @@ class ReceiptCanvasElement:
             "preserve_ratio": bool(self.preserve_ratio),
             "data_template": self.data_template,
             "box_size": int(self.box_size),
+            "font_family": self.font_family,
             "line_style": self.line_style,
             "line_thickness": int(self.line_thickness),
+            "visibility_tag": self.visibility_tag,
         }
 
     @classmethod
@@ -135,10 +148,12 @@ class ReceiptCanvasElement:
             asset_path=str(payload.get("asset_path", "")).strip(),
             embedded_data=str(payload.get("embedded_data", "")),
             preserve_ratio=bool(payload.get("preserve_ratio", True)),
-            data_template=str(payload.get("data_template", "{{order_number}}|{{url}}")),
+            data_template=str(payload.get("data_template", "")),
             box_size=max(1, int(payload.get("box_size", 4))),
+            font_family=str(payload.get("font_family", "malgun")).strip() or "malgun",
             line_style=str(payload.get("line_style", "solid")).strip() or "solid",
             line_thickness=max(1, int(payload.get("line_thickness", 1))),
+            visibility_tag=str(payload.get("visibility_tag", "")).strip(),
         )
 
 
