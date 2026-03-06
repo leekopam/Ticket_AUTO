@@ -13,6 +13,7 @@ from models.order_model import Order
 
 PRODUCT_HEADER_RE = re.compile(r"^\[상품(\d+)\]")
 RECEIPT_HEADER = "수령확인"
+SEAT_HEADER = "좌석번호"
 _WRITE_RETRY_COUNT = 3
 _WRITE_RETRY_DELAY_SEC = 0.2
 
@@ -104,6 +105,47 @@ class ExcelService:
                 )
 
             return None
+        finally:
+            workbook.close()
+
+    def _ensure_column(self, header_name: str) -> None:
+        """지정한 헤더 컬럼이 없으면 자동 추가한다."""
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = workbook.active
+                headers = self._read_headers(ws)
+                if self._find_col(headers, (header_name,)):
+                    return
+                new_col = ws.max_column + 1
+                ws.cell(row=1, column=new_col, value=header_name)
+                workbook.save(self._file_path)
+                return
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+
+    def ensure_seat_column(self) -> None:
+        """data.xlsx에 좌석번호 컬럼이 없으면 자동 추가한다."""
+        self._ensure_column(SEAT_HEADER)
+
+    def ensure_receipt_column(self) -> None:
+        """data.xlsx에 수령확인 컬럼이 없으면 자동 추가한다."""
+        self._ensure_column(RECEIPT_HEADER)
+
+    def get_product_names(self) -> list[str]:
+        """상품 컬럼명 리스트를 반환한다 (티켓 분류 UI용)."""
+        workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+        try:
+            ws = workbook.active
+            headers = self._read_headers(ws)
+            goods_cols = self._parse_goods_cols(headers)
+            return [name or f"상품{idx}" for idx, _col, name in goods_cols]
         finally:
             workbook.close()
 

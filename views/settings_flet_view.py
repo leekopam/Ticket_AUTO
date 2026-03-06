@@ -31,6 +31,7 @@ from services.qr_generator_service import QrConfig, QrType, build_payload, calcu
 from services.receipt_canvas_store import ReceiptCanvasStore
 from services.receipt_print_pipeline import print_test_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
+from services.excel_service import ExcelService
 from services.windows_printer_service import WindowsPrinterService
 
 
@@ -57,6 +58,7 @@ FIELD_BINDINGS = [
     ("buyer_phone", "연락처"),
     ("seat", "좌석번호"),
     ("goods_lines", "상품목록"),
+    ("ticket_lines", "티켓목록"),
 ]
 
 
@@ -797,6 +799,7 @@ def build_receipt_settings_panel(
                 margin_top=max(0, _coerce_int(margin_top_field.value, 0)),
                 margin_bottom=max(0, _coerce_int(margin_bottom_field.value, 0)),
                 printer_dpi=_current_dpi(),
+                ticket_product_names=settings.ticket_product_names,
             )
             settings_store.save(settings_obj)
             if show_message:
@@ -2334,6 +2337,59 @@ def build_receipt_settings_panel(
         ],
     )
 
+    # --- 티켓 분류 설정 접이식 섹션 ---
+    ticket_checkboxes: list[ft.Checkbox] = []
+    ticket_checkbox_column = ft.Column(spacing=4)
+
+    def _load_ticket_checkboxes() -> None:
+        """상품 목록을 로드하여 티켓 분류 체크박스를 생성한다."""
+        ticket_checkboxes.clear()
+        try:
+            excel_svc = ExcelService("data.xlsx")
+            product_names = excel_svc.get_product_names()
+        except Exception:
+            product_names = []
+
+        current_ticket_names = set(settings.ticket_product_names)
+
+        def _on_ticket_check(_e: ft.ControlEvent) -> None:
+            selected_names = [cb.label for cb in ticket_checkboxes if cb.value]
+            settings.ticket_product_names = selected_names
+            # 변경 즉시 파일에 저장
+            _save_current_layout(show_message=False)
+
+        for name in product_names:
+            cb = ft.Checkbox(
+                label=name,
+                value=name in current_ticket_names,
+                on_change=_on_ticket_check,
+            )
+            ticket_checkboxes.append(cb)
+
+        ticket_checkbox_column.controls = list(ticket_checkboxes) if ticket_checkboxes else [
+            ft.Text("상품 컬럼이 없습니다.", size=12, color="#999999"),
+        ]
+
+    _load_ticket_checkboxes()
+
+    ticket_expansion_tile = ft.ExpansionTile(
+        title=ft.Text("티켓 분류 설정", weight=ft.FontWeight.BOLD),
+        leading=ft.Icon(ICONS.CONFIRMATION_NUMBER_ROUNDED, color="#2A7FFF"),
+        initially_expanded=False,
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text("티켓으로 분류할 상품을 선택하세요.", size=12, color="#666666"),
+                        ticket_checkbox_column,
+                    ],
+                    spacing=8,
+                ),
+                padding=ft.padding.only(left=8, right=8, top=8, bottom=16),
+            ),
+        ],
+    )
+
     left_controls_panel = ft.Container(
         bgcolor="#FFFFFF",
         border_radius=8,
@@ -2380,6 +2436,7 @@ def build_receipt_settings_panel(
                 status_text,
                 ft.Divider(),
                 qr_expansion_tile,
+                ticket_expansion_tile,
             ],
             spacing=8,
             scroll=ft.ScrollMode.AUTO,

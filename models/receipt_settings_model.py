@@ -1,7 +1,7 @@
 """Receipt printing settings model."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
@@ -26,6 +26,7 @@ class ReceiptSettings:
     margin_top: int = 0
     margin_bottom: int = 0
     printer_dpi: int = 300
+    ticket_product_names: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +41,7 @@ class ReceiptSettings:
             "margin_top": self.margin_top,
             "margin_bottom": self.margin_bottom,
             "printer_dpi": self.printer_dpi,
+            "ticket_product_names": self.ticket_product_names,
         }
 
     @classmethod
@@ -65,4 +67,5 @@ class ReceiptSettings:
             margin_top=max(0, int(data.get("margin_top", 0))),
             margin_bottom=max(0, int(data.get("margin_bottom", 0))),
             printer_dpi=printer_dpi,
+            ticket_product_names=list(data.get("ticket_product_names", [])),
         )

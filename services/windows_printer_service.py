@@ -1,7 +1,11 @@
 """Windows printer listing and image print service."""
 from __future__ import annotations
 
+import logging
+
 from PIL import Image, ImageWin
+
+logger = logging.getLogger(__name__)
 
 # PIL 1-bit packed → ESC/POS 래스터 비트 반전 테이블
 # PIL: set bit(1)=white, ESC/POS: set bit(1)=black
@@ -90,7 +94,10 @@ class WindowsPrinterService:
 
         try:
             self._print_escpos(fitted, target, job_name, win32print)
-        except Exception:
+        except Exception as esc_exc:
+            logger.warning("ESC/POS 인쇄 실패, GDI 폴백 시도: %s", esc_exc)
+            # ESC/POS 실패 시 잔류 데이터 정리 (프린터 초기화)
+            self._reset_printer(target, win32print)
             self._print_gdi(image, target, job_name)
 
     def _print_escpos(
@@ -117,6 +124,21 @@ class WindowsPrinterService:
             win32print.EndDocPrinter(handle)
         finally:
             win32print.ClosePrinter(handle)
+
+    def _reset_printer(self, target: str, win32print) -> None:
+        """ESC/POS 실패 후 잔류 데이터 제거를 위해 초기화 명령 전송"""
+        try:
+            handle = win32print.OpenPrinter(target)
+            try:
+                win32print.StartDocPrinter(handle, 1, ("Reset", None, "RAW"))
+                win32print.StartPagePrinter(handle)
+                win32print.WritePrinter(handle, b'\x1b\x40')  # ESC @ (초기화)
+                win32print.EndPagePrinter(handle)
+                win32print.EndDocPrinter(handle)
+            finally:
+                win32print.ClosePrinter(handle)
+        except Exception as exc:
+            logger.debug("프린터 초기화 명령 전송 실패 (무시): %s", exc)
 
     def _print_gdi(self, image: Image.Image, target: str, job_name: str) -> None:
         """GDI 폴백 인쇄 (ESC/POS 미지원 프린터용)"""

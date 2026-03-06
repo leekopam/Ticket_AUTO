@@ -39,6 +39,8 @@ class Application:
         self._state = AppState.AUTH_WAIT
 
         self._excel_service = ExcelService("data.xlsx")
+        self._excel_service.ensure_seat_column()
+        self._excel_service.ensure_receipt_column()
         self._browser_service = BrowserService(require_login_each_run=True)
         self._api_service = ApiService()
 

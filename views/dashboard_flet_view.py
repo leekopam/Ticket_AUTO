@@ -1,6 +1,7 @@
 """Integrated Flet control dashboard for Ticket_AUTO."""
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -9,7 +10,14 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import flet as ft
 
+import threading
+
+logger = logging.getLogger(__name__)
+
+from models.order_model import Order
 from services.excel_service import ExcelService
+from services.receipt_print_pipeline import print_order_receipt
+from services.receipt_settings_store import ReceiptSettingsStore
 from services.ticket_runtime_manager import TicketRuntimeManager
 from views.settings_flet_view import build_receipt_settings_panel
 
@@ -78,6 +86,9 @@ class DashboardFletView:
         current_tab = {"value": "ticket"}
         current_state = {"value": "IDLE"}
         excel_service = ExcelService()
+        excel_service.ensure_seat_column()
+        excel_service.ensure_receipt_column()
+        settings_store = ReceiptSettingsStore(".runtime/receipt_settings.json")
 
         state_text = ft.Text("IDLE", size=18, weight=ft.FontWeight.BOLD, color="#1F1F1F")
         state_badge = ft.Container(
@@ -116,10 +127,12 @@ class DashboardFletView:
                 ft.DataColumn(ft.Text("연락처", weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("좌석번호", weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("상품목록", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("티켓", weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("처리완료", weight=ft.FontWeight.BOLD)),
             ],
             rows=[],
-            column_spacing=40,
+            column_spacing=30,
+            data_row_max_height=float("inf"),
             expand=True,
         )
 
@@ -140,6 +153,65 @@ class DashboardFletView:
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED)
         btn_receipt_tab = ft.TextButton("영수증 양식 설정", icon=ICONS.RECEIPT_LONG_ROUNDED)
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
+
+        # 주문 선택 출력용 Dropdown + 버튼
+        orders_map: dict[str, Order] = {}
+        print_order_dropdown = ft.Dropdown(
+            hint_text="주문번호 선택",
+            width=200,
+            height=42,
+            border_radius=8,
+            content_padding=ft.padding.symmetric(horizontal=10, vertical=0),
+            options=[],
+        )
+        btn_print_selected = ft.ElevatedButton(
+            "출력",
+            icon=ICONS.PRINT_ROUNDED,
+            style=ft.ButtonStyle(
+                bgcolor="#2A7FFF",
+                color="#FFFFFF",
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+
+        def _on_print_selected_click(_e) -> None:
+            """Dropdown에서 선택된 주문의 영수증을 출력한다."""
+            key = print_order_dropdown.value
+            order = orders_map.get(key) if key else None
+            if not order:
+                page.snack_bar = ft.SnackBar(
+                    ft.Text("주문번호를 선택해주세요."), bgcolor="#FFF0CE",
+                )
+                page.snack_bar.open = True
+                page.update()
+                return
+            _on_order_print(order)
+
+        btn_print_selected.on_click = _on_print_selected_click
+
+        def _on_order_print(order: Order) -> None:
+            """주문번호 클릭 시 해당 주문의 영수증을 출력한다."""
+            def _do_print() -> None:
+                try:
+                    receipt_settings = settings_store.load()
+                    copies = print_order_receipt(order, receipt_settings)
+                    msg = f"영수증 {copies}매 출력 완료: {order.order_number}"
+                    color = "#D8F4E3"
+                except Exception as exc:
+                    logger.error("영수증 출력 실패: %s (주문: %s)", exc, order.order_number, exc_info=True)
+                    msg, color = f"영수증 출력 실패: {exc}", "#FFD6D6"
+
+                def _show_snack() -> None:
+                    page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
+                    page.snack_bar.open = True
+                    page.update()
+
+                try:
+                    page.call_from_thread(_show_snack)
+                except Exception:
+                    _show_snack()
+
+            threading.Thread(target=_do_print, daemon=True).start()
 
         def do_search(_=None) -> None:
             """검색어 + 필터 조건으로 주문 조회 후 테이블 갱신."""
@@ -164,17 +236,42 @@ class DashboardFletView:
                 orders = [o for o in orders if o.is_received]
             elif filter_value == "미수령":
                 orders = [o for o in orders if not o.is_received]
-            search_result_table.rows = [
-                ft.DataRow(cells=[
-                    ft.DataCell(ft.Text(o.order_number, size=13)),
+
+            # Dropdown 옵션 갱신
+            orders_map.clear()
+            dropdown_options: list[ft.dropdown.Option] = []
+            rows: list[ft.DataRow] = []
+            
+            receipt_settings = settings_store.load()
+            ticket_names = receipt_settings.ticket_product_names
+            
+            for o in orders:
+                orders_map[o.order_number] = o
+                dropdown_options.append(ft.dropdown.Option(o.order_number))
+                
+                general_goods = []
+                ticket_goods = []
+                for g in (o.goods or []):
+                    if any(t_name in g for t_name in ticket_names):
+                        ticket_goods.append(g)
+                    else:
+                        general_goods.append(g)
+                
+                goods_text = "\n".join(general_goods) if general_goods else "-"
+                ticket_text = "\n".join(ticket_goods) if ticket_goods else "-"
+                
+                rows.append(ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(o.order_number, size=13, color="#2A7FFF")),
                     ft.DataCell(ft.Text(o.name, size=13)),
                     ft.DataCell(ft.Text(o.phone, size=13)),
                     ft.DataCell(ft.Text(o.seat, size=13)),
-                    ft.DataCell(ft.Text("\n".join(o.goods), size=13)),
+                    ft.DataCell(ft.Text(goods_text, size=13, no_wrap=False)),
+                    ft.DataCell(ft.Text(ticket_text, size=13, no_wrap=False)),
                     ft.DataCell(ft.Text(o.received_at if o.received_at else "-", size=13)),
-                ])
-                for o in orders
-            ]
+                ]))
+            print_order_dropdown.options = dropdown_options
+            print_order_dropdown.value = None
+            search_result_table.rows = rows
             page.update()
 
         search_field.on_submit = do_search
@@ -304,6 +401,9 @@ class DashboardFletView:
                                                 shape=ft.RoundedRectangleBorder(radius=8),
                                             ),
                                         ),
+                                        ft.Container(width=16),
+                                        print_order_dropdown,
+                                        btn_print_selected,
                                     ],
                                     spacing=8,
                                 ),
