@@ -108,6 +108,69 @@ class ExcelService:
         finally:
             workbook.close()
 
+    def find_orders_by_customer(self, name: str = "", phone: str = "") -> list[Order]:
+        """Find orders by exact customer name/phone match."""
+        normalized_name = (name or "").strip()
+        normalized_phone = self._normalize_phone(phone)
+        if not normalized_name and not normalized_phone:
+            return []
+
+        workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+        try:
+            ws = workbook.active
+            headers = self._read_headers(ws)
+
+            order_col = self._find_col(headers, ("주문번호",))
+            if not order_col:
+                return []
+
+            name_col = self._find_col(headers, ("주문자명",))
+            phone_col = self._find_col(headers, ("주문자연락처",))
+            recv_name_col = self._find_col(headers, ("수령자명",))
+            recv_phone_col = self._find_col(headers, ("수령자연락처",))
+            seat_col = self._find_col(headers, ("좌석번호",))
+            received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            goods_cols = self._parse_goods_cols(headers)
+
+            matches: list[Order] = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                order_number = str(self._cell(row, order_col)).strip()
+                if not order_number:
+                    continue
+
+                names = {
+                    str(self._cell(row, name_col)).strip() if name_col else "",
+                    str(self._cell(row, recv_name_col)).strip() if recv_name_col else "",
+                }
+                phones = {
+                    self._normalize_phone(self._cell(row, phone_col)) if phone_col else "",
+                    self._normalize_phone(self._cell(row, recv_phone_col)) if recv_phone_col else "",
+                }
+
+                name_matches = not normalized_name or normalized_name in names
+                phone_matches = not normalized_phone or normalized_phone in phones
+                if not name_matches or not phone_matches:
+                    continue
+
+                matches.append(Order(
+                    order_number=order_number,
+                    name=str(self._cell(row, name_col)).strip() if name_col else "",
+                    phone=str(self._cell(row, phone_col)).strip() if phone_col else "",
+                    seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
+                    goods=self._build_goods_list(row, goods_cols),
+                    received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                ))
+
+            return matches
+        finally:
+            workbook.close()
+
+    def find_unique_order_by_customer(self, name: str = "", phone: str = "") -> Order | None:
+        matches = self.find_orders_by_customer(name=name, phone=phone)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
     def _ensure_column(self, header_name: str) -> None:
         """지정한 헤더 컬럼이 없으면 자동 추가한다."""
         for attempt in range(_WRITE_RETRY_COUNT):
@@ -263,3 +326,8 @@ class ExcelService:
             return int(float(str(value).strip()))
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _normalize_phone(value) -> str:
+        raw = str(value).strip() if value is not None else ""
+        return re.sub(r"\D+", "", raw)

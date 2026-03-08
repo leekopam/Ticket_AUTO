@@ -1,17 +1,19 @@
 ﻿"""
-Playwright browser service.
+Playwright 브라우저 서비스.
 
-This service owns the browser session and is the single source of truth
-for authentication state.
+이 서비스는 브라우저 세션을 소유하며
+인증 상태에 대한 단일 진실 공급원(Single Source of Truth) 역할을 합니다.
 """
 from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from playwright.sync_api import (
     BrowserContext,
@@ -23,6 +25,21 @@ from playwright.sync_api import (
 
 
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+MODERN_ORDER_NUMBER_PATTERN = r"[A-Z0-9]{10}_[A-Z0-9]{12}"
+LEGACY_ORDER_NUMBER_PATTERN = r"\d{4,}_\d{4,}"
+ORDER_NUMBER_CANDIDATE_PATTERN = rf"(?:{MODERN_ORDER_NUMBER_PATTERN}|{LEGACY_ORDER_NUMBER_PATTERN})"
+LABELLED_ORDER_NUMBER_PATTERN = re.compile(
+    rf"(?:주문번호|order\s*(?:number|no))\s*[:#]?\s*({ORDER_NUMBER_CANDIDATE_PATTERN})",
+    re.IGNORECASE,
+)
+GENERIC_ORDER_NUMBER_PATTERN = re.compile(rf"\b{ORDER_NUMBER_CANDIDATE_PATTERN}\b")
+LABELLED_NAME_PATTERN = re.compile(
+    r"(?:주문자명|구매자명|수령자명)\s*[:：]?\s*(?:\n\s*)?([가-힣A-Za-z][^\n\r]{0,30})"
+)
+LABELLED_PHONE_PATTERN = re.compile(
+    r"(?:주문자\s*(?:연락처)?|구매자\s*(?:연락처)?|수령자\s*(?:연락처)?|연락처|휴대폰)\s*[:：]?\s*(?:\n\s*)?(01[016789][-\s]?\d{3,4}[-\s]?\d{4})"
+)
+GENERIC_PHONE_PATTERN = re.compile(r"01[016789][-\s]?\d{3,4}[-\s]?\d{4}")
 
 
 @dataclass
@@ -39,6 +56,14 @@ class ReceiptClickResult:
     success: bool
     error_code: str = ""
     error_message: str = ""
+
+
+@dataclass
+class PageOrderDiscoveryResult:
+    order_number: str = ""
+    buyer_name: str = ""
+    buyer_phone: str = ""
+    url: str = ""
 
 
 class BrowserService:
@@ -60,7 +85,7 @@ class BrowserService:
         self._startup_error: Exception | None = None
         self._ready_event = threading.Event()
 
-        # callback fired when receipt click flow is finished
+        # 영수증 클릭 흐름이 완료되었을 때 호출되는 콜백
         self._on_receipt_complete: Callable[[], None] | None = None
 
     def set_on_receipt_complete(self, callback: Callable[[], None]) -> None:
@@ -77,16 +102,18 @@ class BrowserService:
         self._worker_thread.start()
 
         if not self._ready_event.wait(timeout=20):
-            raise RuntimeError("Browser worker startup timed out.")
+            raise RuntimeError("브라우저 워커 시작 시간 초과.")
 
         if self._startup_error is not None:
-            raise RuntimeError(f"Browser worker failed: {self._startup_error}")
+            raise RuntimeError(f"브라우저 워커 실패: {self._startup_error}")
 
     def stop(self) -> None:
+        if not self._is_running:
+            return
         self._is_running = False
         self._task_queue.put({"action": "quit"})
         if self._worker_thread:
-            self._worker_thread.join(timeout=5)
+            self._worker_thread.join(timeout=15)
 
     def open_page(self, url: str) -> None:
         self._task_queue.put({"action": "open_page", "url": url})
@@ -110,7 +137,7 @@ class BrowserService:
         return bool(self._invoke_rpc({"action": "clear_auth_state_for_domain"}, timeout_sec=20))
 
     def request_relogin(self) -> bool:
-        """Force authentication reset and keep login page open for user interaction."""
+        """인증 상태를 강제로 초기화하고 사용자 조작을 위해 로그인 페이지를 열어둡니다."""
         return bool(self._invoke_rpc({"action": "request_relogin"}, timeout_sec=20))
 
     def resolve_qr_redirect(
@@ -135,9 +162,34 @@ class BrowserService:
     def get_auth_cookie_snapshot(self) -> dict[str, str]:
         return self._invoke_rpc({"action": "get_auth_cookie_snapshot"}, timeout_sec=10)
 
+    def discover_order_number_from_page(
+        self,
+        url: str,
+        timeout_ms: int = 15000,
+    ) -> str:
+        return self.discover_order_context_from_page(
+            url,
+            timeout_ms=timeout_ms,
+        ).order_number
+
+    def discover_order_context_from_page(
+        self,
+        url: str,
+        timeout_ms: int = 15000,
+    ) -> PageOrderDiscoveryResult:
+        timeout_ms = max(2000, timeout_ms)
+        return self._invoke_rpc(
+            {
+                "action": "discover_order_context_from_page",
+                "url": url,
+                "timeout_ms": timeout_ms,
+            },
+            timeout_sec=max(15, int(timeout_ms / 1000) + 10),
+        )
+
     def _invoke_rpc(self, task: dict[str, Any], timeout_sec: int) -> Any:
         if not self._is_running:
-            raise RuntimeError("BrowserService is not running.")
+            raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
 
         response_queue: queue.Queue = queue.Queue(maxsize=1)
         task["response_queue"] = response_queue
@@ -146,7 +198,7 @@ class BrowserService:
         try:
             response = response_queue.get(timeout=timeout_sec)
         except queue.Empty as exc:
-            raise RuntimeError(f"Task timed out: {task.get('action')}") from exc
+            raise RuntimeError(f"작업 시간 초과: {task.get('action')}") from exc
 
         error = response.get("error")
         if error is not None:
@@ -236,6 +288,20 @@ class BrowserService:
                 result = self._handle_get_auth_cookie_snapshot()
                 finish(result, None)
                 return
+            if action == "discover_order_context_from_page":
+                result = self._handle_discover_order_context_from_page(
+                    task.get("url", ""),
+                    task.get("timeout_ms", 15000),
+                )
+                finish(result, None)
+                return
+            if action == "discover_order_number_from_page":
+                result = self._handle_discover_order_number_from_page(
+                    task.get("url", ""),
+                    task.get("timeout_ms", 15000),
+                )
+                finish(result, None)
+                return
 
             finish(None, f"Unknown task action: {action}")
         except Exception as exc:
@@ -244,10 +310,6 @@ class BrowserService:
     def _handle_open_page(self, url: str) -> None:
         if not self._context:
             return
-
-        # close previous work page but keep auth page for login recovery
-        if self._current_page and not self._current_page.is_closed():
-            self._current_page.close()
 
         self._current_page = self._context.new_page()
         self._current_page.goto(url, timeout=15000)
@@ -304,17 +366,17 @@ class BrowserService:
 
         try:
             self._current_page.wait_for_timeout(1200)
-            self._current_page.close()
-            self._current_page = None
         except Exception as exc:
             print(f"Playwright 클릭 오류: {exc}")
             self._invoke_receipt_complete_callback()
             return ReceiptClickResult(
                 success=False,
                 error_code="CONFIRM_CLICK_FAIL",
-                error_message=f"수령 완료 처리 후 페이지 종료 실패: {exc}",
+                error_message=f"수령 완료 처리 후 페이지 상태 확인 실패: {exc}",
             )
 
+        # 수령완료 처리 성공 후 구매자 정보 페이지를 닫는다
+        self._close_current_page()
         self._invoke_receipt_complete_callback()
         return ReceiptClickResult(success=True)
 
@@ -438,6 +500,128 @@ class BrowserService:
 
         return snapshot
 
+    def _handle_discover_order_context_from_page(
+        self,
+        url: str,
+        timeout_ms: int,
+    ) -> PageOrderDiscoveryResult:
+        if not self._context or not url:
+            return PageOrderDiscoveryResult(url=url)
+
+        request_result = self._discover_order_context_via_request(url, timeout_ms)
+        if request_result.order_number:
+            self._print_order_discovery_result(request_result)
+            return request_result
+
+        page = self._context.new_page()
+        try:
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
+
+            current_url = page.url or url
+            try:
+                body_text = page.locator("body").inner_text(timeout=3000) or ""
+            except Exception:
+                body_text = ""
+            try:
+                html = page.content() or ""
+            except Exception:
+                html = ""
+
+            order_number = self._extract_order_number_candidate(current_url, body_text, html)
+            buyer_name, buyer_phone = self._extract_buyer_contact_candidate(body_text)
+            result = PageOrderDiscoveryResult(
+                order_number=order_number,
+                buyer_name=buyer_name,
+                buyer_phone=buyer_phone,
+                url=current_url,
+            )
+            self._print_order_discovery_result(result)
+            return result
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    def _handle_discover_order_number_from_page(self, url: str, timeout_ms: int) -> str:
+        return self._handle_discover_order_context_from_page(url, timeout_ms).order_number
+
+    @staticmethod
+    def _extract_order_number_candidate(*texts: str) -> str:
+        for text in texts:
+            decoded = unquote(text or "")
+            labelled = LABELLED_ORDER_NUMBER_PATTERN.search(decoded)
+            if labelled:
+                return labelled.group(1).upper()
+
+        for text in texts:
+            decoded = unquote(text or "")
+            generic = GENERIC_ORDER_NUMBER_PATTERN.search(decoded)
+            if generic:
+                return generic.group(0).upper()
+
+        return ""
+
+    def _discover_order_context_via_request(
+        self,
+        url: str,
+        timeout_ms: int,
+    ) -> PageOrderDiscoveryResult:
+        if not self._context:
+            return PageOrderDiscoveryResult(url=url)
+
+        try:
+            response = self._context.request.get(
+                url,
+                max_redirects=5,
+                fail_on_status_code=False,
+                timeout=timeout_ms,
+            )
+        except Exception:
+            return PageOrderDiscoveryResult(url=url)
+
+        current_url = response.url or url
+        try:
+            html = response.text() or ""
+        except Exception:
+            html = ""
+
+        return PageOrderDiscoveryResult(
+            order_number=self._extract_order_number_candidate(current_url, html),
+            url=current_url,
+        )
+
+    def _print_order_discovery_result(self, result: PageOrderDiscoveryResult) -> None:
+        masked_phone = self._mask_secret(result.buyer_phone) if result.buyer_phone else ""
+        print(
+            "ORDER_DISCOVERY "
+            f"order_number={result.order_number} "
+            f"buyer_name={result.buyer_name} "
+            f"buyer_phone={masked_phone} "
+            f"url={result.url}"
+        )
+
+    @staticmethod
+    def _extract_buyer_contact_candidate(text: str) -> tuple[str, str]:
+        decoded = unquote(text or "")
+
+        name_match = LABELLED_NAME_PATTERN.search(decoded)
+        buyer_name = name_match.group(1).strip() if name_match else ""
+
+        phone_match = LABELLED_PHONE_PATTERN.search(decoded)
+        if not phone_match:
+            phone_match = GENERIC_PHONE_PATTERN.search(decoded)
+        buyer_phone = phone_match.group(1).strip() if phone_match and phone_match.lastindex else (
+            phone_match.group(0).strip() if phone_match else ""
+        )
+
+        return buyer_name, buyer_phone
+
     def _is_authenticated(self) -> bool:
         """PHPSESSID 쿠키 존재 여부로 인증 상태 판단.
 
@@ -476,7 +660,7 @@ class BrowserService:
         self._auth_page.goto(self._login_url, timeout=15000)
 
     def _open_initial_witchform_page(self) -> None:
-        """Open only the witchform login page and remove blank tabs on startup."""
+        """윗치폼 로그인 페이지만 열고 시작 시 빈 탭을 제거합니다."""
         if not self._context:
             return
 
@@ -501,7 +685,7 @@ class BrowserService:
                 self._warn(f"INITIAL_EXTRA_PAGE_CLOSE_FAILED: {exc}")
 
     def _handle_clear_auth_state_for_domain(self) -> bool:
-        """Clear witchform auth state for this run."""
+        """현재 실행에 대한 윗치폼 인증 상태를 삭제(Clear)합니다."""
         if not self._context:
             return False
 
@@ -541,7 +725,7 @@ class BrowserService:
         return True
 
     def _handle_request_relogin(self) -> bool:
-        """Public runtime-safe relogin trigger."""
+        """런타임 중에 안전하게 호출할 수 있는 재로그인 트리거(Public runtime-safe relogin trigger)입니다."""
         ok = self._handle_clear_auth_state_for_domain()
         if not ok:
             return False
@@ -584,6 +768,17 @@ class BrowserService:
         if len(value) <= 8:
             return "****"
         return f"{value[:4]}...{value[-4:]}"
+
+    def _close_current_page(self) -> None:
+        """수령완료 처리 후 구매자 정보 페이지를 닫는다."""
+        if not self._current_page or self._current_page.is_closed():
+            self._current_page = None
+            return
+        try:
+            self._current_page.close()
+        except Exception as exc:
+            self._warn(f"ORDER_PAGE_CLOSE_FAILED: {exc}")
+        self._current_page = None
 
     def _invoke_receipt_complete_callback(self) -> None:
         if self._on_receipt_complete:

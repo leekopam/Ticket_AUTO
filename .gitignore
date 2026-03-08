@@ -1,7 +1,8 @@
-﻿.runtime/
+.runtime/
+.tmp/
+.venv/
 __pycache__/
 *.pyc
 data.xlsx
 session.txt
 dist/
-

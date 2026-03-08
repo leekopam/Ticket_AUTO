@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urlparse
+import re
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+ORDER_NUMBER_PATTERN = re.compile(r"[A-Z0-9]{4,}_[A-Z0-9]{4,}")
 
 
 @dataclass
@@ -28,6 +30,65 @@ class ApiService:
     """
     WITCHFORM_BASE = "https://witchform.com"
     QR_PREFIX = "https://witchform.com/qrcode_link.php"
+
+    @staticmethod
+    def _extract_order_number(path: str, query: str, fragment: str = "") -> str:
+        decoded_path = unquote(path or "")
+        decoded_query = unquote(query or "")
+        decoded_fragment = unquote(fragment or "")
+        path_parts = [part.strip() for part in decoded_path.split("/") if part.strip()]
+        if not path_parts:
+            path_parts = []
+
+        last_part = path_parts[-1] if path_parts else ""
+        query_params = parse_qs(decoded_query)
+        idx_value = query_params.get("idx", [""])[0].strip()
+        uuid_value = query_params.get("uuid", [""])[0].strip()
+
+        # Newer Witchform links sometimes already include the full order number
+        # in the trailing path segment, e.g. WFLM7QSDTC_69D53CU23685.
+        if ORDER_NUMBER_PATTERN.fullmatch(last_part):
+            return last_part
+
+        # Some Witchform QR redirects split the order number across the path
+        # and query string, e.g. /.../69D1IASG67A8?uuid=WFLM7QSDTC.
+        if uuid_value and last_part:
+            composite_order_number = f"{uuid_value}_{last_part}"
+            if ORDER_NUMBER_PATTERN.fullmatch(composite_order_number):
+                return composite_order_number
+
+        if idx_value and last_part:
+            return f"{idx_value}_{last_part}"
+
+        prioritized_keys = (
+            "order_number",
+            "ordernumber",
+            "order_no",
+            "orderno",
+            "order",
+            "no",
+        )
+        for key in prioritized_keys:
+            for value in query_params.get(key, []):
+                candidate = str(value).strip()
+                if ORDER_NUMBER_PATTERN.fullmatch(candidate):
+                    return candidate
+
+        direct_candidates = path_parts + [
+            str(value).strip()
+            for values in query_params.values()
+            for value in values
+        ]
+        for candidate in direct_candidates:
+            if ORDER_NUMBER_PATTERN.fullmatch(candidate):
+                return candidate
+
+        for text in (decoded_path, decoded_query, decoded_fragment):
+            match = ORDER_NUMBER_PATTERN.search(text)
+            if match:
+                return match.group(0)
+
+        return ""
 
     def parse_qr_redirect(self, qr_url: str, status_code: int, location: str) -> QRParseResult:
         """리다이렉트 응답에서 주문번호를 추출한다."""
@@ -63,26 +124,13 @@ class ApiService:
                     error_message="주문 상세 경로가 아닙니다.",
                 )
 
-            path_parts = [part for part in path.split("/") if part]
-            if not path_parts:
+            order_number = self._extract_order_number(path, parsed.query, parsed.fragment)
+            if not order_number:
                 return QRParseResult(
                     success=False,
-                    error_code="ORDER_PATH_INVALID",
-                    error_message="주문 경로가 올바르지 않습니다.",
+                    error_code="ORDER_NUMBER_MISSING",
+                    error_message="주문번호를 QR 리다이렉트에서 찾을 수 없습니다.",
                 )
-
-            last_part = path_parts[-1]
-            query_params = parse_qs(parsed.query)
-            idx_value = query_params.get("idx", [""])[0].strip()
-
-            if not idx_value:
-                return QRParseResult(
-                    success=False,
-                    error_code="ORDER_IDX_MISSING",
-                    error_message="주문 식별자(idx)가 누락되었습니다.",
-                )
-
-            order_number = f"{idx_value}_{last_part}"
             full_url = (
                 f"{self.WITCHFORM_BASE}{location}"
                 if location.startswith("/")

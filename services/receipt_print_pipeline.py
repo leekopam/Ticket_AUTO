@@ -1,4 +1,4 @@
-"""Receipt rendering and print pipeline."""
+"""영수증 렌더링 및 인쇄 파이프라인(Receipt rendering and print pipeline)."""
 from __future__ import annotations
 
 import logging
@@ -7,8 +7,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from models.receipt_canvas_model import ReceiptCanvasDocument
 from models.order_model import Order
+from models.receipt_canvas_model import ReceiptCanvasDocument
 from models.receipt_settings_model import ReceiptSettings
 from services.printer_backend import PrinterBackend
 from services.receipt_canvas_renderer import render_canvas_layout
@@ -20,23 +20,28 @@ from services.windows_printer_service import WindowsPrinterService
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PRODUCT_TEMPLATE_PATH = "templates/product_receipt_layout.json"
+
 
 @dataclass
 class RenderedReceipt:
-    """Final render output plus resolved context."""
+    """최종 렌더링 결과물과 결정된 컨텍스트(Resolved context)를 포함합니다."""
 
     image: Image.Image
     context: dict[str, object]
     template: list[TemplateElement] | ReceiptCanvasDocument
 
 
-def render_order_receipt(order: Order, settings: ReceiptSettings) -> RenderedReceipt:
-    context = build_receipt_context(order, settings)
-    suffix = Path(settings.template_path).suffix.lower()
+def _render_receipt_for_template(
+    template_path: str,
+    context: dict[str, object],
+    settings: ReceiptSettings,
+) -> RenderedReceipt:
+    suffix = Path(template_path).suffix.lower()
 
     if suffix == ".json":
         store = ReceiptCanvasStore()
-        layout = store.load_layout(settings.template_path)
+        layout = store.load_layout(template_path)
         image = render_canvas_layout(
             layout,
             context=context,
@@ -47,10 +52,21 @@ def render_order_receipt(order: Order, settings: ReceiptSettings) -> RenderedRec
         )
         return RenderedReceipt(image=image, context=context, template=layout)
 
-    template = load_template(settings.template_path)
+    template = load_template(template_path)
     renderer = ReceiptRenderer(RenderConfig(paper_width=settings.paper_width, dpi=settings.printer_dpi))
     image = renderer.render(template, context)
     return RenderedReceipt(image=image, context=context, template=template)
+
+
+def render_order_receipt(
+    order: Order,
+    settings: ReceiptSettings,
+    *,
+    template_path: str | None = None,
+) -> RenderedReceipt:
+    context = build_receipt_context(order, settings)
+    resolved_template_path = (template_path or settings.template_path).strip() or settings.template_path
+    return _render_receipt_for_template(resolved_template_path, context, settings)
 
 
 def print_order_receipt(
@@ -58,54 +74,55 @@ def print_order_receipt(
     settings: ReceiptSettings,
     printer_service: PrinterBackend | None = None,
 ) -> int:
-    """주문 영수증 출력. 1장만 출력하며, 1을 반환한다."""
+    """메인 영수증을 인쇄하고 옵션에 따라 추가 상품 영수증을 인쇄합니다."""
     service = printer_service or WindowsPrinterService()
 
     rendered = render_order_receipt(order, settings)
-
-    job_name = f"Receipt_{order.order_number or 'Order'}"
     service.print_image(
         image=rendered.image,
         printer_name=settings.printer_name or None,
-        job_name=job_name,
+        job_name=f"Receipt_{order.order_number or 'Order'}",
     )
-    logger.info("영수증 출력 완료: %s", order.order_number)
+    logger.info("메인 영수증 인쇄 완료: %s", order.order_number)
 
-    return 1
+    total_copies = 1
+    goods_lines = str(rendered.context.get("goods_lines", "") or "").strip()
+    if settings.print_product_receipt and goods_lines:
+        product_template_path = (
+            str(settings.product_template_path or "").strip()
+            or DEFAULT_PRODUCT_TEMPLATE_PATH
+        )
+        product_rendered = render_order_receipt(
+            order,
+            settings,
+            template_path=product_template_path,
+        )
+        service.print_image(
+            image=product_rendered.image,
+            printer_name=settings.printer_name or None,
+            job_name=f"ProductReceipt_{order.order_number or 'Order'}",
+        )
+        logger.info("상품 영수증 인쇄 완료: %s", order.order_number)
+        total_copies += 1
+
+    return total_copies
 
 
 def _re_render(context: dict[str, object], settings: ReceiptSettings) -> RenderedReceipt:
-    """변경된 컨텍스트로 영수증 이미지를 재렌더링한다."""
-    suffix = Path(settings.template_path).suffix.lower()
+    """수정된 컨텍스트로 현재 템플릿을 다시 렌더링합니다."""
+    return _render_receipt_for_template(settings.template_path, context, settings)
 
-    if suffix == ".json":
-        store = ReceiptCanvasStore()
-        layout = store.load_layout(settings.template_path)
-        image = render_canvas_layout(
-            layout,
-            context=context,
-            paper_width=settings.paper_width,
-            margin_top=settings.margin_top,
-            margin_bottom=settings.margin_bottom,
-            dpi=settings.printer_dpi,
-        )
-        return RenderedReceipt(image=image, context=context, template=layout)
 
-    template = load_template(settings.template_path)
-    renderer = ReceiptRenderer(RenderConfig(paper_width=settings.paper_width, dpi=settings.printer_dpi))
-    image = renderer.render(template, context)
-    return RenderedReceipt(image=image, context=context, template=template)
-
-# For testing purposes: render and print a dummy receipt with hardcoded data.
 def print_test_receipt(
     settings: ReceiptSettings,
     printer_service: PrinterBackend | None = None,
 ) -> None:
+    """템플릿 테스트를 위해 가상의 주문(dummy order)을 렌더링하고 인쇄합니다."""
     dummy_order = Order(
         order_number="TEST-ORDER-01",
-        name="하츠네 미쿠",
+        name="테스트 사용자",
         phone="010-2007-0831",
-        seat="토요일 A-466\n일요일 B-467",
-        goods=["야채 주스 x200", "대파 x1"],
+        seat="A-466\nB-467",
+        goods=["티켓 상품 x2", "일반 상품 x1"],
     )
     print_order_receipt(dummy_order, settings, printer_service=printer_service)

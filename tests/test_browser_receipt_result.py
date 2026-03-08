@@ -1,4 +1,3 @@
-"""수령 완료 클릭 결과 계약 테스트."""
 from __future__ import annotations
 
 import inspect
@@ -25,6 +24,39 @@ class BrowserReceiptResultContractTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "CONFIRM_CLICK_FAIL")
         self.assertEqual(result.error_message, "x")
+
+    def test_extract_order_number_candidate_from_labelled_text(self) -> None:
+        result = BrowserService._extract_order_number_candidate(
+            "주문번호: WFLM7QSDTC_69D53CU23685"
+        )
+        self.assertEqual(result, "WFLM7QSDTC_69D53CU23685")
+
+    def test_extract_order_number_candidate_from_url(self) -> None:
+        result = BrowserService._extract_order_number_candidate(
+            "https://witchform.com/w/myform/sellForm-history-detail/WFLM7QSDTC_69D53CU23685"
+        )
+        self.assertEqual(result, "WFLM7QSDTC_69D53CU23685")
+
+    def test_extract_order_number_candidate_keeps_legacy_numeric_format(self) -> None:
+        result = BrowserService._extract_order_number_candidate(
+            "https://witchform.com/w/myform/sellForm-history-detail/14872765?idx=980235",
+            "주문번호: 980235_14872765",
+        )
+        self.assertEqual(result, "980235_14872765")
+
+    def test_extract_order_number_candidate_rejects_html_class_names(self) -> None:
+        result = BrowserService._extract_order_number_candidate(
+            '<div class="video_slider">test</div>',
+            "video_slider",
+        )
+        self.assertEqual(result, "")
+
+    def test_extract_buyer_contact_candidate(self) -> None:
+        buyer_name, buyer_phone = BrowserService._extract_buyer_contact_candidate(
+            "주문자명\n홍영기\n주문자 연락처\n010-1234-5678"
+        )
+        self.assertEqual(buyer_name, "홍영기")
+        self.assertEqual(buyer_phone, "010-1234-5678")
 
 
 if __name__ == "__main__":
