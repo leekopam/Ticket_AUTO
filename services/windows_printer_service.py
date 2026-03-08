@@ -72,7 +72,7 @@ class WindowsPrinterService:
     @staticmethod
     def _fit_to_printer_width(image: Image.Image, printer_width: int) -> Image.Image:
         """이미지를 프린터 인쇄 폭에 비례 맞춤"""
-        if image.width == printer_width or printer_width <= 0:
+        if printer_width <= 0 or image.width <= printer_width:
             return image
         ratio = printer_width / image.width
         new_height = max(1, int(image.height * ratio))
@@ -150,7 +150,9 @@ class WindowsPrinterService:
         printable_height = dc.GetDeviceCaps(win32con.VERTRES)
 
         rendered = image.convert("RGB")
-        scale = printable_width / max(1, rendered.width)
+        target_width = printable_width if printable_width > 0 else rendered.width
+        target_width = min(target_width, rendered.width)
+        scale = target_width / max(1, rendered.width)
         page_height_unscaled = max(1, int(printable_height / max(scale, 1e-6)))
 
         dc.StartDoc(job_name)
@@ -163,7 +165,7 @@ class WindowsPrinterService:
 
                 dib = ImageWin.Dib(chunk)
                 dc.StartPage()
-                dib.draw(dc.GetHandleOutput(), (0, 0, printable_width, scaled_chunk_height))
+                dib.draw(dc.GetHandleOutput(), (0, 0, target_width, scaled_chunk_height))
                 dc.EndPage()
                 start_y = end_y
         finally:

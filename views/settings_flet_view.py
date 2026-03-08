@@ -32,10 +32,18 @@ from services.receipt_canvas_store import ReceiptCanvasStore
 from services.receipt_print_pipeline import print_test_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
 from services.excel_service import ExcelService
+from services.windows_audio_service import WindowsAudioService
 from services.windows_printer_service import WindowsPrinterService
 
 
 ICONS = getattr(ft, "Icons", ft.icons)
+ALIGN_CENTER = ft.Alignment(0, 0)
+ALIGN_CENTER_RIGHT = ft.Alignment(1, 0)
+ALIGN_CENTER_LEFT = ft.Alignment(-1, 0)
+ALIGN_TOP_CENTER = ft.Alignment(0, -1)
+_IMAGE_FIT = getattr(ft, "ImageFit", getattr(ft, "BoxFit", None))
+IMAGE_FIT_CONTAIN = getattr(_IMAGE_FIT, "CONTAIN", "contain")
+IMAGE_FIT_FILL = getattr(_IMAGE_FIT, "FILL", "fill")
 
 # 폰트 선택 옵션: (key, 표시명)
 FONT_OPTIONS: list[tuple[str, str]] = [
@@ -60,6 +68,29 @@ FIELD_BINDINGS = [
     ("goods_lines", "상품목록"),
     ("ticket_lines", "티켓목록"),
 ]
+DEFAULT_RECEIPT_LAYOUT_PATH = "templates/receipt_layout.json"
+DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH = "templates/product_receipt_layout.json"
+
+
+def _coerce_picker_files(result: object) -> list[ft.FilePickerFile]:
+    files = getattr(result, "files", None)
+    if isinstance(files, list):
+        return files
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def _coerce_picker_path(result: object) -> str | None:
+    path = getattr(result, "path", None)
+    if isinstance(path, str) and path:
+        return path
+    if isinstance(result, str) and result:
+        return result
+    files = _coerce_picker_files(result)
+    if files and getattr(files[0], "path", None):
+        return str(files[0].path)
+    return None
 
 
 def _preview_width_for_paper(paper_width: str) -> int:
@@ -83,10 +114,10 @@ def _align_to_text_align(align: str) -> ft.TextAlign:
 
 def _align_to_container_align(align: str) -> ft.Alignment:
     if align == "center":
-        return ft.alignment.center
+        return ALIGN_CENTER
     if align == "right":
-        return ft.alignment.center_right
-    return ft.alignment.center_left
+        return ALIGN_CENTER_RIGHT
+    return ALIGN_CENTER_LEFT
 
 
 def _compose_bottom_anchor(
@@ -113,11 +144,17 @@ def build_receipt_settings_panel(
     *,
     store_path: str = ".runtime/receipt_settings.json",
     printer_service: WindowsPrinterService | None = None,
+    audio_service: WindowsAudioService | None = None,
+    initial_section: str = "ticket",
+    show_section_tabs: bool = True,
+    bind_keyboard_events: bool = True,
+    receipt_section_mode: str = "editor",
 ) -> ft.Control:
     """Build reusable settings panel control."""
     settings_store = ReceiptSettingsStore(store_path)
     canvas_store = ReceiptCanvasStore()
     printer_svc = printer_service or WindowsPrinterService()
+    audio_svc = audio_service or WindowsAudioService()
     settings = settings_store.load()
 
     try:
@@ -138,25 +175,56 @@ def build_receipt_settings_panel(
     if selected_printer not in printers:
         selected_printer = default_printer if default_printer in printers else (printers[0] if printers else "")
 
-    layout_path = settings.template_path.strip() or "templates/receipt_layout.json"
-    if not layout_path.lower().endswith(".json"):
-        layout_path = "templates/receipt_layout.json"
+    def _normalize_json_layout_path(path: str, default_path: str) -> str:
+        resolved = path.strip() or default_path
+        if not resolved.lower().endswith(".json"):
+            return default_path
+        return resolved
 
-    try:
-        document = canvas_store.load_layout(layout_path)
-    except Exception:
-        document = create_default_document(settings.paper_width)
+    def _load_layout_document(path: str, fallback_path: str | None = None) -> ReceiptCanvasDocument:
+        try:
+            return canvas_store.load_layout(path)
+        except Exception:
+            pass
+        if fallback_path and Path(fallback_path).exists():
+            try:
+                return canvas_store.load_layout(fallback_path)
+            except Exception:
+                pass
+        return create_default_document(settings.paper_width)
+
+    receipt_layout_path = _normalize_json_layout_path(
+        settings.template_path,
+        DEFAULT_RECEIPT_LAYOUT_PATH,
+    )
+    product_layout_path = _normalize_json_layout_path(
+        getattr(settings, "product_template_path", ""),
+        DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH,
+    )
+    documents = {
+        "receipt": _load_layout_document(receipt_layout_path),
+        "product": _load_layout_document(
+            product_layout_path,
+            fallback_path=DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH,
+        ),
+    }
+    editor_layout = {"value": "receipt"}
 
     state: dict[str, object] = {
-        "doc": document,
+        "docs": documents,
         "selected_id": None,
         "active_binding_target": None,
-        "layout_path": layout_path,
+        "layout_paths": {
+            "receipt": receipt_layout_path,
+            "product": product_layout_path,
+        },
         "canvas_focused": False,
         "drag_start_x": 0,
         "drag_start_y": 0,
         "drag_accum_dx": 0.0,
         "drag_accum_dy": 0.0,
+        "drag_pointer_start_gx": None,
+        "drag_pointer_start_gy": None,
         "drag_bottom_start_y": None,    # 드래그 시작 시 고정한 하단 여백 앵커 Y
         "resize_start_x": 0,
         "resize_start_y": 0,
@@ -164,6 +232,8 @@ def build_receipt_settings_panel(
         "resize_start_h": 0,
         "resize_accum_dx": 0.0,
         "resize_accum_dy": 0.0,
+        "resize_pointer_start_gx": None,
+        "resize_pointer_start_gy": None,
         "resize_bottom_start_y": None,  # 리사이즈 시작 시 고정한 하단 여백 앵커 Y
         "canvas_scroll_ctrl": None,
         "scroll_gutter_ctrl": None,
@@ -214,10 +284,21 @@ def build_receipt_settings_panel(
     )
     status_text = ft.Text(value="편집 준비됨", selectable=True, color="#444444")
     current_template_text = ft.Text(
-        value=f"활성 템플릿: {state['layout_path']}",
+        value=f"활성 영수증 템플릿: {receipt_layout_path}",
         color="#5F5F5F",
         size=12,
         selectable=True,
+    )
+    ticket_settings_status_text = ft.Text(value="", selectable=True, color="#444444")
+    scan_sound_path_field = ft.TextField(
+        label="QR 스캔 완료 알림음",
+        value=settings.qr_scan_success_sound_path,
+        read_only=True,
+        expand=True,
+    )
+    product_receipt_switch = ft.Switch(
+        label="상품 영수증 추가 출력",
+        value=bool(getattr(settings, "print_product_receipt", False)),
     )
 
     btn_add_text = ft.ElevatedButton("텍스트 추가", icon=ICONS.TEXT_FIELDS_ROUNDED)
@@ -228,6 +309,9 @@ def build_receipt_settings_panel(
     btn_save_as = ft.ElevatedButton("다른이름으로 저장", icon=ICONS.SAVE_AS_ROUNDED)
     btn_load = ft.ElevatedButton("불러오기", icon=ICONS.FOLDER_OPEN_ROUNDED)
     btn_test_print = ft.ElevatedButton("테스트 출력", icon=ICONS.PRINT_ROUNDED)
+    btn_pick_scan_sound = ft.ElevatedButton("MP3 선택", icon=ICONS.AUDIO_FILE_ROUNDED)
+    btn_preview_scan_sound = ft.OutlinedButton("미리 듣기", icon=ICONS.PLAY_ARROW_ROUNDED)
+    btn_clear_scan_sound = ft.OutlinedButton("초기화", icon=ICONS.DELETE_OUTLINE_ROUNDED)
 
     canvas_host = ft.Container(expand=True)
     property_panel = ft.Container(bgcolor="#FFFFFF", border_radius=8, padding=12)
@@ -235,15 +319,48 @@ def build_receipt_settings_panel(
     image_picker = ft.FilePicker()
     save_as_picker = ft.FilePicker()
     load_picker = ft.FilePicker()
-    page.overlay.append(image_picker)
-    page.overlay.append(save_as_picker)
-    page.overlay.append(load_picker)
+    scan_sound_picker = ft.FilePicker()
+
+    def _attach_page_service(service) -> None:
+        # Newer Flet versions mount FilePicker via the page service registry,
+        # while older versions accepted it in overlay.
+        registry = getattr(page, "_services", None)
+        registered = getattr(registry, "_services", None)
+        if isinstance(registered, list):
+            registered.append(service)
+            return
+
+        services = getattr(page, "services", None)
+        if isinstance(services, list):
+            services.append(service)
+            return
+
+        register_service = getattr(registry, "register_service", None)
+        if callable(register_service):
+            register_service(service)
+            return
+
+        page.overlay.append(service)
+
+    _attach_page_service(image_picker)
+    _attach_page_service(save_as_picker)
+    _attach_page_service(load_picker)
+    _attach_page_service(scan_sound_picker)
+
+    def _editor_layout_key() -> str:
+        return editor_layout["value"]
+
+    def _editor_layout_label(layout_key: str | None = None) -> str:
+        return "상품 영수증" if (layout_key or _editor_layout_key()) == "product" else "영수증"
 
     def _doc() -> ReceiptCanvasDocument:
-        return state["doc"]  # type: ignore[return-value]
+        docs = state["docs"]  # type: ignore[assignment]
+        return docs[_editor_layout_key()]  # type: ignore[index, return-value]
 
     def _set_doc(doc: ReceiptCanvasDocument) -> None:
-        state["doc"] = doc
+        docs = dict(state["docs"])  # type: ignore[arg-type]
+        docs[_editor_layout_key()] = doc
+        state["docs"] = docs
 
     def _selected_id() -> str | None:
         return state["selected_id"]  # type: ignore[return-value]
@@ -261,14 +378,17 @@ def build_receipt_settings_panel(
         state["active_binding_target"] = value
 
     def _layout_path() -> str:
-        return state["layout_path"]  # type: ignore[return-value]
+        layout_paths = state["layout_paths"]  # type: ignore[assignment]
+        return layout_paths[_editor_layout_key()]  # type: ignore[index, return-value]
 
     def _set_canvas_focus(focused: bool) -> None:
         state["canvas_focused"] = focused
 
     def _set_layout_path(path: str) -> None:
-        state["layout_path"] = path
-        current_template_text.value = f"활성 템플릿: {path}"
+        layout_paths = dict(state["layout_paths"])  # type: ignore[arg-type]
+        layout_paths[_editor_layout_key()] = path
+        state["layout_paths"] = layout_paths
+        current_template_text.value = f"활성 {_editor_layout_label()} 템플릿: {path}"
 
     def _show_status(message: str) -> None:
         status_text.value = message
@@ -377,7 +497,7 @@ def build_receipt_settings_panel(
         canvas_meta_text = ft.Text(color="#666666", size=12)
 
         canvas_host.content = ft.Container(
-            alignment=ft.alignment.top_center,
+            alignment=ALIGN_TOP_CENTER,
             padding=ft.padding.only(top=8),
             content=ft.Column(
                 controls=[canvas_meta_text, scrollable_canvas],
@@ -729,12 +849,16 @@ def build_receipt_settings_panel(
         except (ValueError, TypeError):
             return 203
 
-    def _set_paper_width(new_width: str) -> None:
+    def _set_paper_width(new_width: str, push_update: bool = True) -> None:
         if new_width not in {"58", "80"}:
             return
 
         doc = _doc()
-        old_real_width = max(1, int(doc.meta.canvas_width_px))
+        old_real_width = max(
+            1,
+            int(doc.meta.canvas_width_px),
+            max((int(element.x) + max(1, int(element.w)) for element in doc.elements), default=0),
+        )
         new_real_width = paper_width_to_px(new_width)  # 항상 203 DPI 기준
         if old_real_width != new_real_width:
             ratio = new_real_width / old_real_width
@@ -764,13 +888,70 @@ def build_receipt_settings_panel(
             )
         else:
             _set_doc(replace(doc, meta=replace(doc.meta, paper_width="58" if new_width == "58" else "80")))
-        _refresh_all()
+        _refresh_all(push_update=push_update)
+
+    def _selected_ticket_product_names() -> list[str]:
+        return [str(cb.label) for cb in ticket_checkboxes if cb.value]
+
+    def _build_settings_object(
+        target_layout_path: str | None = None,
+        *,
+        target_layout_key: str | None = None,
+    ) -> ReceiptSettings:
+        layout_paths = dict(state["layout_paths"])  # type: ignore[arg-type]
+        if target_layout_path:
+            layout_paths[target_layout_key or _editor_layout_key()] = target_layout_path
+
+        resolved_receipt_layout_path = _normalize_json_layout_path(
+            str(layout_paths.get("receipt", DEFAULT_RECEIPT_LAYOUT_PATH)),
+            DEFAULT_RECEIPT_LAYOUT_PATH,
+        )
+        resolved_product_layout_path = _normalize_json_layout_path(
+            str(layout_paths.get("product", DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH)),
+            DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH,
+        )
+
+        return ReceiptSettings(
+            printer_name=(printer_dropdown.value or "").strip(),
+            paper_width="58" if str(paper_width_dropdown.value) == "58" else "80",  # type: ignore[arg-type]
+            show_qr=settings.show_qr,
+            show_logo=settings.show_logo,
+            template_path=resolved_receipt_layout_path,
+            product_template_path=resolved_product_layout_path,
+            logo_path=settings.logo_path,
+            event_title=settings.event_title,
+            qr_payload_template=settings.qr_payload_template,
+            margin_top=max(0, _coerce_int(margin_top_field.value, 0)),
+            margin_bottom=max(0, _coerce_int(margin_bottom_field.value, 0)),
+            printer_dpi=_current_dpi(),
+            print_product_receipt=bool(product_receipt_switch.value),
+            ticket_product_names=_selected_ticket_product_names(),
+            qr_scan_success_sound_path=(scan_sound_path_field.value or "").strip(),
+        )
+
+    def _save_settings_only(*, show_message: bool = True) -> ReceiptSettings | None:
+        try:
+            settings_obj = _build_settings_object()
+            settings_store.save(settings_obj)
+            if show_message:
+                ticket_settings_status_text.value = "티켓 확인 설정 저장 완료"
+                page.update()
+            return settings_obj
+        except Exception as exc:
+            if show_message:
+                ticket_settings_status_text.value = f"설정 저장 실패: {exc}"
+                page.update()
+            return None
 
     def _save_current_layout(*, show_message: bool = True) -> ReceiptSettings | None:
         try:
             target_layout_path = _layout_path()
             if not target_layout_path.lower().endswith(".json"):
-                target_layout_path = "templates/receipt_layout.json"
+                target_layout_path = (
+                    DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH
+                    if _editor_layout_key() == "product"
+                    else DEFAULT_RECEIPT_LAYOUT_PATH
+                )
             _set_layout_path(target_layout_path)
 
             current_doc = _doc()
@@ -786,24 +967,13 @@ def build_receipt_settings_panel(
             _set_doc(current_doc)
 
             canvas_store.save_layout(target_layout_path, current_doc)
-
-            settings_obj = ReceiptSettings(
-                printer_name=(printer_dropdown.value or "").strip(),
-                paper_width=paper_width,  # type: ignore[arg-type]
-                show_qr=settings.show_qr,
-                show_logo=settings.show_logo,
-                template_path=target_layout_path,
-                logo_path=settings.logo_path,
-                event_title=settings.event_title,
-                qr_payload_template=settings.qr_payload_template,
-                margin_top=max(0, _coerce_int(margin_top_field.value, 0)),
-                margin_bottom=max(0, _coerce_int(margin_bottom_field.value, 0)),
-                printer_dpi=_current_dpi(),
-                ticket_product_names=settings.ticket_product_names,
+            settings_obj = _build_settings_object(
+                target_layout_path,
+                target_layout_key=_editor_layout_key(),
             )
             settings_store.save(settings_obj)
             if show_message:
-                _show_status("레이아웃과 설정 저장 완료")
+                _show_status(f"{_editor_layout_label()} 레이아웃과 설정 저장 완료")
             return settings_obj
         except Exception as exc:
             if show_message:
@@ -1113,7 +1283,46 @@ def build_receipt_settings_panel(
 
         property_panel.content = ft.Column(controls=controls, spacing=8, scroll=ft.ScrollMode.AUTO)
 
-    def _start_resize(element_id: str, _: ft.DragStartEvent) -> None:
+    def _drag_delta_from_event(
+        e: ft.DragUpdateEvent,
+        *,
+        start_gx_key: str,
+        start_gy_key: str,
+        accum_dx_key: str,
+        accum_dy_key: str,
+    ) -> tuple[float, float]:
+        """Return cumulative drag delta in preview pixels across Flet versions."""
+        global_gx = getattr(e, "global_x", None)
+        global_gy = getattr(e, "global_y", None)
+        start_gx = state.get(start_gx_key)
+        start_gy = state.get(start_gy_key)
+        if global_gx is not None and global_gy is not None and isinstance(start_gx, (int, float)) and isinstance(start_gy, (int, float)):
+            dx = float(global_gx) - float(start_gx)
+            dy = float(global_gy) - float(start_gy)
+            state[accum_dx_key] = dx
+            state[accum_dy_key] = dy
+            return dx, dy
+
+        delta_x = getattr(e, "delta_x", None)
+        delta_y = getattr(e, "delta_y", None)
+        if delta_x is not None and delta_y is not None:
+            accum_dx = float(state[accum_dx_key]) + float(delta_x)
+            accum_dy = float(state[accum_dy_key]) + float(delta_y)
+            state[accum_dx_key] = accum_dx
+            state[accum_dy_key] = accum_dy
+            return accum_dx, accum_dy
+
+        local_delta = getattr(e, "local_delta", None)
+        if local_delta is not None:
+            dx = float(getattr(local_delta, "x", 0.0) or 0.0)
+            dy = float(getattr(local_delta, "y", 0.0) or 0.0)
+            state[accum_dx_key] = dx
+            state[accum_dy_key] = dy
+            return dx, dy
+
+        return float(state[accum_dx_key]), float(state[accum_dy_key])
+
+    def _start_resize(element_id: str, e: ft.DragStartEvent) -> None:
         """리사이즈 드래그 시작 시 원본 치수 저장"""
         current = next((item for item in _doc().elements if item.id == element_id), None)
         if current:
@@ -1122,6 +1331,8 @@ def build_receipt_settings_panel(
             state["resize_start_w"] = current.w
             state["resize_start_h"] = current.h
             state["resize_bottom_start_y"] = _fixed_bottom_anchor_y(moving_ids={element_id})
+        state["resize_pointer_start_gx"] = float(e.global_x)
+        state["resize_pointer_start_gy"] = float(e.global_y)
         state["resize_accum_dx"] = 0.0
         state["resize_accum_dy"] = 0.0
 
@@ -1134,10 +1345,13 @@ def build_receipt_settings_panel(
         preview_w = _preview_canvas_width()
 
         # 프리뷰 delta를 float로 누적
-        accum_dx = float(state["resize_accum_dx"]) + e.delta_x
-        accum_dy = float(state["resize_accum_dy"]) + e.delta_y
-        state["resize_accum_dx"] = accum_dx
-        state["resize_accum_dy"] = accum_dy
+        accum_dx, accum_dy = _drag_delta_from_event(
+            e,
+            start_gx_key="resize_pointer_start_gx",
+            start_gy_key="resize_pointer_start_gy",
+            accum_dx_key="resize_accum_dx",
+            accum_dy_key="resize_accum_dy",
+        )
 
         dx = preview_to_real(accum_dx, real_width=real_w, preview_width=preview_w)
         dy = preview_to_real(accum_dy, real_width=real_w, preview_width=preview_w)
@@ -1227,6 +1441,8 @@ def build_receipt_settings_panel(
         """리사이즈 종료 시 스티키 정렬 + 전체 리프레시"""
         state["snap_guides"] = []
         state["resize_bottom_start_y"] = None
+        state["resize_pointer_start_gx"] = None
+        state["resize_pointer_start_gy"] = None
         _resolve_overlaps_sticky()
         _refresh_all()
 
@@ -1501,7 +1717,7 @@ def build_receipt_settings_panel(
                     bgcolor="#FFFDE7",
                     border=ft.border.all(2, "#4A90D9"),
                     border_radius=4,
-                    alignment=ft.alignment.center,
+                    alignment=ALIGN_CENTER,
                     content=div_inline_field,
                 )
             else:
@@ -1540,7 +1756,7 @@ def build_receipt_settings_panel(
                     # 선 + 텍스트: 좌측 선 — 텍스트 — 우측 선
                     divider_content = ft.Row(
                         controls=[
-                            ft.Container(expand=True, content=_make_line_ctrl(line_w * 0.4), alignment=ft.alignment.center),
+                            ft.Container(expand=True, content=_make_line_ctrl(line_w * 0.4), alignment=ALIGN_CENTER),
                             ft.Container(
                                 padding=ft.padding.symmetric(horizontal=4),
                                 content=ft.Text(
@@ -1553,7 +1769,7 @@ def build_receipt_settings_panel(
                                     no_wrap=True,
                                 ),
                             ),
-                            ft.Container(expand=True, content=_make_line_ctrl(line_w * 0.4), alignment=ft.alignment.center),
+                            ft.Container(expand=True, content=_make_line_ctrl(line_w * 0.4), alignment=ALIGN_CENTER),
                         ],
                         spacing=0,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1568,12 +1784,12 @@ def build_receipt_settings_panel(
                     border=ft.border.all(2 if is_selected else 1, border_color),
                     border_radius=4,
                     padding=ft.padding.symmetric(horizontal=6),
-                    alignment=ft.alignment.center,
+                    alignment=ALIGN_CENTER,
                     content=divider_content,
                 )
         elif element.type == "image":
             if element.asset_path and Path(element.asset_path).exists():
-                image_fit = ft.ImageFit.CONTAIN if element.preserve_ratio else ft.ImageFit.FILL
+                image_fit = IMAGE_FIT_CONTAIN if element.preserve_ratio else IMAGE_FIT_FILL
                 content = ft.Image(src=element.asset_path, fit=image_fit, width=preview_element_w - 8, height=preview_element_h - 8)
             else:
                 content = ft.Column(
@@ -1592,7 +1808,7 @@ def build_receipt_settings_panel(
                 border=ft.border.all(2 if is_selected else 1, border_color),
                 border_radius=6,
                 padding=4,
-                alignment=ft.alignment.center,
+                alignment=ALIGN_CENTER,
                 content=content,
             )
         else:
@@ -1646,7 +1862,7 @@ def build_receipt_settings_panel(
                 state["inline_edit_id"] = element.id
                 _refresh_all()
 
-        def on_pan_start(_: ft.DragStartEvent) -> None:
+        def on_pan_start(e: ft.DragStartEvent) -> None:
             _set_canvas_focus(True)
             _set_selected_id(element.id)
             state["drag_bottom_start_y"] = _fixed_bottom_anchor_y(moving_ids={element.id})
@@ -1654,6 +1870,8 @@ def build_receipt_settings_panel(
             if current:
                 state["drag_start_x"] = current.x
                 state["drag_start_y"] = current.y
+            state["drag_pointer_start_gx"] = float(e.global_x)
+            state["drag_pointer_start_gy"] = float(e.global_y)
             state["drag_accum_dx"] = 0.0
             state["drag_accum_dy"] = 0.0
 
@@ -1662,10 +1880,13 @@ def build_receipt_settings_panel(
             drag_bottom_start_y = state.get("drag_bottom_start_y")
             if not isinstance(drag_bottom_start_y, int):
                 drag_bottom_start_y = _fixed_bottom_anchor_y(moving_ids=moving_ids)
-            accum_dx = float(state["drag_accum_dx"]) + e.delta_x
-            accum_dy = float(state["drag_accum_dy"]) + e.delta_y
-            state["drag_accum_dx"] = accum_dx
-            state["drag_accum_dy"] = accum_dy
+            accum_dx, accum_dy = _drag_delta_from_event(
+                e,
+                start_gx_key="drag_pointer_start_gx",
+                start_gy_key="drag_pointer_start_gy",
+                accum_dx_key="drag_accum_dx",
+                accum_dy_key="drag_accum_dy",
+            )
             total_real_dx = preview_to_real(accum_dx, real_width=real_w, preview_width=preview_w)
             total_real_dy = preview_to_real(accum_dy, real_width=real_w, preview_width=preview_w)
             c_w = int(_doc().meta.canvas_width_px)
@@ -1731,6 +1952,8 @@ def build_receipt_settings_panel(
         def on_pan_end(_: ft.DragEndEvent) -> None:
             state["snap_guides"] = []
             state["drag_bottom_start_y"] = None
+            state["drag_pointer_start_gx"] = None
+            state["drag_pointer_start_gy"] = None
 
             # 삽입 인디케이터 제거
             canvas_stack = state.get("canvas_stack")
@@ -2084,10 +2307,11 @@ def build_receipt_settings_panel(
             + (f" / 여백 상:{_margin_top_px()} 하:{_margin_bottom_px()}" if _margin_top_px() or _margin_bottom_px() else "")
         )
 
-    def _refresh_all() -> None:
+    def _refresh_all(push_update: bool = True) -> None:
         _refresh_canvas()
         _refresh_property_panel()
-        page.update()
+        if push_update:
+            page.update()
 
     def on_add_text(_: ft.ControlEvent) -> None:
         _add_element(_new_default_element("text"))
@@ -2106,28 +2330,51 @@ def build_receipt_settings_panel(
         if saved:
             _show_status("저장 완료")
 
+    def _save_portable_layout(path: str | None) -> None:
+        if not path:
+            return
+        target_path = path if path.lower().endswith(".json") else f"{path}.json"
+        try:
+            canvas_store.export_portable(target_path, _doc())
+            _show_status(f"포터블 저장 완료: {Path(target_path).name}")
+        except Exception as exc:
+            _show_status(f"포터블 저장 실패: {exc}")
+        _refresh_all()
+
     def on_save_as(_: ft.ControlEvent) -> None:
         save_as_picker.save_file(
             dialog_title="템플릿 다른이름으로 저장",
             file_type=ft.FilePickerFileType.CUSTOM,
             allowed_extensions=["json"],
-            file_name="receipt_layout.json",
+            file_name=(
+                "product_receipt_layout.json"
+                if _editor_layout_key() == "product"
+                else "receipt_layout.json"
+            ),
         )
 
-    def on_save_as_result(event: ft.FilePickerResultEvent) -> None:
-        if not event.path:
+    def _load_layout_from_file(path: str | None) -> None:
+        if not path:
+            _show_status("불러오기 실패: 선택한 파일 경로를 읽을 수 없습니다.")
             return
-        path = event.path
-        if not path.lower().endswith(".json"):
-            path += ".json"
         try:
-            canvas_store.export_portable(path, _doc())
-            _show_status(f"포터블 저장 완료: {Path(path).name}")
+            doc = canvas_store.load_layout(path)
+            _set_doc(doc)
+            # 외부 템플릿은 기본 경로에 저장하여 asset 경로 불일치 방지
+            default_layout_path = (
+                DEFAULT_PRODUCT_RECEIPT_LAYOUT_PATH
+                if _editor_layout_key() == "product"
+                else DEFAULT_RECEIPT_LAYOUT_PATH
+            )
+            _set_layout_path(default_layout_path)
+            paper_width_dropdown.value = doc.meta.paper_width
+            state["selected_id"] = None
+            # 즉시 기본 경로에 저장하여 embedded_data + 복원된 asset_path 보존
+            canvas_store.save_layout(default_layout_path, doc)
+            _refresh_all()
+            _show_status(f"불러오기 완료: {Path(path).name}")
         except Exception as exc:
-            _show_status(f"포터블 저장 실패: {exc}")
-        _refresh_all()
-
-    save_as_picker.on_result = on_save_as_result
+            _show_status(f"불러오기 실패: {exc}")
 
     def on_load(_: ft.ControlEvent) -> None:
         load_picker.pick_files(
@@ -2136,26 +2383,6 @@ def build_receipt_settings_panel(
             allowed_extensions=["json"],
             allow_multiple=False,
         )
-
-    def on_load_result(event: ft.FilePickerResultEvent) -> None:
-        if not event.files:
-            return
-        path = event.files[0].path
-        try:
-            doc = canvas_store.load_layout(path)
-            _set_doc(doc)
-            # 외부 템플릿은 기본 경로에 저장하여 asset 경로 불일치 방지
-            _set_layout_path("templates/receipt_layout.json")
-            paper_width_dropdown.value = doc.meta.paper_width
-            state["selected_id"] = None
-            # 즉시 기본 경로에 저장하여 embedded_data + 복원된 asset_path 보존
-            canvas_store.save_layout("templates/receipt_layout.json", doc)
-            _refresh_all()
-            _show_status(f"불러오기 완료: {Path(path).name}")
-        except Exception as exc:
-            _show_status(f"불러오기 실패: {exc}")
-
-    load_picker.on_result = on_load_result
 
     def on_test_print(_: ft.ControlEvent) -> None:
         saved = _save_current_layout(show_message=False)
@@ -2168,6 +2395,47 @@ def build_receipt_settings_panel(
         except Exception as exc:
             _show_status(f"테스트 출력 실패: {exc}")
 
+    def _handle_scan_sound_files(files: list[ft.FilePickerFile]) -> None:
+        if not files:
+            return
+        path = files[0].path
+        if not path:
+            ticket_settings_status_text.value = "알림음 선택 실패: 파일 경로를 읽을 수 없습니다."
+            page.update()
+            return
+        scan_sound_path_field.value = path
+        saved = _save_settings_only(show_message=False)
+        ticket_settings_status_text.value = (
+            f"알림음 저장 완료: {Path(path).name}" if saved else "알림음 저장 실패"
+        )
+        page.update()
+
+    def on_pick_scan_sound(_: ft.ControlEvent) -> None:
+        scan_sound_picker.pick_files(
+            allow_multiple=False,
+            dialog_title="QR 스캔 완료 알림음 선택",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["mp3", "wav", "m4a"],
+        )
+
+    def on_preview_scan_sound(_: ft.ControlEvent) -> None:
+        path = (scan_sound_path_field.value or "").strip()
+        if not path:
+            ticket_settings_status_text.value = "미리 들을 알림음을 먼저 선택하세요."
+            page.update()
+            return
+        if audio_svc.play_file(path):
+            ticket_settings_status_text.value = f"미리 듣기 재생: {Path(path).name}"
+        else:
+            ticket_settings_status_text.value = "알림음 재생 실패: 파일 또는 형식을 확인하세요."
+        page.update()
+
+    def on_clear_scan_sound(_: ft.ControlEvent) -> None:
+        scan_sound_path_field.value = ""
+        saved = _save_settings_only(show_message=False)
+        ticket_settings_status_text.value = "알림음 설정 초기화 완료" if saved else "알림음 초기화 실패"
+        page.update()
+
     def on_paper_width_change(_: ft.ControlEvent) -> None:
         _set_paper_width(str(paper_width_dropdown.value or "80"))
 
@@ -2176,11 +2444,15 @@ def build_receipt_settings_panel(
         _show_status(f"인쇄 DPI: {_current_dpi()} (레이아웃 비율 유지)")
         page.update()
 
-    def on_image_picked(event: ft.FilePickerResultEvent) -> None:
-        if not event.files:
+    def _handle_image_files(files: list[ft.FilePickerFile]) -> None:
+        if not files:
+            return
+        path = files[0].path
+        if not path:
+            _show_status("이미지 추가 실패: 선택한 파일 경로를 읽을 수 없습니다.")
             return
         try:
-            imported = canvas_store.import_image_asset(event.files[0].path)
+            imported = canvas_store.import_image_asset(path)
             selected = _find_selected_element()
             if selected and selected.type == "image":
                 _upsert_element(replace(selected, asset_path=imported))
@@ -2191,7 +2463,25 @@ def build_receipt_settings_panel(
         except Exception as exc:
             _show_status(f"이미지 추가 실패: {exc}")
 
-    image_picker.on_result = on_image_picked
+    def _on_image_picker_result(event) -> None:
+        _handle_image_files(_coerce_picker_files(event))
+
+    def _on_save_as_picker_result(event) -> None:
+        _save_portable_layout(_coerce_picker_path(event))
+
+    def _on_load_picker_result(event) -> None:
+        files = _coerce_picker_files(event)
+        if not files:
+            return
+        _load_layout_from_file(files[0].path)
+
+    def _on_scan_sound_picker_result(event) -> None:
+        _handle_scan_sound_files(_coerce_picker_files(event))
+
+    setattr(image_picker, "on_result", _on_image_picker_result)
+    setattr(save_as_picker, "on_result", _on_save_as_picker_result)
+    setattr(load_picker, "on_result", _on_load_picker_result)
+    setattr(scan_sound_picker, "on_result", _on_scan_sound_picker_result)
 
     btn_add_text.on_click = on_add_text
     btn_add_image.on_click = on_add_image
@@ -2201,6 +2491,9 @@ def build_receipt_settings_panel(
     btn_save_as.on_click = on_save_as
     btn_load.on_click = on_load
     btn_test_print.on_click = on_test_print
+    btn_pick_scan_sound.on_click = on_pick_scan_sound
+    btn_preview_scan_sound.on_click = on_preview_scan_sound
+    btn_clear_scan_sound.on_click = on_clear_scan_sound
     paper_width_dropdown.on_change = on_paper_width_change
     dpi_dropdown.on_change = on_dpi_change
     # 여백 필드 변경 시 캔버스 갱신 (실시간 + blur)
@@ -2216,7 +2509,7 @@ def build_receipt_settings_panel(
     field_chip_row = ft.Row(
         controls=[
             ft.OutlinedButton(
-                text=label,
+                label,
                 height=30,
                 on_click=lambda _e, key=field_key: _insert_binding(key),
             )
@@ -2339,7 +2632,7 @@ def build_receipt_settings_panel(
 
     # --- 티켓 분류 설정 접이식 섹션 ---
     ticket_checkboxes: list[ft.Checkbox] = []
-    ticket_checkbox_column = ft.Column(spacing=4)
+    ticket_checkbox_list = ft.ListView(spacing=6, padding=0, expand=True)
 
     def _load_ticket_checkboxes() -> None:
         """상품 목록을 로드하여 티켓 분류 체크박스를 생성한다."""
@@ -2355,8 +2648,9 @@ def build_receipt_settings_panel(
         def _on_ticket_check(_e: ft.ControlEvent) -> None:
             selected_names = [cb.label for cb in ticket_checkboxes if cb.value]
             settings.ticket_product_names = selected_names
-            # 변경 즉시 파일에 저장
-            _save_current_layout(show_message=False)
+            _save_settings_only(show_message=False)
+            ticket_settings_status_text.value = "티켓 분류 설정 저장 완료"
+            page.update()
 
         for name in product_names:
             cb = ft.Checkbox(
@@ -2366,29 +2660,59 @@ def build_receipt_settings_panel(
             )
             ticket_checkboxes.append(cb)
 
-        ticket_checkbox_column.controls = list(ticket_checkboxes) if ticket_checkboxes else [
+        ticket_checkbox_list.controls = list(ticket_checkboxes) if ticket_checkboxes else [
             ft.Text("상품 컬럼이 없습니다.", size=12, color="#999999"),
         ]
 
     _load_ticket_checkboxes()
 
-    ticket_expansion_tile = ft.ExpansionTile(
-        title=ft.Text("티켓 분류 설정", weight=ft.FontWeight.BOLD),
-        leading=ft.Icon(ICONS.CONFIRMATION_NUMBER_ROUNDED, color="#2A7FFF"),
-        initially_expanded=False,
-        controls=[
-            ft.Container(
-                content=ft.Column(
-                    controls=[
-                        ft.Text("티켓으로 분류할 상품을 선택하세요.", size=12, color="#666666"),
-                        ticket_checkbox_column,
-                    ],
-                    spacing=8,
-                ),
-                padding=ft.padding.only(left=8, right=8, top=8, bottom=16),
-            ),
-        ],
-    )
+    btn_receipt_editor_tab = ft.TextButton("영수증", icon=ICONS.RECEIPT_LONG_ROUNDED)
+    btn_product_editor_tab = ft.TextButton("상품 영수증", icon=ICONS.RECEIPT_LONG_ROUNDED)
+
+    def _apply_editor_layout(push_update: bool = True) -> None:
+        active_bg = "#FFFFFF"
+        inactive_bg = "#00000000"
+        active_border = ft.border.all(2, "#111111")
+        inactive_border = ft.border.all(1, "#D0D7E2")
+
+        btn_receipt_editor_tab.style = ft.ButtonStyle(
+            bgcolor=active_bg if _editor_layout_key() == "receipt" else inactive_bg,
+            color="#111111",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            side=active_border if _editor_layout_key() == "receipt" else inactive_border,
+            padding=ft.padding.symmetric(horizontal=18, vertical=12),
+        )
+        btn_product_editor_tab.style = ft.ButtonStyle(
+            bgcolor=active_bg if _editor_layout_key() == "product" else inactive_bg,
+            color="#111111",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            side=active_border if _editor_layout_key() == "product" else inactive_border,
+            padding=ft.padding.symmetric(horizontal=18, vertical=12),
+        )
+
+        _set_selected_id(None)
+        _set_active_binding_target(None)
+        state["inline_edit_id"] = None
+        current_template_text.value = f"활성 {_editor_layout_label()} 템플릿: {_layout_path()}"
+
+        if _doc().meta.paper_width != str(paper_width_dropdown.value or "80"):
+            _set_paper_width(str(paper_width_dropdown.value or "80"), push_update=False)
+        else:
+            _refresh_all(push_update=False)
+
+        if push_update:
+            page.update()
+
+    def _set_editor_layout(layout_key: str) -> None:
+        editor_layout["value"] = "product" if layout_key == "product" else "receipt"
+        _apply_editor_layout()
+
+    def _on_product_receipt_switch(_: ft.ControlEvent) -> None:
+        saved = _save_settings_only(show_message=False)
+        if saved:
+            _show_status("상품 영수증 출력 옵션 저장 완료")
+
+    product_receipt_switch.on_change = _on_product_receipt_switch
 
     left_controls_panel = ft.Container(
         bgcolor="#FFFFFF",
@@ -2420,6 +2744,23 @@ def build_receipt_settings_panel(
                     wrap=True,
                 ),
                 current_template_text,
+                ft.Container(
+                    bgcolor="#F8FAFD",
+                    border_radius=12,
+                    border=ft.border.all(1, "#D9E2F2"),
+                    padding=12,
+                    content=ft.Column(
+                        controls=[
+                            product_receipt_switch,
+                            ft.Text(
+                                "활성화하면 일반 상품이 있는 주문에만 상품 영수증을 추가로 출력합니다.",
+                                size=12,
+                                color="#666666",
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                ),
                 ft.Divider(),
                 ft.Row(
                     controls=[
@@ -2436,7 +2777,6 @@ def build_receipt_settings_panel(
                 status_text,
                 ft.Divider(),
                 qr_expansion_tile,
-                ticket_expansion_tile,
             ],
             spacing=8,
             scroll=ft.ScrollMode.AUTO,
@@ -2448,7 +2788,7 @@ def build_receipt_settings_panel(
         border_radius=8,
         padding=10,
         content=canvas_host,
-        alignment=ft.alignment.top_center,
+        alignment=ALIGN_TOP_CENTER,
     )
 
     property_wrapper = ft.Container(
@@ -2456,13 +2796,18 @@ def build_receipt_settings_panel(
         border_radius=8,
         padding=10,
         content=property_panel,
-        alignment=ft.alignment.top_center,
+        alignment=ALIGN_TOP_CENTER,
     )
 
     right_workspace = ft.Container(
         expand=3,
         content=ft.Column(
             controls=[
+                ft.Row(
+                    controls=[btn_receipt_editor_tab, btn_product_editor_tab],
+                    spacing=8,
+                    wrap=True,
+                ),
                 property_wrapper,
                 canvas_container,
             ],
@@ -2483,22 +2828,446 @@ def build_receipt_settings_panel(
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
+    ticket_settings_panel = ft.Container(
+        expand=True,
+        bgcolor="#FFFFFF",
+        border_radius=16,
+        padding=20,
+        content=ft.Column(
+            controls=[
+                ft.Text("티켓 확인 설정", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("QR 스캔 완료 알림음과 티켓 분류 기준을 관리합니다.", color="#666666"),
+                ft.Divider(height=18, color="#D9DDE5"),
+                ft.Container(
+                    bgcolor="#F8FAFD",
+                    border_radius=14,
+                    border=ft.border.all(1, "#D9E2F2"),
+                    padding=16,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text("QR 스캔 완료 알림음", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("선택한 MP3 또는 WAV 파일이 수령 처리 성공 직후 재생됩니다.", size=12, color="#666666"),
+                            scan_sound_path_field,
+                            ft.Row(
+                                controls=[
+                                    btn_pick_scan_sound,
+                                    btn_preview_scan_sound,
+                                    btn_clear_scan_sound,
+                                ],
+                                spacing=8,
+                                wrap=True,
+                            ),
+                            ticket_settings_status_text,
+                        ],
+                        spacing=10,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ),
+                ft.Container(
+                    bgcolor="#F8FAFD",
+                    border_radius=14,
+                    border=ft.border.all(1, "#D9E2F2"),
+                    padding=16,
+                    expand=True,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text("티켓 상품 분류", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("체크한 상품은 티켓 영역으로 분리되어 표시됩니다.", size=12, color="#666666"),
+                            ft.Container(
+                                bgcolor="#FFFFFF",
+                                border_radius=12,
+                                border=ft.border.all(1, "#E2E8F0"),
+                                padding=12,
+                                height=280,
+                                content=ticket_checkbox_list,
+                            ),
+                        ],
+                        spacing=10,
+                        expand=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ),
+            ],
+            spacing=16,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        ),
+    )
+
+    receipt_section_placeholder = ft.Container(
+        expand=True,
+        bgcolor="#FFFFFF",
+        border_radius=16,
+        padding=20,
+        content=ft.Column(
+            controls=[
+                ft.Text("영수증 양식 설정", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("이 영역은 추후 설정 기능이 들어갈 공간입니다.", color="#666666"),
+                ft.Container(
+                    expand=True,
+                    border_radius=16,
+                    border=ft.border.all(1, "#D9DDE5"),
+                    bgcolor="#F8FAFD",
+                    alignment=ALIGN_CENTER,
+                    content=ft.Column(
+                        controls=[
+                            ft.Icon(ICONS.RECEIPT_LONG_ROUNDED, size=42, color="#8AA4C8"),
+                            ft.Text("영수증 양식 설정 영역", size=18, weight=ft.FontWeight.BOLD, color="#334155"),
+                            ft.Text("여기에 관련 설정 UI를 배치할 수 있습니다.", size=12, color="#64748B"),
+                        ],
+                        spacing=8,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                ),
+            ],
+            spacing=16,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        ),
+    )
+
+    settings_section = {"value": "receipt" if initial_section == "receipt" else "ticket"}
+    settings_content_host = ft.Container(expand=True)
+    btn_ticket_settings_section = ft.TextButton("티켓 확인 설정", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED)
+    btn_receipt_layout_section = ft.TextButton("영수증 양식 설정", icon=ICONS.RECEIPT_LONG_ROUNDED)
+
+    def _apply_settings_section(push_update: bool = True) -> None:
+        active_bg = "#DDE8FF"
+        inactive_bg = "#00000000"
+        btn_ticket_settings_section.style = ft.ButtonStyle(
+            bgcolor=active_bg if settings_section["value"] == "ticket" else inactive_bg,
+            color="#1B1B1B",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        )
+        btn_receipt_layout_section.style = ft.ButtonStyle(
+            bgcolor=active_bg if settings_section["value"] == "receipt" else inactive_bg,
+            color="#1B1B1B",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        )
+        receipt_section_content = (
+            receipt_section_placeholder if receipt_section_mode == "placeholder" else main_split_layout
+        )
+        settings_content_host.content = (
+            ticket_settings_panel if settings_section["value"] == "ticket" else receipt_section_content
+        )
+        if push_update:
+            page.update()
+
+    def _set_settings_section(section_key: str) -> None:
+        settings_section["value"] = section_key
+        _apply_settings_section()
+
     # 키보드 이벤트: Del 삭제
     def _on_keyboard(e: ft.KeyboardEvent) -> None:
         if e.key == "Delete" and state["canvas_focused"] and _selected_id():
             _remove_selected_element()
 
-    page.on_keyboard_event = _on_keyboard
+    if bind_keyboard_events:
+        page.on_keyboard_event = _on_keyboard
+    btn_ticket_settings_section.on_click = lambda _e: _set_settings_section("ticket")
+    btn_receipt_layout_section.on_click = lambda _e: _set_settings_section("receipt")
+    btn_receipt_editor_tab.on_click = lambda _e: _set_editor_layout("receipt")
+    btn_product_editor_tab.on_click = lambda _e: _set_editor_layout("product")
 
     if _doc().meta.paper_width != str(paper_width_dropdown.value):
-        _set_paper_width(str(paper_width_dropdown.value or "80"))
-    _set_layout_path(layout_path)
-    _refresh_all()
+        _set_paper_width(str(paper_width_dropdown.value or "80"), push_update=False)
+    current_template_text.value = f"활성 {_editor_layout_label()} 템플릿: {_layout_path()}"
+    _apply_editor_layout(push_update=False)
+    _apply_settings_section(push_update=False)
+
+    if not show_section_tabs:
+        selected_content = (
+            ticket_settings_panel
+            if settings_section["value"] == "ticket"
+            else (receipt_section_placeholder if receipt_section_mode == "placeholder" else main_split_layout)
+        )
+        return ft.Container(
+            padding=ft.padding.all(12),
+            expand=True,
+            content=selected_content,
+        )
 
     return ft.Container(
         padding=ft.padding.all(12),
         expand=True,
-        content=main_split_layout,
+        content=ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[btn_ticket_settings_section, btn_receipt_layout_section],
+                    spacing=8,
+                    wrap=True,
+                ),
+                settings_content_host,
+            ],
+            spacing=12,
+            expand=True,
+        ),
+    )
+
+
+def build_app_settings_panel(
+    page: ft.Page,
+    *,
+    store_path: str = ".runtime/receipt_settings.json",
+    audio_service: WindowsAudioService | None = None,
+) -> ft.Control:
+    """Build lightweight app settings panel for the dashboard modal."""
+    settings_store = ReceiptSettingsStore(store_path)
+    audio_svc = audio_service or WindowsAudioService()
+    settings = settings_store.load()
+
+    sound_picker = ft.FilePicker()
+
+    def _attach_page_service(service) -> None:
+        registry = getattr(page, "_services", None)
+        registered = getattr(registry, "_services", None)
+        if isinstance(registered, list):
+            registered.append(service)
+            return
+
+        services = getattr(page, "services", None)
+        if isinstance(services, list):
+            services.append(service)
+            return
+
+        register_service = getattr(registry, "register_service", None)
+        if callable(register_service):
+            register_service(service)
+            return
+
+        page.overlay.append(service)
+
+    _attach_page_service(sound_picker)
+
+    settings_status_text = ft.Text("변경 시 자동 저장됩니다.", size=12, color="#64748B")
+    sound_path_field = ft.TextField(
+        label="QR 스캔 완료 알림음",
+        value=settings.qr_scan_success_sound_path,
+        read_only=True,
+        border_radius=10,
+    )
+    ticket_checkbox_list = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO)
+    ticket_checkboxes: list[ft.Checkbox] = []
+
+    btn_pick_sound = ft.ElevatedButton("음원 선택", icon=ICONS.AUDIO_FILE_ROUNDED)
+    btn_preview_sound = ft.OutlinedButton("미리 듣기", icon=ICONS.PLAY_ARROW_ROUNDED)
+    btn_clear_sound = ft.OutlinedButton("초기화", icon=ICONS.DELETE_OUTLINE_ROUNDED)
+
+    def _load_latest_settings() -> ReceiptSettings:
+        return settings_store.load()
+
+    def _selected_ticket_names() -> list[str]:
+        return [str(cb.label) for cb in ticket_checkboxes if cb.value]
+
+    def _save_modal_settings(message: str) -> None:
+        latest = _load_latest_settings()
+        latest.ticket_product_names = _selected_ticket_names()
+        latest.qr_scan_success_sound_path = (sound_path_field.value or "").strip()
+        settings_store.save(latest)
+        settings_status_text.value = message
+        page.update()
+
+    def _load_ticket_checkboxes() -> None:
+        ticket_checkboxes.clear()
+        latest = _load_latest_settings()
+        current_ticket_names = set(latest.ticket_product_names)
+        try:
+            product_names = ExcelService("data.xlsx").get_product_names()
+        except Exception:
+            product_names = []
+
+        def _on_ticket_check(_e: ft.ControlEvent) -> None:
+            _save_modal_settings("티켓 분류 설정 저장 완료")
+
+        for name in product_names:
+            cb = ft.Checkbox(label=name, value=name in current_ticket_names, on_change=_on_ticket_check)
+            ticket_checkboxes.append(cb)
+
+        ticket_checkbox_list.controls = list(ticket_checkboxes) if ticket_checkboxes else [
+            ft.Text("상품 컬럼이 없습니다.", size=12, color="#999999"),
+        ]
+
+    _load_ticket_checkboxes()
+
+    def _handle_sound_files(files: list[ft.FilePickerFile]) -> None:
+        if not files:
+            return
+        path = files[0].path
+        if not path:
+            settings_status_text.value = "음원 선택 실패: 파일 경로를 읽을 수 없습니다."
+            page.update()
+            return
+        sound_path_field.value = path
+        _save_modal_settings(f"음원 저장 완료: {Path(path).name}")
+
+    def on_pick_sound(_: ft.ControlEvent) -> None:
+        sound_picker.pick_files(
+            allow_multiple=False,
+            dialog_title="QR 스캔 완료 음원 선택",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["mp3", "wav", "m4a"],
+        )
+
+    def on_preview_sound(_: ft.ControlEvent) -> None:
+        path = (sound_path_field.value or "").strip()
+        if not path:
+            settings_status_text.value = "미리 들을 음원을 먼저 선택하세요."
+            page.update()
+            return
+        if audio_svc.play_file(path):
+            settings_status_text.value = f"미리 듣기 재생: {Path(path).name}"
+        else:
+            settings_status_text.value = "음원 재생 실패: 파일 또는 형식을 확인하세요."
+        page.update()
+
+    def on_clear_sound(_: ft.ControlEvent) -> None:
+        sound_path_field.value = ""
+        _save_modal_settings("음원 설정 초기화 완료")
+
+    def _on_sound_picker_result(event) -> None:
+        _handle_sound_files(_coerce_picker_files(event))
+
+    setattr(sound_picker, "on_result", _on_sound_picker_result)
+
+    btn_pick_sound.on_click = on_pick_sound
+    btn_preview_sound.on_click = on_preview_sound
+    btn_clear_sound.on_click = on_clear_sound
+
+    ticket_settings_panel = ft.Container(
+        expand=True,
+        bgcolor="#FFFFFF",
+        border_radius=18,
+        padding=20,
+        content=ft.ListView(
+            expand=True,
+            spacing=16,
+            controls=[
+                ft.Text("티켓 확인 설정", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    bgcolor="#F8FAFD",
+                    border_radius=16,
+                    border=ft.border.all(1, "#D8E2F0"),
+                    padding=16,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text("QR 스캔 완료 알림음", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("스캔 성공 시 재생할 MP3 또는 WAV 파일을 선택합니다.", size=12, color="#64748B"),
+                            sound_path_field,
+                            ft.Row(
+                                controls=[btn_pick_sound, btn_preview_sound, btn_clear_sound],
+                                spacing=8,
+                                wrap=True,
+                            ),
+                            settings_status_text,
+                        ],
+                        spacing=10,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ),
+                ft.Container(
+                    bgcolor="#F8FAFD",
+                    border_radius=16,
+                    border=ft.border.all(1, "#D8E2F0"),
+                    padding=16,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text("티켓 상품 분류", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("선택한 상품은 티켓 영역으로 분리됩니다.", size=12, color="#64748B"),
+                            ft.Container(
+                                height=320,
+                                bgcolor="#FFFFFF",
+                                border_radius=12,
+                                border=ft.border.all(1, "#E2E8F0"),
+                                padding=12,
+                                content=ticket_checkbox_list,
+                            ),
+                        ],
+                        spacing=10,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    receipt_placeholder_panel = ft.Container(
+        expand=True,
+        bgcolor="#FFFFFF",
+        border_radius=18,
+        padding=20,
+        content=ft.Column(
+            controls=[
+                ft.Text("영수증 양식 설정", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    expand=True,
+                    border_radius=16,
+                    border=ft.border.all(1, "#D8E2F0"),
+                    bgcolor="#F8FAFD",
+                    alignment=ALIGN_CENTER,
+                    content=ft.Column(
+                        controls=[
+                            ft.Icon(ICONS.RECEIPT_LONG_ROUNDED, size=44, color="#8AA4C8"),
+                            ft.Text("영수증 양식 설정 영역", size=18, weight=ft.FontWeight.BOLD, color="#334155"),
+                            ft.Text("현재는 공간만 준비되어 있습니다.", size=12, color="#64748B"),
+                        ],
+                        spacing=8,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                ),
+            ],
+            spacing=16,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        ),
+    )
+
+    section = {"value": "ticket"}
+    section_host = ft.Container(expand=True)
+    btn_ticket_section = ft.TextButton("티켓 확인 설정", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED)
+    btn_receipt_section = ft.TextButton("영수증 양식 설정", icon=ICONS.RECEIPT_LONG_ROUNDED)
+
+    def _apply_section(push_update: bool = True) -> None:
+        active_bg = "#DDE8FF"
+        inactive_bg = "#00000000"
+        btn_ticket_section.style = ft.ButtonStyle(
+            bgcolor=active_bg if section["value"] == "ticket" else inactive_bg,
+            color="#1B1B1B",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        )
+        btn_receipt_section.style = ft.ButtonStyle(
+            bgcolor=active_bg if section["value"] == "receipt" else inactive_bg,
+            color="#1B1B1B",
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        )
+        section_host.content = ticket_settings_panel if section["value"] == "ticket" else receipt_placeholder_panel
+        if push_update:
+            page.update()
+
+    btn_ticket_section.on_click = lambda _e: (section.__setitem__("value", "ticket"), _apply_section())
+    btn_receipt_section.on_click = lambda _e: (section.__setitem__("value", "receipt"), _apply_section())
+    _apply_section(push_update=False)
+
+    return ft.Container(
+        padding=ft.padding.all(8),
+        expand=True,
+        content=ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[btn_ticket_section, btn_receipt_section],
+                    spacing=8,
+                    wrap=True,
+                ),
+                section_host,
+            ],
+            spacing=14,
+            expand=True,
+        ),
     )
 
 
@@ -2513,8 +3282,8 @@ class SettingsFletView:
 
     def _build_page(self, page: ft.Page) -> None:
         page.title = "Receipt Settings"
-        page.window_width = 1480
-        page.window_height = 940
+        page.window.width = 1480
+        page.window.height = 940
         page.scroll = ft.ScrollMode.AUTO
         page.bgcolor = "#ECECEC"
         page.add(build_receipt_settings_panel(page, store_path=self._store_path))

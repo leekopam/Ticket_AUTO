@@ -6,14 +6,16 @@ import time
 from datetime import datetime
 from enum import Enum, auto
 from typing import Callable
+from urllib.parse import urlparse
 
 from models.order_model import Order
 from models.receipt_settings_model import ReceiptSettings
-from services.api_service import ApiService
+from services.api_service import ApiService, QRParseResult
 from services.browser_service import BrowserResolveResult, BrowserService
 from services.excel_service import ExcelService
 from services.receipt_print_pipeline import print_order_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
+from services.windows_audio_service import WindowsAudioService
 from viewmodels.order_viewmodel import OrderViewModel
 from views.order_view import OrderView
 from views.scanner_view import ScannerView
@@ -46,6 +48,7 @@ class Application:
 
         self._settings_store = ReceiptSettingsStore(".runtime/receipt_settings.json")
         self._receipt_settings: ReceiptSettings = self._settings_store.load()
+        self._audio_service = WindowsAudioService()
 
         self._order_viewmodel = OrderViewModel(self._excel_service, self._browser_service)
 
@@ -58,32 +61,42 @@ class Application:
         self._qr_repeat_cooldown_sec = 2.0
 
         self._status_listener: StatusListener | None = None
+        self._camera_listener: Callable[[str], None] | None = None
+        self._camera_status_listener: Callable[[str | None], None] | None = None
+        self._order_listener: Callable[[Order], None] | None = None
         self._stop_requested = False
         self._relogin_requested = False
         self._control_lock = threading.Lock()
+
+    def set_camera_frame_listener(self, listener: Callable[[str], None] | None) -> None:
+        """외부 뷰에서 카메라 프레임을 수신한다."""
+        self._camera_listener = listener
+        self._scanner_view.on_frame_ready = listener
+
+    def set_camera_status_listener(self, listener: Callable[[str | None], None] | None) -> None:
+        """외부 뷰에서 카메라 복구 상태 메시지를 수신한다."""
+        self._camera_status_listener = listener
+        set_listener = getattr(self._scanner_view, "set_camera_status_listener", None)
+        if callable(set_listener):
+            set_listener(listener)
+
+    def set_order_listener(self, listener: Callable[[Order], None] | None) -> None:
+        """QR 스캔 시 주문 정보를 외부 대시보드로 전달한다."""
+        self._order_listener = listener
 
     def set_status_listener(self, listener: StatusListener | None) -> None:
         """외부 대시보드에서 상태 이벤트를 구독한다."""
         self._status_listener = listener
 
     def request_stop(self) -> None:
-        """외부에서 런타임 정지를 요청한다."""
+        """외부에서 런타임 정지를 요청한다.
+
+        플래그만 설정하고 실제 자원 정리는 run()의 finally에서 수행한다.
+        중복 stop 호출로 인한 Playwright 이벤트 루프 오류를 방지한다.
+        """
         with self._control_lock:
             self._stop_requested = True
-
         self._emit_status("STOPPING", "런타임 중지 요청됨")
-        try:
-            self._scanner_view.release()
-        except Exception:
-            pass
-        try:
-            self._order_view.stop()
-        except Exception:
-            pass
-        try:
-            self._browser_service.stop()
-        except Exception:
-            pass
 
     def request_relogin(self) -> None:
         """외부에서 재로그인을 요청한다."""
@@ -109,14 +122,25 @@ class Application:
 
             self._enter_auth_wait("브라우저에서 로그인이 필요합니다")
             if not self._wait_for_initial_login():
+                print("RUN_EXIT reason=login_failed_or_stop_requested")
                 return
 
             self._main_loop()
+            print("RUN_EXIT reason=main_loop_finished")
         finally:
             self._emit_status("STOPPING", "런타임 종료 중")
-            self._order_view.stop()
-            self._browser_service.stop()
-            self._scanner_view.release()
+            try:
+                self._scanner_view.release()
+            except Exception:
+                pass
+            try:
+                self._order_view.stop()
+            except Exception:
+                pass
+            try:
+                self._browser_service.stop()
+            except Exception:
+                pass
             self._emit_status("STOPPED", "런타임 종료됨")
 
     def _is_stop_requested(self) -> bool:
@@ -127,6 +151,16 @@ class Application:
             return False
         self._relogin_requested = False
         return True
+
+    def _emit_order(self, order: Order) -> None:
+        """주문 정보를 외부 대시보드로 전달한다."""
+        listener = getattr(self, "_order_listener", None)
+        if listener is None:
+            return
+        try:
+            listener(order)
+        except Exception:
+            pass
 
     def _emit_status(self, state: str, message: str) -> None:
         listener = getattr(self, "_status_listener", None)
@@ -184,13 +218,35 @@ class Application:
         except Exception as exc:
             self._emit_status("ERROR", f"영수증 수동 출력 실패: {exc}")
 
+    def _play_scan_success_sound(self) -> None:
+        settings_store = getattr(self, "_settings_store", None)
+        if settings_store is not None:
+            try:
+                self._receipt_settings = settings_store.load()
+            except Exception:
+                pass
+
+        receipt_settings = getattr(self, "_receipt_settings", None)
+        sound_path = (getattr(receipt_settings, "qr_scan_success_sound_path", "") or "").strip()
+        if not sound_path:
+            return
+
+        audio_service = getattr(self, "_audio_service", None)
+        if audio_service is None:
+            return
+
+        try:
+            audio_service.play_file(sound_path)
+        except Exception as exc:
+            print(f"SOUND_PLAY_FAIL path={sound_path} error={exc}")
+
     def _wait_for_initial_login(self) -> bool:
         return self._wait_for_login(timeout_sec=0)
 
     def _wait_for_login(self, timeout_sec: int) -> bool:
         deadline = None if timeout_sec <= 0 else (time.monotonic() + timeout_sec)
 
-        while self._scanner_view.is_running() and not self._is_stop_requested():
+        while not self._is_stop_requested():
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
@@ -246,6 +302,12 @@ class Application:
             self._enter_processing()
             self._process_qr(qr_url, allow_auth_retry=True)
 
+        # 루프 탈출 원인 기록
+        if not self._scanner_view.is_running():
+            print("MAIN_LOOP_EXIT reason=camera_stopped")
+        if self._is_stop_requested():
+            print("MAIN_LOOP_EXIT reason=stop_requested")
+
     def _is_duplicate_qr(self, qr_url: str) -> bool:
         now = time.monotonic()
         is_duplicate = (
@@ -259,14 +321,22 @@ class Application:
     def _process_qr(self, qr_url: str, allow_auth_retry: bool) -> None:
         if self._is_stop_requested():
             return
+        normalized_qr_url = (qr_url or "").strip()
+        parsed_qr = urlparse(normalized_qr_url)
+        if parsed_qr.scheme not in {"http", "https"} or not parsed_qr.netloc:
+            self._enter_error("유효한 QR URL이 아닙니다.")
+            return
+        if not normalized_qr_url.lower().startswith(ApiService.QR_PREFIX.lower()):
+            self._enter_error("유효한 Witchform QR 코드가 아닙니다.")
+            return
         try:
-            browser_result = self._browser_service.resolve_qr_redirect(qr_url)
+            browser_result = self._browser_service.resolve_qr_redirect(normalized_qr_url)
         except Exception as exc:
             if not self._is_stop_requested():
                 self._enter_error(f"브라우저 요청 실패: {exc}")
             return
 
-        self._process_resolved_qr(qr_url, browser_result, allow_auth_retry)
+        self._process_resolved_qr(normalized_qr_url, browser_result, allow_auth_retry)
 
     def _process_resolved_qr(
         self,
@@ -291,14 +361,22 @@ class Application:
             print(
                 "QR_PARSE_FAIL "
                 f"code={parse_result.error_code} "
-                f"status={browser_result.status_code}"
+                f"status={browser_result.status_code} "
+                f"location={browser_result.location}"
             )
             if parse_result.error_code == "AUTH_REQUIRED" and allow_auth_retry:
                 self._recover_auth_and_retry(qr_url)
                 return
-
-            self._enter_error(parse_result.error_message)
-            return
+            if parse_result.error_code == "ORDER_NUMBER_MISSING":
+                recovered_parse_result = self._recover_missing_order_number(browser_result)
+                if recovered_parse_result is not None:
+                    parse_result = recovered_parse_result
+                else:
+                    self._enter_error(parse_result.error_message)
+                    return
+            else:
+                self._enter_error(parse_result.error_message)
+                return
 
         order = self._order_viewmodel.load_order(
             parse_result.order_number,
@@ -311,9 +389,11 @@ class Application:
             return
 
         self._order_view.show_or_update(order)
+        self._emit_order(order)
 
         if order.is_received:
             self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
+            self._play_scan_success_sound()
             return
 
         if not self._order_viewmodel.open_current_order_page():
@@ -353,6 +433,106 @@ class Application:
             return
 
         self._enter_ready("수령 완료 및 영수증 출력 완료")
+        self._play_scan_success_sound()
+
+    def _recover_missing_order_number(
+        self,
+        browser_result: BrowserResolveResult,
+    ) -> QRParseResult | None:
+        detail_url = self._resolve_witchform_url(browser_result.location)
+        if not detail_url:
+            return None
+
+        try:
+            discovery = self._discover_page_order_context(detail_url)
+        except Exception as exc:
+            print(f"ORDER_DISCOVERY_FAIL url={detail_url} error={exc}")
+            return None
+
+        order_number = discovery["order_number"]
+        if not order_number:
+            recovered_order = self._recover_order_from_customer_context(
+                discovery["buyer_name"],
+                discovery["buyer_phone"],
+            )
+            if recovered_order is None:
+                print(f"ORDER_DISCOVERY_MISS url={detail_url}")
+                return None
+            order_number = recovered_order.order_number
+            print(
+                "ORDER_DISCOVERY_CONTACT_RECOVERED "
+                f"order_number={order_number} "
+                f"buyer_name={discovery['buyer_name']} "
+                f"buyer_phone={discovery['buyer_phone']}"
+            )
+
+        recovered_url = discovery["url"] or detail_url
+        print(f"ORDER_DISCOVERY_RECOVERED order_number={order_number} url={recovered_url}")
+        return QRParseResult(
+            success=True,
+            order_number=order_number,
+            full_url=recovered_url,
+        )
+
+    def _discover_page_order_context(self, detail_url: str) -> dict[str, str]:
+        browser_service = self._browser_service
+        if hasattr(browser_service, "discover_order_context_from_page"):
+            discovery = browser_service.discover_order_context_from_page(detail_url)
+            return {
+                "order_number": (getattr(discovery, "order_number", "") or "").strip(),
+                "buyer_name": (getattr(discovery, "buyer_name", "") or "").strip(),
+                "buyer_phone": (getattr(discovery, "buyer_phone", "") or "").strip(),
+                "url": (getattr(discovery, "url", "") or detail_url).strip(),
+            }
+
+        order_number = ""
+        if hasattr(browser_service, "discover_order_number_from_page"):
+            order_number = browser_service.discover_order_number_from_page(detail_url)
+        return {
+            "order_number": (order_number or "").strip(),
+            "buyer_name": "",
+            "buyer_phone": "",
+            "url": detail_url,
+        }
+
+    def _recover_order_from_customer_context(self, buyer_name: str, buyer_phone: str) -> Order | None:
+        buyer_name = (buyer_name or "").strip()
+        buyer_phone = (buyer_phone or "").strip()
+        if not buyer_name and not buyer_phone:
+            return None
+
+        excel_service = getattr(self, "_excel_service", None)
+        if excel_service is None or not hasattr(excel_service, "find_orders_by_customer"):
+            return None
+
+        matches = excel_service.find_orders_by_customer(name=buyer_name, phone=buyer_phone)
+        if not matches:
+            print(
+                "ORDER_DISCOVERY_CONTACT_MISS "
+                f"buyer_name={buyer_name} "
+                f"buyer_phone={buyer_phone}"
+            )
+            return None
+        if len(matches) != 1:
+            print(
+                "ORDER_DISCOVERY_CONTACT_AMBIGUOUS "
+                f"buyer_name={buyer_name} "
+                f"buyer_phone={buyer_phone} "
+                f"count={len(matches)}"
+            )
+            return None
+        return matches[0]
+
+    def _resolve_witchform_url(self, location: str) -> str:
+        location = (location or "").strip()
+        if not location:
+            return ""
+        if location.startswith(("http://", "https://")):
+            return location
+        base = getattr(self._api_service, "WITCHFORM_BASE", "https://witchform.com").rstrip("/")
+        if location.startswith("/"):
+            return f"{base}{location}"
+        return f"{base}/{location.lstrip('/')}"
 
     def _handle_browser_failure(
         self,

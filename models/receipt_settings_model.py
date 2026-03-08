@@ -20,13 +20,16 @@ class ReceiptSettings:
     show_logo: bool = False
     # Supports both legacy .tpl and new canvas .json templates.
     template_path: str = "templates/receipt_layout.json"
+    product_template_path: str = "templates/product_receipt_layout.json"
     logo_path: str = ""
     event_title: str = ""
     qr_payload_template: str = "{{order_number}}|{{url}}"
     margin_top: int = 0
     margin_bottom: int = 0
     printer_dpi: int = 300
+    print_product_receipt: bool = False
     ticket_product_names: list[str] = field(default_factory=list)
+    qr_scan_success_sound_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,13 +38,16 @@ class ReceiptSettings:
             "show_qr": self.show_qr,
             "show_logo": self.show_logo,
             "template_path": self.template_path,
+            "product_template_path": self.product_template_path,
             "logo_path": self.logo_path,
             "event_title": self.event_title,
             "qr_payload_template": self.qr_payload_template,
             "margin_top": self.margin_top,
             "margin_bottom": self.margin_bottom,
             "printer_dpi": self.printer_dpi,
+            "print_product_receipt": self.print_product_receipt,
             "ticket_product_names": self.ticket_product_names,
+            "qr_scan_success_sound_path": self.qr_scan_success_sound_path,
         }
 
     @classmethod
@@ -60,6 +66,10 @@ class ReceiptSettings:
             show_logo=bool(data.get("show_logo", False)),
             template_path=str(data.get("template_path", "templates/receipt_layout.json")).strip()
             or "templates/receipt_layout.json",
+            product_template_path=str(
+                data.get("product_template_path", "templates/product_receipt_layout.json")
+            ).strip()
+            or "templates/product_receipt_layout.json",
             logo_path=str(data.get("logo_path", "")).strip(),
             event_title=str(data.get("event_title", "")).strip(),
             qr_payload_template=str(data.get("qr_payload_template", "{{order_number}}|{{url}}")).strip()
@@ -67,5 +77,7 @@ class ReceiptSettings:
             margin_top=max(0, int(data.get("margin_top", 0))),
             margin_bottom=max(0, int(data.get("margin_bottom", 0))),
             printer_dpi=printer_dpi,
+            print_product_receipt=bool(data.get("print_product_receipt", False)),
             ticket_product_names=list(data.get("ticket_product_names", [])),
+            qr_scan_success_sound_path=str(data.get("qr_scan_success_sound_path", "")).strip(),
         )

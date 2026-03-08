@@ -1,4 +1,4 @@
-"""메인 앱의 수령완료/출력 플로우 분기 테스트."""
+"""Main receipt flow tests."""
 from __future__ import annotations
 
 import unittest
@@ -49,7 +49,6 @@ class _FakeOrderViewModel:
         self.click_result = click_result or ReceiptClickResult(success=True)
         self.mark_ok = mark_ok
         self.rollback_ok = rollback_ok
-
         self.load_calls = 0
         self.open_calls = 0
         self.complete_calls = 0
@@ -89,7 +88,7 @@ def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
     app._scanner_view = _FakeScannerView()
     app._order_view = _FakeOrderView()
     app._order_viewmodel = order_vm
-    app._receipt_settings = SimpleNamespace()
+    app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="")
     app._api_service = SimpleNamespace(
         parse_qr_redirect=lambda *_args, **_kwargs: QRParseResult(
             success=True,
@@ -97,16 +96,21 @@ def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
             full_url="https://example.com/order/1",
         )
     )
+    app._order_listener = None
+    app._status_listener = None
+    app._stop_requested = False
+    app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
+    app._audio_service = None
     return app
 
 
 class AppPrintFlowTest(unittest.TestCase):
-    def test_success_flow_marks_and_prints(self) -> None:
+    def test_success_flow_marks_prints_and_plays_sound(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order)
         app = _build_app_with_order_vm(order_vm)
 
-        with patch("main.print_order_receipt") as print_mock:
+        with patch("main.print_order_receipt") as print_mock, patch.object(app, "_play_scan_success_sound") as sound_mock:
             app._process_resolved_qr(
                 "https://witchform.com/qrcode_link.php?a=1",
                 BrowserResolveResult(ok=True, status_code=302, location="/x"),
@@ -117,6 +121,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 1)
         self.assertEqual(order_vm.rollback_calls, 0)
         print_mock.assert_called_once()
+        sound_mock.assert_called_once()
         self.assertEqual(app._state, app_main.AppState.READY)
 
     def test_print_failure_rolls_back_mark(self) -> None:
@@ -136,7 +141,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(app._state, app_main.AppState.ERROR)
         self.assertIn("원복", app._scanner_view.status_message)
 
-    def test_received_order_skips_click_and_print(self) -> None:
+    def test_received_order_skips_click_print_and_still_plays_sound(self) -> None:
         order = Order(
             order_number="ORDER-001",
             name="홍길동",
@@ -148,7 +153,7 @@ class AppPrintFlowTest(unittest.TestCase):
         order_vm = _FakeOrderViewModel(order=order)
         app = _build_app_with_order_vm(order_vm)
 
-        with patch("main.print_order_receipt") as print_mock:
+        with patch("main.print_order_receipt") as print_mock, patch.object(app, "_play_scan_success_sound") as sound_mock:
             app._process_resolved_qr(
                 "https://witchform.com/qrcode_link.php?a=1",
                 BrowserResolveResult(ok=True, status_code=302, location="/x"),
@@ -159,6 +164,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.complete_calls, 0)
         self.assertEqual(order_vm.mark_calls, 0)
         print_mock.assert_not_called()
+        sound_mock.assert_called_once()
         self.assertEqual(app._state, app_main.AppState.READY)
         self.assertIn("이미 수령완료", app._scanner_view.status_message)
 

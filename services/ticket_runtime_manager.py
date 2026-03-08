@@ -7,9 +7,11 @@ from datetime import datetime
 from typing import Callable
 
 from main import Application
+from models.order_model import Order
 
 
 RuntimeCallback = Callable[[str, str, str], None]
+OrderCallback = Callable[[Order], None]
 
 
 @dataclass
@@ -28,6 +30,9 @@ class TicketRuntimeManager:
         self._thread: threading.Thread | None = None
         self._state = "IDLE"
         self._callbacks: list[RuntimeCallback] = []
+        self._camera_listener: Callable[[str], None] | None = None
+        self._camera_status_listener: Callable[[str | None], None] | None = None
+        self._order_listener: OrderCallback | None = None
         self._lock = threading.Lock()
 
     @property
@@ -39,6 +44,27 @@ class TicketRuntimeManager:
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    def set_camera_frame_listener(self, listener: Callable[[str], None]) -> None:
+        with self._lock:
+            self._camera_listener = listener
+            if self._app:
+                self._app.set_camera_frame_listener(listener)
+
+    def set_camera_status_listener(self, listener: Callable[[str | None], None] | None) -> None:
+        with self._lock:
+            self._camera_status_listener = listener
+            if self._app:
+                set_listener = getattr(self._app, "set_camera_status_listener", None)
+                if callable(set_listener):
+                    set_listener(listener)
+
+    def set_order_listener(self, listener: OrderCallback | None) -> None:
+        """QR 스캔 시 주문 정보를 대시보드로 전달할 리스너를 등록한다."""
+        with self._lock:
+            self._order_listener = listener
+            if self._app:
+                self._app.set_order_listener(listener)
 
     def subscribe(self, callback: RuntimeCallback) -> None:
         with self._lock:
@@ -54,6 +80,14 @@ class TicketRuntimeManager:
 
             app = self._app_factory()
             app.set_status_listener(self._on_app_status)
+            if self._camera_listener:
+                app.set_camera_frame_listener(self._camera_listener)
+            if self._camera_status_listener:
+                set_listener = getattr(app, "set_camera_status_listener", None)
+                if callable(set_listener):
+                    set_listener(self._camera_status_listener)
+            if self._order_listener:
+                app.set_order_listener(self._order_listener)
             self._app = app
 
             thread = threading.Thread(target=self._run_app, daemon=True)
@@ -63,7 +97,7 @@ class TicketRuntimeManager:
         thread.start()
         return True
 
-    def stop(self, timeout_sec: float = 8.0) -> bool:
+    def stop(self, timeout_sec: float = 25.0) -> bool:
         with self._lock:
             thread = self._thread
             app = self._app
@@ -108,6 +142,8 @@ class TicketRuntimeManager:
         try:
             app.run()
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             with self._lock:
                 self._emit_locked("ERROR", f"런타임 예외: {exc}")
         finally:
