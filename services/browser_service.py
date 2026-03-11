@@ -1,8 +1,8 @@
 ﻿"""
-Playwright browser service.
+Playwright 브라우저 서비스.
 
-This service owns the browser session and is the single source of truth
-for authentication state.
+이 서비스는 브라우저 세션을 소유하며
+인증 상태에 대한 단일 진실 공급원(Single Source of Truth) 역할을 합니다.
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class BrowserService:
         self._startup_error: Exception | None = None
         self._ready_event = threading.Event()
 
-        # callback fired when receipt click flow is finished
+        # 영수증 클릭 흐름이 완료되었을 때 호출되는 콜백
         self._on_receipt_complete: Callable[[], None] | None = None
 
     def set_on_receipt_complete(self, callback: Callable[[], None]) -> None:
@@ -102,10 +102,10 @@ class BrowserService:
         self._worker_thread.start()
 
         if not self._ready_event.wait(timeout=20):
-            raise RuntimeError("Browser worker startup timed out.")
+            raise RuntimeError("브라우저 워커 시작 시간 초과.")
 
         if self._startup_error is not None:
-            raise RuntimeError(f"Browser worker failed: {self._startup_error}")
+            raise RuntimeError(f"브라우저 워커 실패: {self._startup_error}")
 
     def stop(self) -> None:
         if not self._is_running:
@@ -137,7 +137,7 @@ class BrowserService:
         return bool(self._invoke_rpc({"action": "clear_auth_state_for_domain"}, timeout_sec=20))
 
     def request_relogin(self) -> bool:
-        """Force authentication reset and keep login page open for user interaction."""
+        """인증 상태를 강제로 초기화하고 사용자 조작을 위해 로그인 페이지를 열어둡니다."""
         return bool(self._invoke_rpc({"action": "request_relogin"}, timeout_sec=20))
 
     def resolve_qr_redirect(
@@ -189,7 +189,7 @@ class BrowserService:
 
     def _invoke_rpc(self, task: dict[str, Any], timeout_sec: int) -> Any:
         if not self._is_running:
-            raise RuntimeError("BrowserService is not running.")
+            raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
 
         response_queue: queue.Queue = queue.Queue(maxsize=1)
         task["response_queue"] = response_queue
@@ -198,7 +198,7 @@ class BrowserService:
         try:
             response = response_queue.get(timeout=timeout_sec)
         except queue.Empty as exc:
-            raise RuntimeError(f"Task timed out: {task.get('action')}") from exc
+            raise RuntimeError(f"작업 시간 초과: {task.get('action')}") from exc
 
         error = response.get("error")
         if error is not None:
@@ -660,7 +660,7 @@ class BrowserService:
         self._auth_page.goto(self._login_url, timeout=15000)
 
     def _open_initial_witchform_page(self) -> None:
-        """Open only the witchform login page and remove blank tabs on startup."""
+        """윗치폼 로그인 페이지만 열고 시작 시 빈 탭을 제거합니다."""
         if not self._context:
             return
 
@@ -685,7 +685,7 @@ class BrowserService:
                 self._warn(f"INITIAL_EXTRA_PAGE_CLOSE_FAILED: {exc}")
 
     def _handle_clear_auth_state_for_domain(self) -> bool:
-        """Clear witchform auth state for this run."""
+        """현재 실행에 대한 윗치폼 인증 상태를 삭제(Clear)합니다."""
         if not self._context:
             return False
 
@@ -725,7 +725,7 @@ class BrowserService:
         return True
 
     def _handle_request_relogin(self) -> bool:
-        """Public runtime-safe relogin trigger."""
+        """런타임 중에 안전하게 호출할 수 있는 재로그인 트리거(Public runtime-safe relogin trigger)입니다."""
         ok = self._handle_clear_auth_state_for_domain()
         if not ok:
             return False

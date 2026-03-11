@@ -116,7 +116,8 @@ class Application:
             self._order_view.start()
             self._scanner_view.start()
 
-            if not self._scanner_view.is_running():
+            # 카메라 비동기 초기화 대기 (최대 30초)
+            if not self._wait_for_camera(timeout_sec=30):
                 self._enter_error("카메라를 열 수 없습니다. 장치를 확인해주세요.")
                 return
 
@@ -142,6 +143,17 @@ class Application:
             except Exception:
                 pass
             self._emit_status("STOPPED", "런타임 종료됨")
+
+    def _wait_for_camera(self, timeout_sec: int = 30) -> bool:
+        """카메라 비동기 초기화 완료를 대기한다."""
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if self._is_stop_requested():
+                return False
+            if self._scanner_view.is_camera_ready():
+                return True
+            time.sleep(0.5)
+        return self._scanner_view.is_camera_ready()
 
     def _is_stop_requested(self) -> bool:
         return bool(getattr(self, "_stop_requested", False))

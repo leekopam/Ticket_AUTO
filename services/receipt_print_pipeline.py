@@ -1,4 +1,4 @@
-"""Receipt rendering and print pipeline."""
+"""영수증 렌더링 및 인쇄 파이프라인(Receipt rendering and print pipeline)."""
 from __future__ import annotations
 
 import logging
@@ -25,7 +25,7 @@ DEFAULT_PRODUCT_TEMPLATE_PATH = "templates/product_receipt_layout.json"
 
 @dataclass
 class RenderedReceipt:
-    """Final render output plus resolved context."""
+    """최종 렌더링 결과물과 결정된 컨텍스트(Resolved context)를 포함합니다."""
 
     image: Image.Image
     context: dict[str, object]
@@ -74,7 +74,7 @@ def print_order_receipt(
     settings: ReceiptSettings,
     printer_service: PrinterBackend | None = None,
 ) -> int:
-    """Print the main receipt and optionally an additional product receipt."""
+    """메인 영수증을 인쇄하고 옵션에 따라 추가 상품 영수증을 인쇄합니다."""
     service = printer_service or WindowsPrinterService()
 
     rendered = render_order_receipt(order, settings)
@@ -83,7 +83,7 @@ def print_order_receipt(
         printer_name=settings.printer_name or None,
         job_name=f"Receipt_{order.order_number or 'Order'}",
     )
-    logger.info("Main receipt printed: %s", order.order_number)
+    logger.info("메인 영수증 인쇄 완료: %s", order.order_number)
 
     total_copies = 1
     goods_lines = str(rendered.context.get("goods_lines", "") or "").strip()
@@ -102,14 +102,14 @@ def print_order_receipt(
             printer_name=settings.printer_name or None,
             job_name=f"ProductReceipt_{order.order_number or 'Order'}",
         )
-        logger.info("Product receipt printed: %s", order.order_number)
+        logger.info("상품 영수증 인쇄 완료: %s", order.order_number)
         total_copies += 1
 
     return total_copies
 
 
 def _re_render(context: dict[str, object], settings: ReceiptSettings) -> RenderedReceipt:
-    """Render the current template again with a modified context."""
+    """수정된 컨텍스트로 현재 템플릿을 다시 렌더링합니다."""
     return _render_receipt_for_template(settings.template_path, context, settings)
 
 
@@ -117,7 +117,7 @@ def print_test_receipt(
     settings: ReceiptSettings,
     printer_service: PrinterBackend | None = None,
 ) -> None:
-    """Render and print a dummy order for template testing."""
+    """템플릿 테스트를 위해 가상의 주문(dummy order)을 렌더링하고 인쇄합니다."""
     dummy_order = Order(
         order_number="TEST-ORDER-01",
         name="테스트 사용자",

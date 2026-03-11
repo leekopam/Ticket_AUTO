@@ -1,4 +1,4 @@
-"""JSON canvas layout storage and asset import helpers."""
+"""JSON 캔버스 레이아웃 저장소 및 에셋(Asset) 가져오기 도우미입니다."""
 from __future__ import annotations
 
 import base64
@@ -23,7 +23,7 @@ ASSET_DIR = ".runtime/receipt_assets"
 
 
 class ReceiptCanvasStore:
-    """Persist and load canvas layout documents."""
+    """캔버스 레이아웃 문서(Canvas layout documents)를 영구 저장하고 불러옵니다."""
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class ReceiptCanvasStore:
 
         payload = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError("layout json root must be object")
+            raise ValueError("레이아웃 JSON의 최상위 노드는 객체(Object)여야 합니다.")
 
         doc = ReceiptCanvasDocument.from_dict(payload)
         self._restore_embedded_images(doc)
@@ -59,7 +59,7 @@ class ReceiptCanvasStore:
     def import_image_asset(self, src: str) -> str:
         source = Path(src)
         if not source.exists() or not source.is_file():
-            raise FileNotFoundError(f"image file not found: {src}")
+            raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {src}")
 
         self._asset_dir.mkdir(parents=True, exist_ok=True)
         suffix = source.suffix if source.suffix else ".png"
@@ -69,7 +69,7 @@ class ReceiptCanvasStore:
         return target.as_posix()
 
     def export_portable(self, path: str, doc: ReceiptCanvasDocument) -> None:
-        """Export a portable JSON that embeds image assets as base64."""
+        """이미지 애셋을 Base64 형태로 내장(Embed)한 휴대용(Portable) JSON을 내보냅니다."""
         portable_doc = self._normalize_canvas_width(
             ReceiptCanvasDocument.from_dict(doc.to_dict())
         )
@@ -79,7 +79,7 @@ class ReceiptCanvasStore:
                 continue
             asset = Path(elem.asset_path)
             if not asset.exists() or not asset.is_file():
-                logger.warning("portable export skipped missing image: %s", elem.asset_path)
+                logger.warning("누락된 이미지를 건너뛰고 휴대용 내보내기를 진행합니다: %s", elem.asset_path)
                 continue
 
             raw = asset.read_bytes()
@@ -97,7 +97,7 @@ class ReceiptCanvasStore:
         )
 
     def _restore_embedded_images(self, doc: ReceiptCanvasDocument) -> None:
-        """Restore embedded base64 images into the runtime asset directory."""
+        """내장된 Base64 이미지를 런타임 에셋(Asset) 디렉터리로 복원합니다."""
         for elem in doc.elements:
             if elem.type != "image" or not elem.embedded_data:
                 continue
@@ -121,10 +121,10 @@ class ReceiptCanvasStore:
                 restored.write_bytes(raw)
                 elem.asset_path = restored.as_posix()
             except Exception:
-                logger.exception("image restore failed: element=%s", elem.id)
+                logger.exception("이미지 복원에 실패했습니다: element=%s", elem.id)
 
     def ensure_default_layout(self) -> str:
-        """Ensure the default JSON template exists and return its path."""
+        """기본 JSON 템플릿 파일이 존재하는지 확인하고, 해당 경로를 반환합니다."""
         if not self._default_layout_path.exists():
             doc = create_default_document()
             self.save_layout(str(self._default_layout_path), doc)
