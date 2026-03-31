@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from models.receipt_settings_model import ReceiptSettings
+from project_paths import resolve_project_path
 
 
 class ReceiptSettingsStore:
     """Loads and saves settings without manual file editing."""
 
     def __init__(self, path: str = ".runtime/receipt_settings.json"):
-        self._path = Path(path)
+        self._path = resolve_project_path(path)
 
     def load(self) -> ReceiptSettings:
         if not self._path.exists():

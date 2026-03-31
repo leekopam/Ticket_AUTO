@@ -67,15 +67,20 @@ class PageOrderDiscoveryResult:
 
 
 class BrowserService:
+    _RECEIPT_PRE_CONFIRM_SETTLE_MS = 120
+    _RECEIPT_POST_CONFIRM_SETTLE_MS = 250
+
     def __init__(
         self,
         login_url: str = "https://witchform.com/w/login",
         user_data_dir: str = ".runtime/pw_profile",
         require_login_each_run: bool = True,
+        headless: bool = False,
     ):
         self._login_url = login_url
         self._user_data_dir = user_data_dir
         self._require_login_each_run = require_login_each_run
+        self._headless = headless
         self._task_queue: queue.Queue = queue.Queue()
         self._current_page: Page | None = None
         self._auth_page: Page | None = None
@@ -94,6 +99,8 @@ class BrowserService:
     def start(self) -> None:
         if self._is_running:
             return
+        if self._worker_thread and self._worker_thread.is_alive():
+            raise RuntimeError("브라우저 워커가 아직 정리 중입니다.")
 
         self._is_running = True
         self._startup_error = None
@@ -102,20 +109,27 @@ class BrowserService:
         self._worker_thread.start()
 
         if not self._ready_event.wait(timeout=20):
+            self._abort_start_attempt()
             raise RuntimeError("브라우저 워커 시작 시간 초과.")
 
         if self._startup_error is not None:
+            self._abort_start_attempt()
             raise RuntimeError(f"브라우저 워커 실패: {self._startup_error}")
 
     def stop(self) -> None:
+        worker = self._worker_thread
         if not self._is_running:
+            if worker is not None:
+                worker.join(timeout=15)
             return
         self._is_running = False
         self._task_queue.put({"action": "quit"})
-        if self._worker_thread:
-            self._worker_thread.join(timeout=15)
+        if worker is not None:
+            worker.join(timeout=15)
 
     def open_page(self, url: str) -> None:
+        if not self._is_running:
+            raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
         self._task_queue.put({"action": "open_page", "url": url})
 
     def click_receipt_button(self) -> ReceiptClickResult:
@@ -161,6 +175,18 @@ class BrowserService:
 
     def get_auth_cookie_snapshot(self) -> dict[str, str]:
         return self._invoke_rpc({"action": "get_auth_cookie_snapshot"}, timeout_sec=10)
+
+    def replace_auth_cookie_snapshot(self, snapshot: dict[str, str]) -> bool:
+        """현재 런타임 컨텍스트에 auth 관련 쿠키만 안전하게 다시 심는다."""
+        return bool(
+            self._invoke_rpc(
+                {
+                    "action": "replace_auth_cookie_snapshot",
+                    "snapshot": dict(snapshot or {}),
+                },
+                timeout_sec=20,
+            )
+        )
 
     def discover_order_number_from_page(
         self,
@@ -214,7 +240,7 @@ class BrowserService:
             with sync_playwright() as p:
                 context = p.chromium.launch_persistent_context(
                     user_data_dir=self._user_data_dir,
-                    headless=False,
+                    headless=self._headless,
                 )
                 self._context = context
                 self._open_initial_witchform_page()
@@ -239,11 +265,7 @@ class BrowserService:
                     context.close()
                 except Exception as exc:
                     self._warn(f"CONTEXT_CLOSE_FAILED: {exc}")
-            self._context = None
-            self._current_page = None
-            self._auth_page = None
-            if not self._ready_event.is_set():
-                self._ready_event.set()
+            self._finalize_worker_shutdown()
 
     def _dispatch_task(self, task: dict[str, Any]) -> None:
         action = task.get("action")
@@ -288,6 +310,10 @@ class BrowserService:
                 result = self._handle_get_auth_cookie_snapshot()
                 finish(result, None)
                 return
+            if action == "replace_auth_cookie_snapshot":
+                result = self._handle_replace_auth_cookie_snapshot(task.get("snapshot", {}))
+                finish(result, None)
+                return
             if action == "discover_order_context_from_page":
                 result = self._handle_discover_order_context_from_page(
                     task.get("url", ""),
@@ -305,14 +331,22 @@ class BrowserService:
 
             finish(None, f"Unknown task action: {action}")
         except Exception as exc:
+            if response_queue is None:
+                self._warn(f"TASK_FAILED action={action}: {exc}")
+                return
             finish(None, str(exc))
 
     def _handle_open_page(self, url: str) -> None:
         if not self._context:
-            return
+            raise RuntimeError("브라우저 컨텍스트가 준비되지 않았습니다.")
 
+        self._close_current_page()
         self._current_page = self._context.new_page()
-        self._current_page.goto(url, timeout=15000)
+        try:
+            self._current_page.goto(url, timeout=15000)
+        except Exception:
+            self._close_current_page()
+            raise
         print(f"PAGE_OPEN {url}")
 
     def _handle_click_receipt(self) -> ReceiptClickResult:
@@ -327,9 +361,18 @@ class BrowserService:
             )
 
         try:
-            # keep existing selectors to avoid UI regression
             self._current_page.click("text=수령 완료 처리", timeout=5000)
         except Exception as exc:
+            # 버튼이 없으면 이미 수령완료 상태인지 확인
+            if self._page_shows_already_received():
+                print("RECEIPT_ALREADY_RECEIVED_ON_PAGE")
+                self._close_current_page()
+                self._invoke_receipt_complete_callback()
+                return ReceiptClickResult(
+                    success=False,
+                    error_code="ALREADY_RECEIVED",
+                    error_message="이미 수령완료 처리된 주문입니다.",
+                )
             message = f"수령 완료 1차 버튼 클릭 실패: {exc}"
             print(message)
             self._invoke_receipt_complete_callback()
@@ -339,7 +382,26 @@ class BrowserService:
                 error_message=message,
             )
 
-        self._current_page.wait_for_timeout(500)
+        try:
+            self._current_page.wait_for_timeout(self._RECEIPT_PRE_CONFIRM_SETTLE_MS)
+        except Exception as exc:
+            if self._page_shows_already_received():
+                print("RECEIPT_ALREADY_RECEIVED_ON_PRE_CONFIRM_WAIT")
+                self._close_current_page()
+                self._invoke_receipt_complete_callback()
+                return ReceiptClickResult(
+                    success=False,
+                    error_code="ALREADY_RECEIVED",
+                    error_message="이미 수령완료 처리된 주문입니다.",
+                )
+            message = f"수령 완료 처리 확인 대기 실패: {exc}"
+            print(message)
+            self._invoke_receipt_complete_callback()
+            return ReceiptClickResult(
+                success=False,
+                error_code="CONFIRM_CLICK_FAIL",
+                error_message=message,
+            )
 
         confirm_clicked = False
         for selector in (
@@ -355,6 +417,15 @@ class BrowserService:
                 continue
 
         if not confirm_clicked:
+            if self._page_shows_already_received():
+                print("RECEIPT_ALREADY_RECEIVED_ON_CONFIRM_CLICK")
+                self._close_current_page()
+                self._invoke_receipt_complete_callback()
+                return ReceiptClickResult(
+                    success=False,
+                    error_code="ALREADY_RECEIVED",
+                    error_message="이미 수령완료 처리된 주문입니다.",
+                )
             message = "수령 완료 확인 팝업 버튼 클릭 실패"
             print(message)
             self._invoke_receipt_complete_callback()
@@ -365,8 +436,17 @@ class BrowserService:
             )
 
         try:
-            self._current_page.wait_for_timeout(1200)
+            self._current_page.wait_for_timeout(self._RECEIPT_POST_CONFIRM_SETTLE_MS)
         except Exception as exc:
+            if self._page_shows_already_received():
+                print("RECEIPT_ALREADY_RECEIVED_ON_POST_CONFIRM_WAIT")
+                self._close_current_page()
+                self._invoke_receipt_complete_callback()
+                return ReceiptClickResult(
+                    success=False,
+                    error_code="ALREADY_RECEIVED",
+                    error_message="이미 수령완료 처리된 주문입니다.",
+                )
             print(f"Playwright 클릭 오류: {exc}")
             self._invoke_receipt_complete_callback()
             return ReceiptClickResult(
@@ -430,6 +510,12 @@ class BrowserService:
                 error_message="QR 리다이렉트 확인 요청 시간이 초과되었습니다.",
             )
         except Error as exc:
+            return BrowserResolveResult(
+                ok=False,
+                error_code="NETWORK_ERROR",
+                error_message=f"브라우저 요청 실패: {exc}",
+            )
+        except Exception as exc:
             return BrowserResolveResult(
                 ok=False,
                 error_code="NETWORK_ERROR",
@@ -499,6 +585,38 @@ class BrowserService:
             print("COOKIE_SNAPSHOT PHPSESSID=<missing>")
 
         return snapshot
+
+    def _handle_replace_auth_cookie_snapshot(self, snapshot: dict[str, str]) -> bool:
+        if not self._context:
+            return False
+
+        for domain in (".witchform.com", "witchform.com"):
+            try:
+                self._context.clear_cookies(domain=domain)
+            except Exception as exc:
+                self._warn(f"REPLACE_AUTH_COOKIES_CLEAR_FAILED domain={domain}: {exc}")
+
+        cookies_to_add: list[dict[str, Any]] = []
+        for name, value in dict(snapshot or {}).items():
+            cookie_name = str(name or "").strip()
+            cookie_value = str(value or "").strip()
+            if not cookie_name or not cookie_value:
+                continue
+            if cookie_name != "PHPSESSID" and not self._is_auth_like_cookie_name(cookie_name):
+                continue
+            cookies_to_add.append(
+                {
+                    "name": cookie_name,
+                    "value": cookie_value,
+                    "url": "https://witchform.com/",
+                }
+            )
+
+        if not cookies_to_add:
+            return True
+
+        self._context.add_cookies(cookies_to_add)
+        return True
 
     def _handle_discover_order_context_from_page(
         self,
@@ -597,11 +715,12 @@ class BrowserService:
         )
 
     def _print_order_discovery_result(self, result: PageOrderDiscoveryResult) -> None:
-        masked_phone = self._mask_secret(result.buyer_phone) if result.buyer_phone else ""
+        masked_name = self._mask_name(result.buyer_name)
+        masked_phone = self._mask_phone(result.buyer_phone)
         print(
             "ORDER_DISCOVERY "
             f"order_number={result.order_number} "
-            f"buyer_name={result.buyer_name} "
+            f"buyer_name={masked_name} "
             f"buyer_phone={masked_phone} "
             f"url={result.url}"
         )
@@ -769,6 +888,53 @@ class BrowserService:
             return "****"
         return f"{value[:4]}...{value[-4:]}"
 
+    @staticmethod
+    def _mask_name(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if len(text) == 1:
+            return "*"
+        if len(text) == 2:
+            return f"{text[0]}*"
+        return f"{text[0]}*{text[-1]}"
+
+    @staticmethod
+    def _mask_phone(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) == 11:
+            return f"{digits[:3]}-****-{digits[-4:]}"
+        if len(digits) == 10:
+            return f"{digits[:3]}-***-{digits[-4:]}"
+        if len(text) <= 4:
+            return "****"
+        return f"{text[:2]}***{text[-2:]}"
+
+    def _page_shows_already_received(self) -> bool:
+        """현재 페이지에 이미 수령완료 표시가 있는지 확인한다."""
+        if not self._current_page or self._current_page.is_closed():
+            return False
+        try:
+            body_text = self._current_page.locator("body").inner_text(timeout=2000) or ""
+        except Exception:
+            return False
+        normalized = re.sub(r"\s+", "", body_text or "")
+        positive_markers = (
+            "이미수령완료",
+            "이미처리",
+            "중복스캔",
+            "중복으로스캔",
+            "수령완료되었습니다",
+            "처리완료된주문",
+            "이미처리된주문",
+        )
+        if any(marker in normalized for marker in positive_markers):
+            return True
+        return "수령완료" in normalized and "수령완료처리" not in normalized
+
     def _close_current_page(self) -> None:
         """수령완료 처리 후 구매자 정보 페이지를 닫는다."""
         if not self._current_page or self._current_page.is_closed():
@@ -782,7 +948,30 @@ class BrowserService:
 
     def _invoke_receipt_complete_callback(self) -> None:
         if self._on_receipt_complete:
-            self._on_receipt_complete()
+            try:
+                self._on_receipt_complete()
+            except Exception as exc:
+                self._warn(f"RECEIPT_COMPLETE_CALLBACK_FAILED: {exc}")
+
+    def _abort_start_attempt(self) -> None:
+        self._is_running = False
+        worker = self._worker_thread
+        if worker is not None:
+            try:
+                worker.join(timeout=0.1)
+            except Exception:
+                pass
+        if worker is None or not worker.is_alive():
+            self._finalize_worker_shutdown()
+
+    def _finalize_worker_shutdown(self) -> None:
+        self._is_running = False
+        self._worker_thread = None
+        self._context = None
+        self._current_page = None
+        self._auth_page = None
+        if not self._ready_event.is_set():
+            self._ready_event.set()
 
     @staticmethod
     def _warn(message: str) -> None:

@@ -152,7 +152,10 @@ class TestWaitForCamera(unittest.TestCase):
         from main import Application
 
         app = Application.__new__(Application)
+        app._control_lock = threading.Lock()
         app._stop_requested = False
+        app._relogin_requested = False
+        app._status_listener = None
 
         mock_scanner = type("MockScanner", (), {
             "is_camera_ready": lambda self: False,
@@ -162,7 +165,7 @@ class TestWaitForCamera(unittest.TestCase):
         # 0.3초 후 stop 요청 전송
         def request_stop():
             time.sleep(0.3)
-            app._stop_requested = True
+            app.request_stop()
 
         threading.Thread(target=request_stop, daemon=True).start()
 

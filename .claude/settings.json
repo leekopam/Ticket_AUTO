@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /d/Project/02_Magical_Play/01_Develop/Ticket_AUTO -maxdepth 2 -type d -not -path */dist/* -not -path */__pycache__/* -not -path */.pytest_cache/* -not -path */.git/*)"
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('templates', 'templates'), ('receipt_form.json', '.'), ('data.xlsx', '.')]
+datas = [('Resources\\templates', 'Resources\\templates'), ('Resources\\data', 'Resources\\data'), ('receipt_form.json', '.')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')

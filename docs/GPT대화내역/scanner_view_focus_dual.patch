@@ -1,0 +1,346 @@
+--- /tmp/scanner_view.py	2026-03-29 09:57:59.357223880 +0000
++++ /tmp/scanner_view_focus_dual.py	2026-03-29 10:01:01.900407825 +0000
+@@ -5,13 +5,14 @@
+ import queue
+ import threading
+ import time
++from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Callable, Literal
+ 
+ import cv2
+ import numpy as np
+ from PIL import Image, ImageDraw, ImageFont
+-from pyzbar.pyzbar import decode
++from pyzbar.pyzbar import ZBarSymbol, decode
+ 
+ 
+ _STATUS_BAR_HEIGHT = 38
+@@ -30,6 +31,14 @@
+ _CAMERA_READ_RETRY_SEC = 0.05
+ RecoveryAction = Literal["none", "focus_pulse", "manual_focus_step"]
+ CameraStatusListener = Callable[[str | None], None]
++FocusMode = Literal["auto", "manual"]
++
++
++@dataclass(frozen=True)
++class FocusCapability:
++    autofocus_supported: bool = False
++    manual_focus_supported: bool = False
++    focus_value_readable: bool = False
+ 
+ 
+ def advance_phone_screen_recovery_state(
+@@ -124,6 +133,8 @@
+         status_font_path: str | None = None,
+         status_font_size: int = _DEFAULT_FONT_SIZE,
+         on_frame_ready: Callable[[str], None] | None = None,
++        focus_mode: FocusMode = "auto",
++        manual_focus_value: float = 0.0,
+     ):
+         self._camera_index = camera_index
+         self._cap: cv2.VideoCapture | None = None
+@@ -134,7 +145,15 @@
+         self._is_auth_ready = False
+         self._runtime_status_message = _STATUS_READY
+ 
++        normalized_focus_mode: FocusMode = "manual" if focus_mode == "manual" else "auto"
++        self._focus_mode: FocusMode = normalized_focus_mode
++        self._manual_focus_value = float(manual_focus_value)
++        self._focus_capability = FocusCapability()
++        self._last_applied_focus_mode: FocusMode | None = None
++        self._last_applied_manual_focus_value: float | None = None
++
+         self._lock = threading.Lock()
++        self._cap_io_lock = threading.Lock()
+         self._start_complete = threading.Event()
+         self._worker_thread: threading.Thread | None = None
+         self._qr_queue: queue.Queue[str] = queue.Queue(maxsize=10)
+@@ -184,9 +203,66 @@
+     def set_auth_ready(self, ready: bool) -> None:
+         with self._lock:
+             self._is_auth_ready = ready
+-            cap = self._cap if ready else None
+-        if cap is not None:
+-            self._enable_autofocus(cap)
++
++    def get_focus_capability(self) -> FocusCapability:
++        with self._lock:
++            return self._focus_capability
++
++    def get_focus_mode(self) -> FocusMode:
++        with self._lock:
++            return self._focus_mode
++
++    def get_manual_focus_value(self) -> float:
++        with self._lock:
++            return self._manual_focus_value
++
++    def configure_focus(
++        self,
++        *,
++        mode: FocusMode | None = None,
++        manual_value: float | None = None,
++    ) -> bool:
++        ok = True
++        if manual_value is not None:
++            ok = self.set_manual_focus_value(manual_value, apply_immediately=False) and ok
++        if mode is not None:
++            ok = self.set_focus_mode(mode) and ok
++        return ok
++
++    def set_focus_mode(self, mode: FocusMode) -> bool:
++        normalized_mode: FocusMode = "manual" if mode == "manual" else "auto"
++        with self._lock:
++            self._focus_mode = normalized_mode
++            cap = self._cap
++            capability = self._focus_capability
++
++        if cap is None:
++            return True
++        if normalized_mode == "manual" and not capability.manual_focus_supported:
++            print("CAMERA_FOCUS_MODE_UNSUPPORTED mode=manual")
++            return False
++        if normalized_mode == "auto" and not capability.autofocus_supported:
++            print("CAMERA_FOCUS_MODE_UNSUPPORTED mode=auto")
++            return False
++        return self._apply_focus_mode(cap)
++
++    def set_manual_focus_value(self, value: float, *, apply_immediately: bool = True) -> bool:
++        try:
++            normalized_value = float(value)
++        except (TypeError, ValueError):
++            return False
++
++        with self._lock:
++            self._manual_focus_value = normalized_value
++            focus_mode = self._focus_mode
++            capability = self._focus_capability
++            cap = self._cap if apply_immediately and focus_mode == "manual" else None
++
++        if cap is None:
++            return True
++        if not capability.manual_focus_supported:
++            return False
++        return self._apply_focus_mode(cap)
+ 
+     def is_auth_ready(self) -> bool:
+         with self._lock:
+@@ -211,9 +287,6 @@
+                 self._runtime_status_message = _STATUS_READY
+             elif not enabled and self._runtime_status_message == _STATUS_READY:
+                 self._runtime_status_message = _STATUS_PROCESSING
+-            cap = self._cap if enabled else None
+-        if cap is not None:
+-            self._enable_autofocus(cap)
+ 
+     def set_status_message(self, message: str) -> None:
+         with self._lock:
+@@ -246,7 +319,8 @@
+                 continue
+ 
+             try:
+-                ret, frame = cap.read()
++                with self._cap_io_lock:
++                    ret, frame = cap.read()
+             except cv2.error as exc:
+                 print(f"CAMERA_READ_EXCEPTION error={exc}")
+                 ret, frame = False, None
+@@ -333,15 +407,19 @@
+         print(f"CAMERA_REOPEN_OK reason={reason}")
+         return True
+ 
+-    @classmethod
+     def _open_camera_with_fallback(
+-        cls,
++        self,
+         camera_index: int,
+     ) -> tuple[cv2.VideoCapture | None, str | None]:
+-        cap = cls._open_camera(camera_index)
++        cap = self._open_camera(camera_index)
+         if cap is None:
+             return None, None
+-        cls._enable_autofocus(cap)
++
++        capability = self._probe_focus_capability(cap)
++        with self._lock:
++            self._focus_capability = capability
++
++        self._apply_focus_mode(cap)
+         print("CAMERA_BACKEND_SELECTED backend=DEFAULT")
+         return cap, "DEFAULT"
+ 
+@@ -375,7 +453,7 @@
+             return None
+ 
+         try:
+-            results = decode(frame)
++            results = decode(frame, symbols=[ZBarSymbol.QRCODE])
+         except Exception:
+             return None
+ 
+@@ -469,17 +547,149 @@
+     def _autofocus_prop() -> int | None:
+         return getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+ 
+-    @classmethod
+-    def _enable_autofocus(cls, cap: cv2.VideoCapture) -> bool:
+-        autofocus_prop = cls._autofocus_prop()
+-        if autofocus_prop is None or not hasattr(cap, "set"):
++    @staticmethod
++    def _focus_prop() -> int | None:
++        return getattr(cv2, "CAP_PROP_FOCUS", None)
++
++    def _safe_cap_get(self, cap: cv2.VideoCapture, prop: int | None) -> float | None:
++        if prop is None or not hasattr(cap, "get"):
++            return None
++        try:
++            with self._cap_io_lock:
++                value = cap.get(prop)
++        except Exception:
++            return None
++        try:
++            value = float(value)
++        except (TypeError, ValueError):
++            return None
++        if not np.isfinite(value):
++            return None
++        return value
++
++    def _safe_cap_set(self, cap: cv2.VideoCapture, prop: int | None, value: float) -> bool:
++        if prop is None or not hasattr(cap, "set"):
+             return False
+         try:
+-            result = cap.set(autofocus_prop, 1.0)
++            with self._cap_io_lock:
++                result = cap.set(prop, float(value))
+         except Exception:
+             return False
+         return True if result is None else bool(result)
+ 
++    def _probe_focus_capability(self, cap: cv2.VideoCapture) -> FocusCapability:
++        autofocus_prop = self._autofocus_prop()
++        focus_prop = self._focus_prop()
++
++        original_auto = self._safe_cap_get(cap, autofocus_prop)
++        original_focus = self._safe_cap_get(cap, focus_prop)
++
++        autofocus_supported = False
++        manual_focus_supported = False
++        focus_value_readable = original_focus is not None
++
++        if autofocus_prop is not None:
++            trial_values: list[float] = []
++            if original_auto is not None:
++                trial_values.append(original_auto)
++            trial_values.extend([1.0, 0.0])
++
++            seen: set[float] = set()
++            for trial in trial_values:
++                if trial in seen:
++                    continue
++                seen.add(trial)
++                if self._safe_cap_set(cap, autofocus_prop, trial):
++                    autofocus_supported = True
++                    break
++
++        if focus_prop is not None:
++            if autofocus_supported:
++                self._safe_cap_set(cap, autofocus_prop, 0.0)
++
++            trial_values = []
++            if original_focus is not None:
++                trial_values.append(original_focus)
++            with self._lock:
++                trial_values.append(self._manual_focus_value)
++            trial_values.extend([0.0, 1.0])
++
++            seen: set[float] = set()
++            for trial in trial_values:
++                if trial in seen:
++                    continue
++                seen.add(trial)
++                if self._safe_cap_set(cap, focus_prop, trial):
++                    manual_focus_supported = True
++                    break
++
++        if autofocus_supported and original_auto is not None:
++            self._safe_cap_set(cap, autofocus_prop, original_auto)
++        if manual_focus_supported and original_focus is not None:
++            self._safe_cap_set(cap, focus_prop, original_focus)
++
++        print(
++            "CAMERA_FOCUS_CAPABILITY "
++            f"autofocus={int(autofocus_supported)} "
++            f"manual={int(manual_focus_supported)} "
++            f"readable={int(focus_value_readable)}"
++        )
++        return FocusCapability(
++            autofocus_supported=autofocus_supported,
++            manual_focus_supported=manual_focus_supported,
++            focus_value_readable=focus_value_readable,
++        )
++
++    def _enable_autofocus(self, cap: cv2.VideoCapture) -> bool:
++        return self._safe_cap_set(cap, self._autofocus_prop(), 1.0)
++
++    def _disable_autofocus(self, cap: cv2.VideoCapture) -> bool:
++        return self._safe_cap_set(cap, self._autofocus_prop(), 0.0)
++
++    def _set_focus_value(self, cap: cv2.VideoCapture, value: float) -> bool:
++        return self._safe_cap_set(cap, self._focus_prop(), value)
++
++    def _apply_focus_mode(self, cap: cv2.VideoCapture) -> bool:
++        with self._lock:
++            focus_mode = self._focus_mode
++            manual_focus_value = self._manual_focus_value
++            capability = self._focus_capability
++
++        if focus_mode == "manual":
++            if not capability.manual_focus_supported:
++                if capability.autofocus_supported:
++                    print("CAMERA_FOCUS_MANUAL_UNSUPPORTED fallback=auto")
++                    return self._enable_autofocus(cap)
++                print("CAMERA_FOCUS_MANUAL_UNSUPPORTED fallback=none")
++                return False
++
++            if capability.autofocus_supported:
++                self._disable_autofocus(cap)
++
++            applied = self._set_focus_value(cap, manual_focus_value)
++            if applied:
++                with self._lock:
++                    self._last_applied_focus_mode = "manual"
++                    self._last_applied_manual_focus_value = manual_focus_value
++                print(f"CAMERA_FOCUS_APPLIED mode=manual value={manual_focus_value}")
++                return True
++
++            print(f"CAMERA_FOCUS_APPLY_FAIL mode=manual value={manual_focus_value}")
++            return False
++
++        if capability.autofocus_supported:
++            applied = self._enable_autofocus(cap)
++            if applied:
++                with self._lock:
++                    self._last_applied_focus_mode = "auto"
++                print("CAMERA_FOCUS_APPLIED mode=auto")
++                return True
++            print("CAMERA_FOCUS_APPLY_FAIL mode=auto")
++            return False
++
++        print("CAMERA_FOCUS_AUTO_UNSUPPORTED noop=1")
++        return False
++
+     def _update_phone_screen_recovery_state(self, frame: np.ndarray) -> str:
+         """제거된 폰 화면 복구 모드에 대한 호환성 No-op입니다."""
+         self._active_exposure_mode = "default"
+@@ -557,5 +767,9 @@
+             except Exception:
+                 pass
+             self._cap = None
++
++        with self._lock:
++            self._focus_capability = FocusCapability()
++
+         self._camera_backend_name = None
+         self._clear_camera_status()

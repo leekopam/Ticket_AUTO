@@ -9,6 +9,7 @@ import time
 from openpyxl import load_workbook
 
 from models.order_model import Order
+from project_paths import ensure_managed_data_file, resolve_project_path
 
 
 PRODUCT_HEADER_RE = re.compile(r"^\[상품(\d+)\]")
@@ -19,8 +20,11 @@ _WRITE_RETRY_DELAY_SEC = 0.2
 
 
 class ExcelService:
-    def __init__(self, file_path: str = "data.xlsx"):
-        self._file_path = file_path
+    def __init__(self, file_path: str | None = None):
+        if file_path is None:
+            self._file_path = str(ensure_managed_data_file())
+        else:
+            self._file_path = str(resolve_project_path(file_path))
 
     def search_orders(self, keyword: str = "") -> list[Order]:
         """주문번호/이름/연락처로 부분 일치 검색. 빈 키워드면 전체 반환(최대 200건)."""

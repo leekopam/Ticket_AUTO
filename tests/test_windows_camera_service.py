@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import cv2
+import numpy as np
+
+from services.windows_camera_service import CameraDevice, WindowsCameraService
+
+
+class _FakeCapture:
+    def __init__(self, *, opened: bool = True, frame: object | None = None):
+        self._opened = opened
+        self._frame = frame if frame is not None else np.zeros((4, 4, 3), dtype=np.uint8)
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return self._opened
+
+    def read(self) -> tuple[bool, object | None]:
+        return self._opened, self._frame
+
+    def release(self) -> None:
+        self.released = True
+
+
+class WindowsCameraServiceTest(unittest.TestCase):
+    def test_get_powershell_camera_names_parses_unique_names(self) -> None:
+        with patch(
+            "services.windows_camera_service.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout='["HD Pro Webcam C920","USB Camera","HD Pro Webcam C920"]',
+            ),
+        ):
+            names = WindowsCameraService._get_powershell_camera_names()
+
+        self.assertEqual(names, ["HD Pro Webcam C920", "USB Camera"])
+
+    def test_get_cached_wmi_camera_names_reuses_recent_result(self) -> None:
+        service = WindowsCameraService()
+
+        with patch.object(service, "_get_wmi_camera_names", return_value=["HD Pro Webcam C920"]) as getter:
+            first = service._get_cached_wmi_camera_names()
+            second = service._get_cached_wmi_camera_names()
+
+        self.assertEqual(first, ["HD Pro Webcam C920"])
+        self.assertEqual(second, ["HD Pro Webcam C920"])
+        getter.assert_called_once()
+
+    def test_probe_opencv_indices_stops_after_target_count(self) -> None:
+        calls: list[tuple[int, object | None]] = []
+
+        def _video_capture(index: int, backend: object | None = None) -> _FakeCapture:
+            calls.append((index, backend))
+            return _FakeCapture(opened=(index == 0))
+
+        with patch("services.windows_camera_service.cv2.VideoCapture", side_effect=_video_capture):
+            result = WindowsCameraService._probe_opencv_indices(max_index=5, target_count=1)
+
+        self.assertEqual(result, [0])
+        self.assertEqual(calls, [(0, cv2.CAP_DSHOW)])
+
+    def test_list_cameras_uses_only_wmi_named_devices(self) -> None:
+        service = WindowsCameraService()
+
+        with (
+            patch.object(service, "_get_wmi_camera_names", return_value=["HD Pro Webcam C920"]),
+            patch.object(service, "_probe_opencv_indices", return_value=[0, 7]),
+        ):
+            devices = service.list_cameras()
+
+        self.assertEqual(devices, [CameraDevice(index=0, name="HD Pro Webcam C920")])
+
+    def test_list_cameras_falls_back_to_generic_names_without_wmi(self) -> None:
+        service = WindowsCameraService()
+
+        with (
+            patch.object(service, "_get_wmi_camera_names", return_value=[]),
+            patch.object(service, "_probe_opencv_indices", return_value=[2, 4]),
+        ):
+            devices = service.list_cameras()
+
+        self.assertEqual(
+            devices,
+            [
+                CameraDevice(index=2, name="카메라 2"),
+                CameraDevice(index=4, name="카메라 4"),
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
