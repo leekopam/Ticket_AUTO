@@ -8,6 +8,7 @@ from tkinter import font
 from typing import Callable
 
 from models.order_model import Order
+from project_paths import resolve_app_icon_path
 from services.receipt_settings_store import ReceiptSettingsStore
 
 
@@ -67,6 +68,7 @@ class OrderView:
         self._root = tk.Tk()
         self._root.title("주문 정보")
         self._root.geometry("600x700")
+        self._apply_window_icon()
 
         large_font = font.Font(size=20, weight="bold")
         medium_font = font.Font(size=15, weight="bold")
@@ -83,7 +85,7 @@ class OrderView:
         self._goods_label = tk.Label(self._root, text="상품:", font=medium_font, justify=tk.LEFT)
         self._goods_label.pack(pady=10)
 
-        self._ticket_label = tk.Label(self._root, text="", font=medium_font, justify=tk.LEFT, fg="#2A7FFF")
+        self._ticket_label = tk.Label(self._root, text="", font=medium_font, justify=tk.LEFT, fg="#1C8C84")
         self._ticket_label.pack(pady=10)
 
         # 영수증 수동 출력 버튼
@@ -135,6 +137,18 @@ class OrderView:
             return
 
         self._root.after(50, self._poll_queue)
+
+    def _apply_window_icon(self) -> None:
+        root = self._root
+        if root is None:
+            return
+        icon_path = resolve_app_icon_path()
+        if not icon_path.exists():
+            return
+        try:
+            root.iconbitmap(default=str(icon_path))
+        except Exception:
+            return
 
     def _split_goods_ticket(self, goods: list[str]) -> tuple[list[str], list[str]]:
         """상품 목록을 일반상품/티켓으로 분리한다."""

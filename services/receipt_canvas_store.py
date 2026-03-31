@@ -14,11 +14,16 @@ from models.receipt_canvas_model import (
     create_default_document,
     paper_width_to_px,
 )
+from project_paths import (
+    RESOURCE_RECEIPT_TEMPLATE_FILE,
+    ensure_managed_templates_dir,
+    resolve_project_path,
+)
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_LAYOUT_PATH = "templates/receipt_layout.json"
+DEFAULT_LAYOUT_PATH = RESOURCE_RECEIPT_TEMPLATE_FILE.as_posix()
 ASSET_DIR = ".runtime/receipt_assets"
 
 
@@ -31,11 +36,12 @@ class ReceiptCanvasStore:
         default_layout_path: str = DEFAULT_LAYOUT_PATH,
         asset_dir: str = ASSET_DIR,
     ):
-        self._default_layout_path = Path(default_layout_path)
-        self._asset_dir = Path(asset_dir)
+        ensure_managed_templates_dir()
+        self._default_layout_path = resolve_project_path(default_layout_path)
+        self._asset_dir = resolve_project_path(asset_dir)
 
     def load_layout(self, path: str) -> ReceiptCanvasDocument:
-        target = Path(path)
+        target = resolve_project_path(path)
         if not target.exists():
             return create_default_document()
 
@@ -49,7 +55,7 @@ class ReceiptCanvasStore:
 
     def save_layout(self, path: str, doc: ReceiptCanvasDocument) -> None:
         normalized = self._normalize_canvas_width(doc)
-        target = Path(path)
+        target = resolve_project_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps(normalized.to_dict(), ensure_ascii=False, indent=2),
@@ -89,7 +95,7 @@ class ReceiptCanvasStore:
                 f"data:image/{mime};base64,{base64.b64encode(raw).decode('ascii')}"
             )
 
-        target = Path(path)
+        target = resolve_project_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps(portable_doc.to_dict(), ensure_ascii=False, indent=2),

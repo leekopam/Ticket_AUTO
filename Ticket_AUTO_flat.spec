@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('templates', 'templates'), ('receipt_form.json', '.'), ('data.xlsx', '.')]
+datas = [('Resources\\templates', 'Resources\\templates'), ('Resources\\data', 'Resources\\data'), ('receipt_form.json', '.')]
+icon_path = Path('Resources') / 'app.ico'
+if icon_path.exists():
+    datas.append((str(icon_path), 'Resources'))
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')
@@ -47,6 +51,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(icon_path) if icon_path.exists() else None,
     contents_directory='.',
 )
 coll = COLLECT(

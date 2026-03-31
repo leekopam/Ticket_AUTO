@@ -1,24 +1,60 @@
 ﻿"""QR 스캐너 기반 주문 수령 자동화 애플리케이션."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime
 from enum import Enum, auto
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
 from models.order_model import Order
 from models.receipt_settings_model import ReceiptSettings
+from models.ticket_debug_settings_model import TicketDebugSettings
+from project_paths import ensure_managed_data_file, ensure_managed_templates_dir, resolve_project_path
 from services.api_service import ApiService, QRParseResult
 from services.browser_service import BrowserResolveResult, BrowserService
 from services.excel_service import ExcelService
 from services.receipt_print_pipeline import print_order_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
+from services.scan_success_sound_service import ScanSuccessSoundService
+from services.ticket_debug_tools_service import TicketDebugToolsService
 from services.windows_audio_service import WindowsAudioService
 from viewmodels.order_viewmodel import OrderViewModel
 from views.order_view import OrderView
 from views.scanner_view import ScannerView
+
+logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _mask_name(value: str) -> str:
+    """로그에 남길 때 이름 일부만 노출한다."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if len(text) == 1:
+        return "*"
+    if len(text) == 2:
+        return f"{text[0]}*"
+    return f"{text[0]}*{text[-1]}"
+
+
+def _mask_phone(value: str) -> str:
+    """로그에 남길 때 연락처 중간 자리를 마스킹한다."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) == 11:
+        return f"{digits[:3]}-****-{digits[-4:]}"
+    if len(digits) == 10:
+        return f"{digits[:3]}-***-{digits[-4:]}"
+    if len(text) <= 4:
+        return "****"
+    return f"{text[:2]}***{text[-2:]}"
 
 
 class AppState(Enum):
@@ -37,24 +73,33 @@ StatusListener = Callable[[str, str], None]
 class Application:
     """주문 수령 자동화 애플리케이션."""
 
-    def __init__(self):
+    def __init__(self, *, show_order_window: bool = True, camera_index: int = 0):
         self._state = AppState.AUTH_WAIT
+        self._show_order_window = bool(show_order_window)
 
-        self._excel_service = ExcelService("data.xlsx")
+        self._excel_service = ExcelService(str(ensure_managed_data_file()))
+        ensure_managed_templates_dir()
         self._excel_service.ensure_seat_column()
         self._excel_service.ensure_receipt_column()
         self._browser_service = BrowserService(require_login_each_run=True)
         self._api_service = ApiService()
 
-        self._settings_store = ReceiptSettingsStore(".runtime/receipt_settings.json")
+        self._settings_store = ReceiptSettingsStore(str(resolve_project_path(".runtime/receipt_settings.json")))
         self._receipt_settings: ReceiptSettings = self._settings_store.load()
         self._audio_service = WindowsAudioService()
+        self._scan_success_sound_service = ScanSuccessSoundService(audio_service=self._audio_service)
+        self._ticket_debug_tools_service = TicketDebugToolsService()
 
         self._order_viewmodel = OrderViewModel(self._excel_service, self._browser_service)
 
-        self._scanner_view = ScannerView()
-        self._order_view = OrderView()
-        self._order_view.set_print_request_callback(self._handle_manual_print)
+        self._scanner_view = ScannerView(
+            camera_index=camera_index,
+            focus_mode=self._receipt_settings.scanner_focus_mode,
+            manual_focus_value=self._receipt_settings.scanner_manual_focus_value,
+        )
+        self._order_view = OrderView() if self._show_order_window else None
+        if self._order_view is not None:
+            self._order_view.set_print_request_callback(self._handle_manual_print)
 
         self._last_qr_url = ""
         self._last_qr_timestamp = 0.0
@@ -88,32 +133,97 @@ class Application:
         """외부 대시보드에서 상태 이벤트를 구독한다."""
         self._status_listener = listener
 
+    def change_camera(self, new_index: int) -> None:
+        """런타임 중 카메라 디바이스를 변경한다."""
+        self._scanner_view.change_camera(new_index)
+
+    def apply_scanner_focus_settings(self, focus_mode: str, manual_focus_value: float | None) -> str:
+        """실행 중인 스캐너에 초점 설정을 즉시 반영한다."""
+        normalized_value = None if manual_focus_value is None else float(manual_focus_value)
+        requested_manual = focus_mode == "manual"
+        normalized_mode = "manual" if requested_manual and normalized_value is not None else "auto"
+
+        scanner = getattr(self, "_scanner_view", None)
+        capability_getter = getattr(scanner, "get_focus_capability", None)
+        capability = capability_getter() if callable(capability_getter) else None
+        manual_supported = None if capability is None else bool(getattr(capability, "manual_focus_supported", False))
+        if requested_manual and manual_supported is False:
+            normalized_mode = "auto"
+            normalized_value = None
+
+        self._receipt_settings.scanner_focus_mode = normalized_mode
+        self._receipt_settings.scanner_manual_focus_value = normalized_value
+
+        if scanner is None:
+            return "카메라 초점 설정 저장 완료 (다음 앱 시작 후 적용)"
+
+        is_camera_ready = getattr(scanner, "is_camera_ready", None)
+        camera_ready = bool(is_camera_ready()) if callable(is_camera_ready) else False
+
+        set_focus_mode = getattr(scanner, "set_focus_mode", None)
+        applied = bool(set_focus_mode(normalized_mode)) if callable(set_focus_mode) else False
+
+        # 모드 설정 후 수동 초점 값 적용 (모드가 manual이어야 값이 반영됨)
+        set_manual_focus_value = getattr(scanner, "set_manual_focus_value", None)
+        if callable(set_manual_focus_value) and normalized_mode == "manual":
+            applied = bool(set_manual_focus_value(normalized_value)) and applied
+
+        if requested_manual and manual_supported is False:
+            return "현재 카메라가 수동 초점을 지원하지 않아 자동 초점으로 유지됩니다."
+        if requested_manual and normalized_value is None:
+            return "수동 초점 값이 없어 자동 초점으로 유지됩니다."
+        if camera_ready and applied:
+            return "카메라 초점 설정 저장 완료 (현재 런타임에 바로 적용됨)"
+        if not camera_ready:
+            return "카메라 초점 설정 저장 완료 (카메라 준비 후 현재 런타임에 적용됨)"
+        return "카메라 초점 설정 저장 완료 (현재 카메라가 이 설정을 바로 적용하지 못해 저장만 완료됨)"
+
+    def get_scanner_focus_capability(self):
+        """실행 중인 스캐너의 초점 capability를 반환한다."""
+        scanner = getattr(self, "_scanner_view", None)
+        if scanner is None:
+            return None
+        getter = getattr(scanner, "get_focus_capability", None)
+        if not callable(getter):
+            return None
+        return getter()
+
+    def _get_control_lock(self) -> threading.Lock:
+        lock = getattr(self, "_control_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._control_lock = lock
+        return lock
+
     def request_stop(self) -> None:
         """외부에서 런타임 정지를 요청한다.
 
         플래그만 설정하고 실제 자원 정리는 run()의 finally에서 수행한다.
         중복 stop 호출로 인한 Playwright 이벤트 루프 오류를 방지한다.
         """
-        with self._control_lock:
+        with self._get_control_lock():
             self._stop_requested = True
+            self._relogin_requested = False
         self._emit_status("STOPPING", "런타임 중지 요청됨")
 
     def request_relogin(self) -> None:
         """외부에서 재로그인을 요청한다."""
-        with self._control_lock:
+        with self._get_control_lock():
             if self._stop_requested:
                 return
             self._relogin_requested = True
         self._emit_status("RECOVERING", "재로그인 요청됨")
 
     def run(self) -> None:
-        self._stop_requested = False
-        self._relogin_requested = False
+        with self._get_control_lock():
+            self._stop_requested = False
+            self._relogin_requested = False
         self._emit_status("STARTING", "티켓 확인 런타임 시작 중")
 
         try:
             self._browser_service.start()
-            self._order_view.start()
+            if self._order_view is not None:
+                self._order_view.start()
             self._scanner_view.start()
 
             # 카메라 비동기 초기화 대기 (최대 30초)
@@ -135,7 +245,8 @@ class Application:
             except Exception:
                 pass
             try:
-                self._order_view.stop()
+                if self._order_view is not None:
+                    self._order_view.stop()
             except Exception:
                 pass
             try:
@@ -156,13 +267,18 @@ class Application:
         return self._scanner_view.is_camera_ready()
 
     def _is_stop_requested(self) -> bool:
-        return bool(getattr(self, "_stop_requested", False))
+        with self._get_control_lock():
+            return bool(getattr(self, "_stop_requested", False))
 
     def _consume_relogin_requested(self) -> bool:
-        if not getattr(self, "_relogin_requested", False):
-            return False
-        self._relogin_requested = False
-        return True
+        with self._get_control_lock():
+            if getattr(self, "_stop_requested", False):
+                self._relogin_requested = False
+                return False
+            if not getattr(self, "_relogin_requested", False):
+                return False
+            self._relogin_requested = False
+            return True
 
     def _emit_order(self, order: Order) -> None:
         """주문 정보를 외부 대시보드로 전달한다."""
@@ -172,7 +288,7 @@ class Application:
         try:
             listener(order)
         except Exception:
-            pass
+            logger.warning("주문 콜백 처리 실패", exc_info=True)
 
     def _emit_status(self, state: str, message: str) -> None:
         listener = getattr(self, "_status_listener", None)
@@ -181,7 +297,7 @@ class Application:
         try:
             listener(state, message)
         except Exception:
-            pass
+            logger.warning("상태 콜백 처리 실패", exc_info=True)
 
     def _enter_auth_wait(self, message: str = "브라우저에서 로그인이 필요합니다") -> None:
         self._state = AppState.AUTH_WAIT
@@ -218,39 +334,110 @@ class Application:
         self._scanner_view.set_status_message(message)
         self._emit_status(self._state.name, message)
 
+    def _browser_status_message(self, browser_result: BrowserResolveResult) -> str:
+        if browser_result.error_code == "NETWORK_TIMEOUT":
+            return "브라우저 응답이 지연되고 있습니다. 다시 스캔해주세요."
+        if browser_result.error_code == "AUTH_REQUIRED":
+            return "로그인이 필요합니다. 브라우저에서 로그인해주세요."
+        return "브라우저 요청을 확인하지 못했습니다. 다시 스캔해주세요."
+
+    def _receipt_failure_status_message(self, click_result: ReceiptClickResult) -> str:
+        if click_result.error_code == "ALREADY_RECEIVED":
+            return "이미 수령완료된 주문입니다 (주문정보만 표시)"
+        if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
+            return "수령 완료 처리 상태를 확인하지 못했습니다. 다시 스캔해주세요."
+        if click_result.error_code == "NO_ACTIVE_PAGE":
+            return "주문 상세 페이지를 확인하지 못했습니다. 다시 스캔해주세요."
+        return "수령 완료 처리에 실패했습니다. 다시 스캔해주세요."
+
     def _handle_manual_print(self, order: Order) -> None:
         """구매자 정보 창에서 수동 영수증 출력 요청을 처리한다."""
         try:
             self._receipt_settings = self._settings_store.load()
         except Exception:
-            pass
+            logger.warning("영수증 설정 재로딩 실패", exc_info=True)
         try:
             print_order_receipt(order, self._receipt_settings)
             self._emit_status("READY", "영수증 수동 출력 완료")
         except Exception as exc:
             self._emit_status("ERROR", f"영수증 수동 출력 실패: {exc}")
 
-    def _play_scan_success_sound(self) -> None:
+    def _play_scan_success_sound(
+        self,
+        order: Order | None = None,
+        *,
+        increment_count: bool = True,
+        persist_count: bool = True,
+    ):
         settings_store = getattr(self, "_settings_store", None)
         if settings_store is not None:
             try:
                 self._receipt_settings = settings_store.load()
             except Exception:
-                pass
+                logger.warning("스캔 사운드 설정 재로딩 실패", exc_info=True)
 
         receipt_settings = getattr(self, "_receipt_settings", None)
-        sound_path = (getattr(receipt_settings, "qr_scan_success_sound_path", "") or "").strip()
-        if not sound_path:
-            return
-
-        audio_service = getattr(self, "_audio_service", None)
-        if audio_service is None:
-            return
+        sound_service = getattr(self, "_scan_success_sound_service", None)
+        if sound_service is None:
+            audio_service = getattr(self, "_audio_service", None)
+            if audio_service is None:
+                return
+            sound_service = ScanSuccessSoundService(audio_service=audio_service)
+            self._scan_success_sound_service = sound_service
 
         try:
-            audio_service.play_file(sound_path)
+            return sound_service.play_for_scan_success(
+                receipt_settings,
+                order_number="" if order is None else order.order_number,
+                increment_count=increment_count,
+                persist_count=persist_count,
+            )
         except Exception as exc:
-            print(f"SOUND_PLAY_FAIL path={sound_path} error={exc}")
+            print(f"SOUND_PLAY_FAIL order={'' if order is None else order.order_number} error={exc}")
+            return None
+
+    def _commit_scan_success_count(self) -> None:
+        sound_service = getattr(self, "_scan_success_sound_service", None)
+        if sound_service is None:
+            return
+        try:
+            current_count = sound_service.load_success_count()
+            sound_service.save_success_count(current_count + 1)
+        except Exception:
+            logger.warning("스캔 성공 누적 카운트 저장 실패", exc_info=True)
+
+    def _load_ticket_debug_settings(self):
+        service = getattr(self, "_ticket_debug_tools_service", None)
+        if service is None:
+            service = TicketDebugToolsService()
+            self._ticket_debug_tools_service = service
+        try:
+            return service.load_settings()
+        except Exception:
+            logger.warning("디버그 설정 로딩 실패", exc_info=True)
+            return TicketDebugSettings()
+
+    def _should_play_duplicate_received_sound(self, debug_settings: TicketDebugSettings | None = None) -> bool:
+        service = getattr(self, "_ticket_debug_tools_service", None)
+        if service is None:
+            service = TicketDebugToolsService()
+            self._ticket_debug_tools_service = service
+        try:
+            return service.should_play_sound_for_duplicate_received_qr(debug_settings)
+        except Exception:
+            logger.warning("디버그 중복 스캔 효과음 설정 확인 실패", exc_info=True)
+            return False
+
+    def _should_count_scan_success_as_processed(self, debug_settings: TicketDebugSettings | None = None) -> bool:
+        service = getattr(self, "_ticket_debug_tools_service", None)
+        if service is None:
+            service = TicketDebugToolsService()
+            self._ticket_debug_tools_service = service
+        try:
+            return service.should_count_scan_success_as_processed(debug_settings)
+        except Exception:
+            logger.warning("디버그 누적 카운트 반영 설정 확인 실패", exc_info=True)
+            return False
 
     def _wait_for_initial_login(self) -> bool:
         return self._wait_for_login(timeout_sec=0)
@@ -345,7 +532,8 @@ class Application:
             browser_result = self._browser_service.resolve_qr_redirect(normalized_qr_url)
         except Exception as exc:
             if not self._is_stop_requested():
-                self._enter_error(f"브라우저 요청 실패: {exc}")
+                logger.warning("QR 브라우저 요청 실패", exc_info=True)
+                self._enter_error("브라우저 요청을 확인하지 못했습니다. 다시 스캔해주세요.")
             return
 
         self._process_resolved_qr(normalized_qr_url, browser_result, allow_auth_retry)
@@ -400,12 +588,23 @@ class Application:
             self._enter_error(f"주문번호를 찾을 수 없습니다: {parse_result.order_number}")
             return
 
-        self._order_view.show_or_update(order)
+        if self._order_view is not None:
+            self._order_view.show_or_update(order)
         self._emit_order(order)
 
         if order.is_received:
+            debug_settings = self._load_ticket_debug_settings()
+            count_as_processed = self._should_count_scan_success_as_processed(debug_settings)
+            play_duplicate_sound = self._should_play_duplicate_received_sound(debug_settings)
+            if count_as_processed or play_duplicate_sound:
+                self._play_scan_success_sound(
+                    order,
+                    increment_count=count_as_processed,
+                    persist_count=not count_as_processed,
+                )
+            if count_as_processed:
+                self._commit_scan_success_count()
             self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
-            self._play_scan_success_sound()
             return
 
         if not self._order_viewmodel.open_current_order_page():
@@ -414,10 +613,31 @@ class Application:
 
         click_result = self._order_viewmodel.complete_receipt()
         if not click_result.success:
-            self._enter_error(
-                f"{click_result.error_message or '수령 완료 처리 실패'} "
-                f"(code={click_result.error_code or 'UNKNOWN'})"
+            # 웹 페이지에서 이미 수령완료 상태인 경우 엑셀에 반영하고 정상 처리
+            if click_result.error_code == "ALREADY_RECEIVED":
+                received_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._order_viewmodel.mark_current_order_received(received_at)
+                debug_settings = self._load_ticket_debug_settings()
+                count_as_processed = self._should_count_scan_success_as_processed(debug_settings)
+                play_duplicate_sound = self._should_play_duplicate_received_sound(debug_settings)
+                if count_as_processed or play_duplicate_sound:
+                    self._play_scan_success_sound(
+                        order,
+                        increment_count=count_as_processed,
+                        persist_count=not count_as_processed,
+                    )
+                if count_as_processed:
+                    self._commit_scan_success_count()
+                self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
+                return
+            if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
+                self._play_scan_success_sound(order, increment_count=False)
+            logger.warning(
+                "수령 완료 처리 실패 code=%s message=%s",
+                click_result.error_code,
+                click_result.error_message,
             )
+            self._enter_error(self._receipt_failure_status_message(click_result))
             return
 
         previous_received = order.received_at
@@ -425,6 +645,8 @@ class Application:
         if not self._order_viewmodel.mark_current_order_received(received_at):
             self._enter_error("수령확인 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요.")
             return
+
+        self._play_scan_success_sound(order, increment_count=True, persist_count=False)
 
         try:
             # 설정 화면에서 변경된 최신 여백/템플릿 반영
@@ -444,8 +666,8 @@ class Application:
                 )
             return
 
+        self._commit_scan_success_count()
         self._enter_ready("수령 완료 및 영수증 출력 완료")
-        self._play_scan_success_sound()
 
     def _recover_missing_order_number(
         self,
@@ -474,8 +696,8 @@ class Application:
             print(
                 "ORDER_DISCOVERY_CONTACT_RECOVERED "
                 f"order_number={order_number} "
-                f"buyer_name={discovery['buyer_name']} "
-                f"buyer_phone={discovery['buyer_phone']}"
+                f"buyer_name={_mask_name(discovery['buyer_name'])} "
+                f"buyer_phone={_mask_phone(discovery['buyer_phone'])}"
             )
 
         recovered_url = discovery["url"] or detail_url
@@ -521,15 +743,15 @@ class Application:
         if not matches:
             print(
                 "ORDER_DISCOVERY_CONTACT_MISS "
-                f"buyer_name={buyer_name} "
-                f"buyer_phone={buyer_phone}"
+                f"buyer_name={_mask_name(buyer_name)} "
+                f"buyer_phone={_mask_phone(buyer_phone)}"
             )
             return None
         if len(matches) != 1:
             print(
                 "ORDER_DISCOVERY_CONTACT_AMBIGUOUS "
-                f"buyer_name={buyer_name} "
-                f"buyer_phone={buyer_phone} "
+                f"buyer_name={_mask_name(buyer_name)} "
+                f"buyer_phone={_mask_phone(buyer_phone)} "
                 f"count={len(matches)}"
             )
             return None
@@ -563,7 +785,8 @@ class Application:
             try:
                 retry_result = self._browser_service.resolve_qr_redirect(qr_url)
             except Exception as exc:
-                self._enter_error(f"재시도 실패: {exc}")
+                logger.warning("QR 재시도 실패", exc_info=True)
+                self._enter_error("브라우저 요청을 다시 확인하지 못했습니다. 다시 스캔해주세요.")
                 return
 
             if retry_result.ok:
@@ -573,8 +796,12 @@ class Application:
             self._enter_error("네트워크 시간 초과가 발생했습니다")
             return
 
-        message = browser_result.error_message or "QR 처리 중 브라우저 오류가 발생했습니다"
-        self._enter_error(message)
+        logger.warning(
+            "브라우저 처리 실패 code=%s message=%s",
+            browser_result.error_code,
+            browser_result.error_message,
+        )
+        self._enter_error(self._browser_status_message(browser_result))
 
     def _recover_auth_and_retry(self, qr_url: str) -> None:
         if self._is_stop_requested():

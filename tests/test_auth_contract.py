@@ -20,6 +20,12 @@ class AuthContractTest(unittest.TestCase):
         default_value = signature.parameters["require_login_each_run"].default
         self.assertTrue(default_value)
 
+    def test_browser_service_headless_defaults_to_false(self) -> None:
+        """BrowserService 기본 브라우저 모드는 headed인지 확인한다."""
+        signature = inspect.signature(BrowserService.__init__)
+        self.assertIn("headless", signature.parameters)
+        self.assertFalse(signature.parameters["headless"].default)
+
     def test_main_sets_require_login_each_run_true(self) -> None:
         """애플리케이션 초기화에서 정책 값을 명시적으로 고정하는지 확인한다."""
         source = Path("main.py").read_text(encoding="utf-8-sig")
@@ -64,6 +70,11 @@ class AuthContractTest(unittest.TestCase):
         self.assertNotIn("cookies", options)
         self.assertNotIn("headers", options)
 
+    def test_browser_service_exposes_runtime_safe_auth_cookie_replacement(self) -> None:
+        """인증 쿠키 lifecycle smoke를 위한 런타임 안전 API가 존재하는지 확인한다."""
+        signature = inspect.signature(BrowserService.replace_auth_cookie_snapshot)
+        self.assertIn("snapshot", signature.parameters)
+
     def test_api_service_is_parser_only_without_session_methods(self) -> None:
         """ApiService에 세션 주입 메서드가 재도입되지 않았는지 확인한다."""
         self.assertFalse(hasattr(ApiService, "set_session"))
@@ -75,7 +86,18 @@ class AuthContractTest(unittest.TestCase):
         init_sig = inspect.signature(ScannerView.__init__)
         self.assertIn("status_font_path", init_sig.parameters)
         self.assertIn("status_font_size", init_sig.parameters)
+        self.assertIn("focus_mode", init_sig.parameters)
+        self.assertIn("manual_focus_value", init_sig.parameters)
         self.assertTrue(hasattr(ScannerView, "set_status_font"))
+
+    def test_main_passes_saved_scanner_focus_settings_to_scanner_view(self) -> None:
+        """Application이 저장된 초점 설정값을 ScannerView 생성자에 전달하는지 확인한다."""
+        source = Path("main.py").read_text(encoding="utf-8-sig")
+        self.assertIn("focus_mode=self._receipt_settings.scanner_focus_mode", source)
+        self.assertIn(
+            "manual_focus_value=self._receipt_settings.scanner_manual_focus_value",
+            source,
+        )
 
 
 if __name__ == "__main__":

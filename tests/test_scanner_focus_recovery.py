@@ -68,7 +68,8 @@ class ScannerLegacyStateContractTest(unittest.TestCase):
 
         self.assertTrue(scanner._can_emit_qr("qr://same"))
 
-    def test_decode_qr_reads_first_pyzbar_result_from_raw_frame(self) -> None:
+    def test_decode_qr_reads_first_pyzbar_result(self) -> None:
+        """원본 프레임에서 decode 한 번으로 디코딩 성공."""
         frame = np.full((20, 20, 3), 120, dtype=np.uint8)
         decoded = [SimpleNamespace(data=b"https://example.com/qr")]
 
@@ -78,23 +79,23 @@ class ScannerLegacyStateContractTest(unittest.TestCase):
         self.assertEqual(qr_url, "https://example.com/qr")
         decode_mock.assert_called_once_with(frame)
 
-    def test_decode_qr_returns_none_when_raw_frame_decode_misses(self) -> None:
+    def test_decode_qr_returns_none_when_no_results(self) -> None:
         frame = np.full((20, 20, 3), 120, dtype=np.uint8)
 
         with patch("views.scanner_view.decode", return_value=[]) as decode_mock:
             qr_url = ScannerView._decode_qr(frame)
 
         self.assertIsNone(qr_url)
-        decode_mock.assert_called_once_with(frame)
+        decode_mock.assert_called_once()
 
-    def test_decode_qr_returns_none_when_pyzbar_raises(self) -> None:
+    def test_decode_qr_returns_none_when_decode_raises(self) -> None:
+        """decode 예외 발생 시 None 반환."""
         frame = np.full((20, 20, 3), 120, dtype=np.uint8)
 
-        with patch("views.scanner_view.decode", side_effect=RuntimeError("decode failed")) as decode_mock:
+        with patch("views.scanner_view.decode", side_effect=RuntimeError("decode failed")):
             qr_url = ScannerView._decode_qr(frame)
 
         self.assertIsNone(qr_url)
-        decode_mock.assert_called_once_with(frame)
 
     def test_reset_focus_recovery_timers_is_safe_noop(self) -> None:
         scanner = ScannerView()

@@ -1,8 +1,10 @@
 """영수증 렌더링 및 인쇄 파이프라인(Receipt rendering and print pipeline)."""
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
@@ -10,6 +12,7 @@ from PIL import Image
 from models.order_model import Order
 from models.receipt_canvas_model import ReceiptCanvasDocument
 from models.receipt_settings_model import ReceiptSettings
+from project_paths import RESOURCE_PRODUCT_TEMPLATE_FILE, resolve_project_path
 from services.printer_backend import PrinterBackend
 from services.receipt_canvas_renderer import render_canvas_layout
 from services.receipt_canvas_store import ReceiptCanvasStore
@@ -20,7 +23,7 @@ from services.windows_printer_service import WindowsPrinterService
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PRODUCT_TEMPLATE_PATH = "templates/product_receipt_layout.json"
+DEFAULT_PRODUCT_TEMPLATE_PATH = RESOURCE_PRODUCT_TEMPLATE_FILE.as_posix()
 
 
 @dataclass
@@ -37,11 +40,12 @@ def _render_receipt_for_template(
     context: dict[str, object],
     settings: ReceiptSettings,
 ) -> RenderedReceipt:
-    suffix = Path(template_path).suffix.lower()
+    resolved_template_path = resolve_project_path(template_path)
+    suffix = resolved_template_path.suffix.lower()
 
     if suffix == ".json":
         store = ReceiptCanvasStore()
-        layout = store.load_layout(template_path)
+        layout = store.load_layout(str(resolved_template_path))
         image = render_canvas_layout(
             layout,
             context=context,
@@ -52,7 +56,7 @@ def _render_receipt_for_template(
         )
         return RenderedReceipt(image=image, context=context, template=layout)
 
-    template = load_template(template_path)
+    template = load_template(str(resolved_template_path))
     renderer = ReceiptRenderer(RenderConfig(paper_width=settings.paper_width, dpi=settings.printer_dpi))
     image = renderer.render(template, context)
     return RenderedReceipt(image=image, context=context, template=template)
@@ -106,6 +110,42 @@ def print_order_receipt(
         total_copies += 1
 
     return total_copies
+
+
+def pil_image_to_base64(image: Image.Image, fmt: str = "PNG") -> str:
+    """PIL 이미지를 base64 인코딩 문자열로 변환한다."""
+    buf = BytesIO()
+    image.save(buf, format=fmt)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def render_receipt_preview_base64(
+    order: Order,
+    settings: ReceiptSettings,
+    *,
+    template_path: str | None = None,
+) -> list[tuple[str, str]]:
+    """주문 영수증을 렌더링하여 (라벨, base64) 튜플 리스트를 반환한다.
+
+    상품 영수증 추가 출력이 켜져 있고 상품이 있으면 메인+상품 2장을 반환한다.
+    """
+    rendered = render_order_receipt(order, settings, template_path=template_path)
+    results: list[tuple[str, str]] = [
+        ("영수증", pil_image_to_base64(rendered.image)),
+    ]
+
+    goods_lines = str(rendered.context.get("goods_lines", "") or "").strip()
+    if settings.print_product_receipt and goods_lines:
+        product_template_path = (
+            str(settings.product_template_path or "").strip()
+            or DEFAULT_PRODUCT_TEMPLATE_PATH
+        )
+        product_rendered = render_order_receipt(
+            order, settings, template_path=product_template_path,
+        )
+        results.append(("상품 영수증", pil_image_to_base64(product_rendered.image)))
+
+    return results
 
 
 def _re_render(context: dict[str, object], settings: ReceiptSettings) -> RenderedReceipt:

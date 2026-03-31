@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import base64
+import logging
 import queue
 import threading
 import time
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -14,8 +17,10 @@ from PIL import Image, ImageDraw, ImageFont
 from pyzbar.pyzbar import decode
 
 
-_STATUS_BAR_HEIGHT = 38
-_DEFAULT_FONT_SIZE = 20
+logger = logging.getLogger(__name__)
+
+_STATUS_BAR_HEIGHT = 52
+_DEFAULT_FONT_SIZE = 26
 _DEFAULT_FONT_CANDIDATES = (
     r"C:\Windows\Fonts\malgun.ttf",
     r"C:\Windows\Fonts\malgunbd.ttf",
@@ -28,8 +33,102 @@ _STATUS_CAMERA_READ_FAIL = "카메라 프레임 읽기 실패"
 _STATUS_CAMERA_RECONNECTING = "카메라 재연결 중"
 _CAMERA_REOPEN_COOLDOWN_SEC = 1.0
 _CAMERA_READ_RETRY_SEC = 0.05
+_CAMERA_READ_LOG_INTERVAL_SEC = 5.0
+_CAMERA_READ_FAILURE_REOPEN_THRESHOLD = 6
+_CAMERA_READ_WARMUP_SEC = 2.0
+_CAMERA_READ_STALL_REOPEN_SEC = 2.0
+_CAMERA_REOPEN_RELEASE_SETTLE_SEC = 0.15
+_STATUS_MAX_LINES = 3
+_STATUS_TEXT_PADDING_X = 12
+_STATUS_TEXT_PADDING_Y = 10
 RecoveryAction = Literal["none", "focus_pulse", "manual_focus_step"]
 CameraStatusListener = Callable[[str | None], None]
+FocusMode = Literal["auto", "manual"]
+
+
+@dataclass(frozen=True)
+class FocusCapability:
+    autofocus_supported: bool
+    manual_focus_supported: bool
+    focus_min: float | None = None
+    focus_max: float | None = None
+    focus_step: float | None = None
+
+
+def _coerce_capture_set_result(result: object) -> bool:
+    return True if result is None else bool(result)
+
+
+def _probe_capture_property_support(
+    cap: cv2.VideoCapture | object,
+    *,
+    prop: int | None,
+    value: float,
+) -> bool:
+    if prop is None or cap is None or not hasattr(cap, "set"):
+        return False
+    try:
+        return _coerce_capture_set_result(cap.set(prop, float(value)))
+    except Exception:
+        return False
+
+
+def detect_focus_capability(cap: cv2.VideoCapture | object) -> FocusCapability:
+    autofocus_supported = getattr(cv2, "CAP_PROP_AUTOFOCUS", None) is not None and hasattr(cap, "set")
+    manual_focus_supported = getattr(cv2, "CAP_PROP_FOCUS", None) is not None and hasattr(cap, "set")
+    return FocusCapability(
+        autofocus_supported=autofocus_supported,
+        manual_focus_supported=manual_focus_supported,
+    )
+
+
+def apply_focus_mode(
+    cap: cv2.VideoCapture | object,
+    capability: FocusCapability,
+    *,
+    mode: FocusMode,
+    manual_focus_value: float | None = None,
+) -> bool:
+    if cap is None or not hasattr(cap, "set"):
+        return False
+
+    autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+    focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+
+    if mode == "auto":
+        if not capability.autofocus_supported or autofocus_prop is None:
+            return False
+        try:
+            return _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+        except Exception:
+            return False
+
+    if not capability.manual_focus_supported or manual_focus_value is None or focus_prop is None:
+        if capability.autofocus_supported and autofocus_prop is not None:
+            try:
+                _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+            except Exception:
+                pass
+        return False
+
+    if capability.autofocus_supported and autofocus_prop is not None:
+        try:
+            cap.set(autofocus_prop, 0.0)
+        except Exception:
+            pass
+
+    try:
+        applied = _coerce_capture_set_result(cap.set(focus_prop, float(manual_focus_value)))
+    except Exception:
+        applied = False
+    if applied:
+        return True
+    if capability.autofocus_supported and autofocus_prop is not None:
+        try:
+            _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+        except Exception:
+            pass
+    return False
 
 
 def advance_phone_screen_recovery_state(
@@ -96,6 +195,146 @@ def build_preview_frame(frame: np.ndarray) -> np.ndarray:
     return frame.copy()
 
 
+def _measure_status_text_width(
+    text: str,
+    *,
+    status_font: ImageFont.FreeTypeFont | None,
+) -> int:
+    normalized = (text or "").strip()
+    if not normalized:
+        return 0
+    if status_font is None:
+        weighted_units = 0.0
+        for char in normalized:
+            east_asian_width = unicodedata.east_asian_width(char)
+            if char.isspace():
+                weighted_units += 0.45
+            elif east_asian_width in {"W", "F"}:
+                weighted_units += 1.9
+            elif east_asian_width == "A":
+                weighted_units += 1.4
+            else:
+                weighted_units += 1.0
+        return int(weighted_units * (_DEFAULT_FONT_SIZE * 0.54))
+    try:
+        bbox = status_font.getbbox(normalized)
+        return max(0, int(bbox[2] - bbox[0]))
+    except Exception:
+        return max(0, int(len(normalized) * (_DEFAULT_FONT_SIZE * 0.6)))
+
+
+def _truncate_status_line(
+    text: str,
+    *,
+    max_width: int,
+    status_font: ImageFont.FreeTypeFont | None,
+) -> str:
+    normalized = (text or "").strip()
+    if not normalized:
+        return ""
+    if _measure_status_text_width(normalized, status_font=status_font) <= max_width:
+        return normalized
+
+    ellipsis = "..."
+    truncated = normalized
+    while truncated:
+        candidate = f"{truncated}{ellipsis}"
+        if _measure_status_text_width(candidate, status_font=status_font) <= max_width:
+            return candidate
+        truncated = truncated[:-1].rstrip()
+    return ellipsis
+
+
+def _wrap_status_message(
+    message: str,
+    *,
+    max_width: int,
+    status_font: ImageFont.FreeTypeFont | None,
+    max_lines: int = _STATUS_MAX_LINES,
+) -> list[str]:
+    normalized = " ".join(str(message or "").split())
+    if not normalized:
+        return []
+
+    if _measure_status_text_width(normalized, status_font=status_font) <= max_width:
+        return [normalized]
+
+    word_chunks = [chunk for chunk in normalized.split(" ") if chunk]
+    if len(word_chunks) > 1:
+        lines: list[str] = []
+        current = ""
+        for chunk in word_chunks:
+            candidate = chunk if not current else f"{current} {chunk}"
+            if current and _measure_status_text_width(candidate, status_font=status_font) > max_width:
+                lines.append(current.rstrip())
+                current = chunk
+                if len(lines) >= max_lines:
+                    break
+                continue
+            current = candidate
+        if current and len(lines) < max_lines:
+            lines.append(current.rstrip())
+        if lines:
+            remaining_words = word_chunks[len(" ".join(lines).split(" ")) :]
+            if remaining_words:
+                merged = f"{lines[-1]} {' '.join(remaining_words)}".strip()
+                lines[-1] = _truncate_status_line(
+                    merged,
+                    max_width=max_width,
+                    status_font=status_font,
+                )
+            else:
+                lines[-1] = _truncate_status_line(
+                    lines[-1],
+                    max_width=max_width,
+                    status_font=status_font,
+                )
+            return [line for line in lines[:max_lines] if line]
+
+    lines: list[str] = []
+    current = ""
+    index = 0
+
+    while index < len(normalized):
+        char = normalized[index]
+        if not current and char == " ":
+            index += 1
+            continue
+
+        candidate = f"{current}{char}"
+        if current and _measure_status_text_width(candidate, status_font=status_font) > max_width:
+            lines.append(current.rstrip())
+            current = ""
+            if len(lines) >= max_lines:
+                break
+            continue
+
+        current = candidate
+        index += 1
+
+    if current and len(lines) < max_lines:
+        lines.append(current.rstrip())
+
+    if not lines:
+        return []
+
+    remaining = normalized[index:].strip()
+    if remaining:
+        merged = f"{lines[-1]} {remaining}".strip()
+        lines[-1] = _truncate_status_line(
+            merged,
+            max_width=max_width,
+            status_font=status_font,
+        )
+    else:
+        lines[-1] = _truncate_status_line(
+            lines[-1],
+            max_width=max_width,
+            status_font=status_font,
+        )
+    return [line for line in lines[:max_lines] if line]
+
+
 def build_qr_decode_candidates(
     frame: np.ndarray | None,
     *,
@@ -123,6 +362,8 @@ class ScannerView:
         camera_index: int = 0,
         status_font_path: str | None = None,
         status_font_size: int = _DEFAULT_FONT_SIZE,
+        focus_mode: FocusMode = "auto",
+        manual_focus_value: float | None = None,
         on_frame_ready: Callable[[str], None] | None = None,
     ):
         self._camera_index = camera_index
@@ -149,8 +390,15 @@ class ScannerView:
         self._camera_status_listener: CameraStatusListener | None = None
         self._last_notified_camera_status: str | None = None
         self._last_camera_reopen_at = 0.0
+        self._last_camera_reopen_log_at = 0.0
+        self._consecutive_read_failures = 0
+        self._camera_warmup_until = 0.0
+        self._last_successful_frame_at = 0.0
         self._active_exposure_mode = "default"
         self._applied_exposure_mode = "default"
+        self._focus_mode: FocusMode = "manual" if focus_mode == "manual" and manual_focus_value is not None else "auto"
+        self._manual_focus_value: float | None = None if manual_focus_value is None else float(manual_focus_value)
+        self._focus_capability: FocusCapability | None = None
 
         self._status_font_path = status_font_path
         self._status_font_size = max(10, int(status_font_size))
@@ -186,11 +434,98 @@ class ScannerView:
             self._is_auth_ready = ready
             cap = self._cap if ready else None
         if cap is not None:
-            self._enable_autofocus(cap)
+            self._configure_focus_for_capture(cap, reprobe=False)
 
     def is_auth_ready(self) -> bool:
         with self._lock:
             return self._is_auth_ready
+
+    def get_focus_capability(self) -> FocusCapability:
+        with self._lock:
+            cap = self._cap
+            cached = self._focus_capability
+        if cap is None:
+            return cached or FocusCapability(autofocus_supported=False, manual_focus_supported=False)
+        capability = detect_focus_capability(cap)
+        with self._lock:
+            self._focus_capability = capability
+        return capability
+
+    def _configure_focus_for_capture(
+        self,
+        cap: cv2.VideoCapture | object,
+        *,
+        reprobe: bool = True,
+    ) -> bool:
+        if reprobe:
+            capability = detect_focus_capability(cap)
+        else:
+            with self._lock:
+                capability = self._focus_capability
+            if capability is None:
+                capability = detect_focus_capability(cap)
+        with self._lock:
+            self._focus_capability = capability
+            focus_mode = self._focus_mode
+            manual_focus_value = self._manual_focus_value
+
+        applied = apply_focus_mode(
+            cap,
+            capability,
+            mode=focus_mode,
+            manual_focus_value=manual_focus_value,
+        )
+        return applied
+
+    def set_focus_mode(self, mode: FocusMode) -> bool:
+        normalized_mode: FocusMode = "manual" if mode == "manual" else "auto"
+        with self._lock:
+            self._focus_mode = normalized_mode
+            cap = self._cap
+            capability = self._focus_capability
+            manual_focus_value = self._manual_focus_value
+
+        if cap is None:
+            return normalized_mode == "auto" or manual_focus_value is not None
+
+        if capability is None:
+            capability = detect_focus_capability(cap)
+            with self._lock:
+                self._focus_capability = capability
+
+        applied = apply_focus_mode(
+            cap,
+            capability,
+            mode=normalized_mode,
+            manual_focus_value=manual_focus_value,
+        )
+        logger.info("초점 모드 변경: mode=%s, value=%s, applied=%s", normalized_mode, manual_focus_value, applied)
+        return applied
+
+    def set_manual_focus_value(self, value: float | None) -> bool:
+        normalized_value = None if value is None else float(value)
+        with self._lock:
+            self._manual_focus_value = normalized_value
+            cap = self._cap
+            focus_mode = self._focus_mode
+            capability = self._focus_capability
+
+        if cap is None or focus_mode != "manual":
+            return True
+
+        if capability is None:
+            capability = detect_focus_capability(cap)
+            with self._lock:
+                self._focus_capability = capability
+
+        applied = apply_focus_mode(
+            cap,
+            capability,
+            mode="manual",
+            manual_focus_value=normalized_value,
+        )
+        logger.info("수동 초점 값 변경: value=%s, applied=%s", normalized_value, applied)
+        return applied
 
     def set_status_font(self, font_path: str | None, font_size: int | None = None) -> None:
         with self._lock:
@@ -213,7 +548,7 @@ class ScannerView:
                 self._runtime_status_message = _STATUS_PROCESSING
             cap = self._cap if enabled else None
         if cap is not None:
-            self._enable_autofocus(cap)
+            self._configure_focus_for_capture(cap, reprobe=False)
 
     def set_status_message(self, message: str) -> None:
         with self._lock:
@@ -255,11 +590,37 @@ class ScannerView:
                 ret, frame = False, None
 
             if not ret or frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-                self._set_camera_status(_STATUS_CAMERA_READ_FAIL)
-                if not self._attempt_camera_reopen(time.monotonic(), reason="read_failure"):
+                now = time.monotonic()
+                with self._lock:
+                    warmup_active = now < self._camera_warmup_until
+                    last_successful_frame_at = self._last_successful_frame_at
+                    if warmup_active:
+                        self._consecutive_read_failures = 0
+                        consecutive_read_failures = 0
+                    else:
+                        self._consecutive_read_failures += 1
+                        consecutive_read_failures = self._consecutive_read_failures
+                    sustained_stall = (
+                        last_successful_frame_at <= 0.0
+                        or (now - last_successful_frame_at) >= _CAMERA_READ_STALL_REOPEN_SEC
+                    )
+                self._set_camera_status(
+                    _STATUS_CAMERA_RECONNECTING if warmup_active else _STATUS_CAMERA_READ_FAIL
+                )
+                if (
+                    consecutive_read_failures >= _CAMERA_READ_FAILURE_REOPEN_THRESHOLD
+                    and sustained_stall
+                ):
+                    if not self._attempt_camera_reopen(now, reason="read_failure"):
+                        time.sleep(_CAMERA_READ_RETRY_SEC)
+                else:
                     time.sleep(_CAMERA_READ_RETRY_SEC)
                 continue
 
+            with self._lock:
+                self._consecutive_read_failures = 0
+                self._camera_warmup_until = 0.0
+                self._last_successful_frame_at = time.monotonic()
             self._clear_camera_status()
             preview_frame, decode_frame = split_capture_frame(frame)
             preview_frame = build_preview_frame(preview_frame)
@@ -312,41 +673,56 @@ class ScannerView:
                 return False
             self._last_camera_reopen_at = now
             old_cap = self._cap
+            self._cap = None
+            self._camera_backend_name = None
 
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
-        new_cap, backend_name = self._open_camera_with_fallback(self._camera_index)
-        if new_cap is None:
-            print(f"CAMERA_REOPEN_FAIL reason={reason}")
-            return False
-
-        with self._lock:
-            self._cap = new_cap
-            self._camera_backend_name = backend_name
-
-        if old_cap is not None and old_cap is not new_cap:
+        if old_cap is not None:
             try:
                 old_cap.release()
             except Exception:
                 pass
+            time.sleep(_CAMERA_REOPEN_RELEASE_SETTLE_SEC)
+        verbose_open = reason != "read_failure"
+        try:
+            new_cap, backend_name = self._open_camera_with_fallback(self._camera_index, verbose=verbose_open)
+        except TypeError as exc:
+            if "verbose" not in str(exc):
+                raise
+            new_cap, backend_name = self._open_camera_with_fallback(self._camera_index)
+        if new_cap is None:
+            self._log_camera_reopen_event(now, f"CAMERA_REOPEN_FAIL reason={reason}")
+            return False
+
+        self._configure_focus_for_capture(new_cap)
+
+        with self._lock:
+            self._cap = new_cap
+            self._camera_backend_name = backend_name
+            self._consecutive_read_failures = 0
+            self._camera_warmup_until = time.monotonic() + _CAMERA_READ_WARMUP_SEC
+            self._last_successful_frame_at = 0.0
 
         self._clear_camera_status()
-        print(f"CAMERA_REOPEN_OK reason={reason}")
+        self._log_camera_reopen_event(now, f"CAMERA_REOPEN_OK reason={reason}")
         return True
 
     @classmethod
     def _open_camera_with_fallback(
         cls,
         camera_index: int,
+        *,
+        verbose: bool = True,
     ) -> tuple[cv2.VideoCapture | None, str | None]:
-        cap = cls._open_camera(camera_index)
+        cap = cls._open_camera(camera_index, verbose=verbose)
         if cap is None:
             return None, None
-        cls._enable_autofocus(cap)
-        print("CAMERA_BACKEND_SELECTED backend=DEFAULT")
+        if verbose:
+            print("CAMERA_BACKEND_SELECTED backend=DEFAULT")
         return cap, "DEFAULT"
 
     @staticmethod
-    def _open_camera(camera_index: int) -> cv2.VideoCapture | None:
+    def _open_camera(camera_index: int, *, verbose: bool = True) -> cv2.VideoCapture | None:
         # DirectShow 백엔드를 우선 사용하여 초기화 속도를 단축한다.
         for backend in (cv2.CAP_DSHOW, None):
             try:
@@ -358,9 +734,9 @@ class ScannerView:
             except Exception:
                 continue
             if cap and cap.isOpened():
-                if backend is not None:
+                if verbose and backend is not None:
                     print(f"CAMERA_OPEN_OK backend=DSHOW")
-                else:
+                elif verbose:
                     print(f"CAMERA_OPEN_OK backend=DEFAULT_FALLBACK")
                 return cap
             try:
@@ -390,6 +766,13 @@ class ScannerView:
         if text:
             return text
         return None
+
+    def _log_camera_reopen_event(self, now: float, message: str) -> None:
+        with self._lock:
+            if (now - self._last_camera_reopen_log_at) < _CAMERA_READ_LOG_INTERVAL_SEC:
+                return
+            self._last_camera_reopen_log_at = now
+        print(message)
 
     def _reset_focus_recovery_timers(self, now: float | None = None) -> None:
         """레거시 테스트/임포트를 위해 유지된 호환성 No-op(아무 작업도 하지 않음)입니다."""
@@ -437,28 +820,71 @@ class ScannerView:
         if "FAIL" in message.upper() or "ERROR" in message.upper() or "실패" in message or "오류" in message:
             color = (0, 0, 255)
 
-        bar_height = min(_STATUS_BAR_HEIGHT, frame.shape[0])
+        max_text_width = max(40, frame.shape[1] - (_STATUS_TEXT_PADDING_X * 2) - 120)
+        lines = _wrap_status_message(
+            message,
+            max_width=max_text_width,
+            status_font=status_font,
+        )
+        if not lines:
+            lines = [message]
+
+        if status_font is None:
+            line_height = 20
+        else:
+            try:
+                line_height = max(20, int(status_font.getbbox("한글Ag")[3] - status_font.getbbox("한글Ag")[1]) + 4)
+            except Exception:
+                line_height = max(20, self._status_font_size + 4)
+
+        bar_height = min(
+            frame.shape[0],
+            max(
+                _STATUS_BAR_HEIGHT,
+                (_STATUS_TEXT_PADDING_Y * 2) + (len(lines) * line_height),
+            ),
+        )
         cv2.rectangle(frame, (0, 0), (frame.shape[1], bar_height), (0, 0, 0), -1)
 
         if status_font is None:
-            ascii_message = message.encode("ascii", "replace").decode("ascii")
-            cv2.putText(
-                frame,
-                ascii_message,
-                (10, 26),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
+            for index, line in enumerate(lines):
+                ascii_message = line.encode("ascii", "replace").decode("ascii")
+                baseline_y = _STATUS_TEXT_PADDING_Y + 25 + (index * line_height)
+                cv2.putText(
+                    frame,
+                    ascii_message,
+                    (_STATUS_TEXT_PADDING_X, min(bar_height - 8, baseline_y)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 0),
+                    3,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    frame,
+                    ascii_message,
+                    (_STATUS_TEXT_PADDING_X, min(bar_height - 8, baseline_y)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
             return
 
         roi_bgr = frame[:bar_height, :, :]
         roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(roi_rgb)
         draw = ImageDraw.Draw(pil_image)
-        draw.text((10, 6), message, font=status_font, fill=self._bgr_to_rgb(color))
+        for index, line in enumerate(lines):
+            draw.text(
+                (_STATUS_TEXT_PADDING_X, _STATUS_TEXT_PADDING_Y + (index * line_height)),
+                line,
+                font=status_font,
+                fill=self._bgr_to_rgb(color),
+                stroke_width=1,
+                stroke_fill=(0, 0, 0),
+            )
         rendered_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
         frame[:bar_height, :, :] = rendered_bgr
 
@@ -471,14 +897,14 @@ class ScannerView:
 
     @classmethod
     def _enable_autofocus(cls, cap: cv2.VideoCapture) -> bool:
-        autofocus_prop = cls._autofocus_prop()
-        if autofocus_prop is None or not hasattr(cap, "set"):
-            return False
-        try:
-            result = cap.set(autofocus_prop, 1.0)
-        except Exception:
-            return False
-        return True if result is None else bool(result)
+        return apply_focus_mode(
+            cap,
+            FocusCapability(
+                autofocus_supported=cls._autofocus_prop() is not None,
+                manual_focus_supported=False,
+            ),
+            mode="auto",
+        )
 
     def _update_phone_screen_recovery_state(self, frame: np.ndarray) -> str:
         """제거된 폰 화면 복구 모드에 대한 호환성 No-op입니다."""
@@ -544,6 +970,23 @@ class ScannerView:
 
         print("SCANNER_FONT_WARN 사용할 수 있는 한글 폰트를 찾지 못했습니다. ASCII 상태 텍스트로 대체합니다.")
         return None
+
+    def change_camera(self, new_index: int) -> None:
+        """런타임 중 카메라 디바이스를 변경한다. capture_loop가 자동으로 새 인덱스로 재연결한다."""
+        with self._lock:
+            if self._camera_index == new_index:
+                return
+            self._camera_index = new_index
+            old_cap = self._cap
+            self._cap = None
+            self._camera_backend_name = None
+
+        self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
+        if old_cap is not None:
+            try:
+                old_cap.release()
+            except Exception:
+                pass
 
     def release(self) -> None:
         self._is_running = False
