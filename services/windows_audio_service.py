@@ -5,6 +5,8 @@ import ctypes
 import threading
 from pathlib import Path
 
+from project_paths import resolve_runtime_file_path
+
 
 class WindowsAudioService:
     """Asynchronous MCI-based audio playback for local files."""
@@ -21,7 +23,7 @@ class WindowsAudioService:
         if not path or self._winmm is None:
             return False
 
-        file_path = Path(path).expanduser()
+        file_path = resolve_runtime_file_path(path).expanduser()
         if not file_path.exists() or not file_path.is_file():
             return False
 
