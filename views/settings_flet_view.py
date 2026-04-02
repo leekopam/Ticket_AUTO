@@ -31,7 +31,10 @@ from models.ticket_debug_settings_model import TicketDebugSettings
 from project_paths import (
     RESOURCE_PRODUCT_TEMPLATE_FILE,
     RESOURCE_RECEIPT_TEMPLATE_FILE,
+    ensure_managed_sound_dir,
     ensure_managed_templates_dir,
+    make_project_relative_path,
+    resolve_runtime_file_path,
 )
 from services.receipt_canvas_editor_state import (
     clamp_element_position,
@@ -154,11 +157,10 @@ def _coerce_picker_path(result: object) -> str | None:
 
 def _copy_scan_sound_file_to_resources(src_path: str) -> str:
     src = Path(src_path)
-    sound_dir = Path(__file__).parent.parent / "Resources" / "sound"
-    sound_dir.mkdir(parents=True, exist_ok=True)
+    sound_dir = ensure_managed_sound_dir()
     dest = sound_dir / src.name
     shutil.copy2(str(src), str(dest))
-    return str(dest)
+    return make_project_relative_path(dest)
 
 
 def _build_scan_success_sound_rule(*, sound_path: str, name: str | None = None) -> ScanSuccessSoundRule:
@@ -375,7 +377,7 @@ def _open_path_in_explorer(raw_path: str) -> bool:
     if not path_text:
         return False
 
-    target = Path(path_text).expanduser()
+    target = resolve_runtime_file_path(path_text).expanduser()
     try:
         if target.exists():
             if target.is_file():

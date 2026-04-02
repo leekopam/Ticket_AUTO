@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from models.receipt_settings_model import ReceiptSettings, ScanSuccessSoundRule
 from services.scan_success_sound_service import (
@@ -40,6 +41,19 @@ class _FakeAudioService:
 
 
 class ScanSuccessSoundServiceTest(unittest.TestCase):
+    def test_state_store_resolves_relative_path_under_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch("project_paths.PROJECT_ROOT", root),
+                patch("project_paths.BUNDLE_ROOT", root),
+            ):
+                state_store = ScanSuccessSoundStateStore(".runtime/scan_success_sound_state.json")
+                state_store.save_success_count(7)
+
+            self.assertEqual(state_store.load_success_count(), 7)
+            self.assertTrue((root / ".runtime" / "scan_success_sound_state.json").exists())
+
     def test_specific_count_rules_are_parsed_and_formatted(self) -> None:
         parsed = parse_scan_success_specific_counts("10, 20; 30, 20, x")
 

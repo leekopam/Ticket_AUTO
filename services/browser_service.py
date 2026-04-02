@@ -22,6 +22,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
+from project_paths import resolve_project_path
 
 
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
@@ -78,7 +79,7 @@ class BrowserService:
         headless: bool = False,
     ):
         self._login_url = login_url
-        self._user_data_dir = user_data_dir
+        self._user_data_dir = str(resolve_project_path(user_data_dir))
         self._require_login_each_run = require_login_each_run
         self._headless = headless
         self._task_queue: queue.Queue = queue.Queue()
@@ -87,8 +88,10 @@ class BrowserService:
         self._context: BrowserContext | None = None
         self._worker_thread: threading.Thread | None = None
         self._is_running = False
+        self._accepting_requests = False
         self._startup_error: Exception | None = None
         self._ready_event = threading.Event()
+        self._lifecycle_lock = threading.Lock()
 
         # 영수증 클릭 흐름이 완료되었을 때 호출되는 콜백
         self._on_receipt_complete: Callable[[], None] | None = None
@@ -97,16 +100,20 @@ class BrowserService:
         self._on_receipt_complete = callback
 
     def start(self) -> None:
-        if self._is_running:
-            return
-        if self._worker_thread and self._worker_thread.is_alive():
-            raise RuntimeError("브라우저 워커가 아직 정리 중입니다.")
+        self._ensure_lifecycle_state()
+        with self._lifecycle_lock:
+            if self._is_running:
+                return
+            if self._worker_thread and self._worker_thread.is_alive():
+                raise RuntimeError("브라우저 워커가 아직 정리 중입니다.")
 
-        self._is_running = True
-        self._startup_error = None
-        self._ready_event.clear()
-        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self._worker_thread.start()
+            self._task_queue = queue.Queue()
+            self._is_running = True
+            self._accepting_requests = True
+            self._startup_error = None
+            self._ready_event.clear()
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
 
         if not self._ready_event.wait(timeout=20):
             self._abort_start_attempt()
@@ -117,20 +124,22 @@ class BrowserService:
             raise RuntimeError(f"브라우저 워커 실패: {self._startup_error}")
 
     def stop(self) -> None:
-        worker = self._worker_thread
-        if not self._is_running:
-            if worker is not None:
-                worker.join(timeout=15)
-            return
-        self._is_running = False
-        self._task_queue.put({"action": "quit"})
+        self._ensure_lifecycle_state()
+        with self._lifecycle_lock:
+            worker = self._worker_thread
+            if not self._is_running:
+                if worker is not None:
+                    worker.join(timeout=15)
+                return
+            self._is_running = False
+            if self._accepting_requests:
+                self._accepting_requests = False
+                self._task_queue.put({"action": "quit"})
         if worker is not None:
             worker.join(timeout=15)
 
     def open_page(self, url: str) -> None:
-        if not self._is_running:
-            raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
-        self._task_queue.put({"action": "open_page", "url": url})
+        self._enqueue_task({"action": "open_page", "url": url})
 
     def click_receipt_button(self) -> ReceiptClickResult:
         return self._invoke_rpc({"action": "click_receipt"}, timeout_sec=30)
@@ -214,12 +223,9 @@ class BrowserService:
         )
 
     def _invoke_rpc(self, task: dict[str, Any], timeout_sec: int) -> Any:
-        if not self._is_running:
-            raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
-
         response_queue: queue.Queue = queue.Queue(maxsize=1)
         task["response_queue"] = response_queue
-        self._task_queue.put(task)
+        self._enqueue_task(task)
 
         try:
             response = response_queue.get(timeout=timeout_sec)
@@ -248,10 +254,13 @@ class BrowserService:
                     self._handle_clear_auth_state_for_domain()
                 self._ready_event.set()
 
-                while self._is_running:
+                while True:
                     try:
                         task = self._task_queue.get(timeout=0.5)
+                        should_quit = task.get("action") == "quit"
                         self._dispatch_task(task)
+                        if should_quit:
+                            break
                     except queue.Empty:
                         continue
         except Exception as exc:
@@ -954,7 +963,12 @@ class BrowserService:
                 self._warn(f"RECEIPT_COMPLETE_CALLBACK_FAILED: {exc}")
 
     def _abort_start_attempt(self) -> None:
-        self._is_running = False
+        self._ensure_lifecycle_state()
+        with self._lifecycle_lock:
+            self._is_running = False
+            if self._accepting_requests:
+                self._accepting_requests = False
+                self._task_queue.put({"action": "quit"})
         worker = self._worker_thread
         if worker is not None:
             try:
@@ -965,14 +979,34 @@ class BrowserService:
             self._finalize_worker_shutdown()
 
     def _finalize_worker_shutdown(self) -> None:
-        self._is_running = False
-        self._worker_thread = None
-        self._context = None
-        self._current_page = None
-        self._auth_page = None
+        self._ensure_lifecycle_state()
+        with self._lifecycle_lock:
+            self._is_running = False
+            self._accepting_requests = False
+            self._worker_thread = None
+            self._context = None
+            self._current_page = None
+            self._auth_page = None
         if not self._ready_event.is_set():
             self._ready_event.set()
 
     @staticmethod
     def _warn(message: str) -> None:
         print(f"BROWSER_WARN {message}")
+
+    def _enqueue_task(self, task: dict[str, Any]) -> None:
+        self._ensure_lifecycle_state()
+        with self._lifecycle_lock:
+            if not self._is_running or not self._accepting_requests:
+                raise RuntimeError("BrowserService가 실행 중이지 않습니다.")
+            self._task_queue.put(task)
+
+    def _ensure_lifecycle_state(self) -> None:
+        if not hasattr(self, "_lifecycle_lock"):
+            self._lifecycle_lock = threading.Lock()
+        if not hasattr(self, "_task_queue"):
+            self._task_queue = queue.Queue()
+        if not hasattr(self, "_ready_event"):
+            self._ready_event = threading.Event()
+        if not hasattr(self, "_accepting_requests"):
+            self._accepting_requests = bool(getattr(self, "_is_running", False))

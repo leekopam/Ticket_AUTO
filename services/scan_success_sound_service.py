@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from models.receipt_settings_model import ReceiptSettings, ScanSuccessSoundRule
+from project_paths import resolve_project_path
 from services.windows_audio_service import WindowsAudioService
 
 
@@ -218,7 +219,7 @@ class ScanSuccessSoundStateStore:
     """Persist the cumulative successful scan count for special triggers."""
 
     def __init__(self, path: str = ".runtime/scan_success_sound_state.json"):
-        self._path = Path(path)
+        self._path = resolve_project_path(path)
 
     def load_success_count(self) -> int:
         if not self._path.exists():

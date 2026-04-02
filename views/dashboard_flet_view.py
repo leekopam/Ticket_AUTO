@@ -1473,11 +1473,19 @@ def bootstrap_dashboard_page(
 
     def on_window_event(event: ft.WindowEvent) -> None:
         if event.data == "close":
+            if closing_event.is_set():
+                return
             closing_event.set()
             cancel_scheduled_search_refresh()
             runtime_manager.unsubscribe(on_runtime_event)
-            runtime_manager.stop(timeout_sec=4.0)
-            page.window.destroy()
+
+            def _stop_and_close() -> None:
+                try:
+                    runtime_manager.stop(timeout_sec=4.0)
+                finally:
+                    call_page_from_thread(page, lambda: page.window.destroy())
+
+            threading.Thread(target=_stop_and_close, daemon=True).start()
 
     page.window.on_event = on_window_event
 
@@ -2719,7 +2727,11 @@ class DashboardFletView:
                 closing_event=search_refresh_stop,
                 push_update=True,
             )
-            self._runtime_manager.stop()
+
+            def _stop_runtime() -> None:
+                self._runtime_manager.stop()
+
+            threading.Thread(target=_stop_runtime, daemon=True).start()
 
         def on_relogin(_: ft.ControlEvent) -> None:
             self._runtime_manager.relogin()
