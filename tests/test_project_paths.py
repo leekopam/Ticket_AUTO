@@ -9,6 +9,8 @@ from project_paths import (
     copy_data_file_to_managed_location,
     ensure_managed_data_file,
     ensure_managed_templates_dir,
+    make_project_relative_path,
+    resolve_runtime_file_path,
 )
 
 
@@ -53,6 +55,27 @@ class ProjectPathsDataFileTest(unittest.TestCase):
             self.assertEqual(managed_dir, root / "Resources" / "templates")
             self.assertTrue((managed_dir / "receipt_layout.json").exists())
             self.assertTrue((managed_dir / "product_receipt_layout.json").exists())
+
+    def test_make_project_relative_path_converts_managed_resource_to_portable_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            managed_sound = root / "Resources" / "sound" / "success.wav"
+            managed_sound.parent.mkdir(parents=True, exist_ok=True)
+            managed_sound.write_bytes(b"wav")
+
+            with patch("project_paths.PROJECT_ROOT", root), patch("project_paths.BUNDLE_ROOT", root):
+                portable = make_project_relative_path(managed_sound)
+
+            self.assertEqual(portable, "Resources/sound/success.wav")
+
+    def test_resolve_runtime_file_path_expands_portable_relative_path_under_runtime_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            with patch("project_paths.PROJECT_ROOT", root), patch("project_paths.BUNDLE_ROOT", root):
+                resolved = resolve_runtime_file_path("Resources/sound/success.wav")
+
+            self.assertEqual(resolved, root / "Resources" / "sound" / "success.wav")
 
 
 if __name__ == "__main__":
