@@ -126,7 +126,7 @@ class AppSettingsModalContractTest(unittest.TestCase):
             )
             strings = self._collect_strings(panel)
 
-            self.assertIn("디버깅 모드", strings)
+            self.assertIn("개발자 도구", strings)
             self.assertIn("QR 스캔 성공 시 누적 카운트 반영", strings)
             self.assertIn("중복 스캔 시 효과음 재생", strings)
             self.assertIn("현재 활성 디버그 기능: 없음", strings)

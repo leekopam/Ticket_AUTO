@@ -15,6 +15,7 @@ class Order:
     goods: list[str] = field(default_factory=list)
     url: str = ""
     received_at: str = ""
+    order_status: str = ""
 
     @property
     def goods_display(self) -> str:

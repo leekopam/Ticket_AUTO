@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import shutil
 import sys
+
+_logger = logging.getLogger(__name__)
 
 
 def _resolve_runtime_root() -> Path:
@@ -144,10 +147,35 @@ def resolve_app_icon_path() -> Path:
     return managed
 
 
+def _safe_mkdir(path: Path) -> None:
+    """디렉토리를 생성하고, 권한 오류 시 명확한 한국어 메시지로 변환한다."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"디렉토리를 생성할 수 없습니다: {path}\n"
+            f"프로그램을 쓰기 권한이 있는 폴더에서 실행해주세요. (오류: {exc})"
+        ) from exc
+
+
+def _safe_copy2(src: Path, dst: Path) -> bool:
+    """파일을 복사하고, 실패 시 경고 로그를 남기고 False를 반환한다."""
+    try:
+        shutil.copy2(str(src), str(dst))
+        return True
+    except OSError as exc:
+        _logger.warning("파일 복사 실패 src=%s dst=%s error=%s", src, dst, exc)
+        return False
+
+
 def ensure_managed_sound_dir() -> Path:
     """Create the managed sound directory and seed bundled sounds when needed."""
     target_dir = resolve_managed_sound_dir_path()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _logger.warning("사운드 디렉토리 생성 실패 path=%s error=%s", target_dir, exc)
+        return target_dir
 
     legacy_dir = PROJECT_ROOT / LEGACY_SOUND_DIR
     bundled_dir = resolve_bundle_path(RESOURCE_SOUND_DIR)
@@ -163,16 +191,23 @@ def ensure_managed_sound_dir() -> Path:
                 continue
             relative = source.relative_to(source_dir)
             destination = target_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
             if not destination.exists():
-                shutil.copy2(str(source), str(destination))
+                _safe_copy2(source, destination)
     return target_dir
 
 
 def ensure_managed_templates_dir() -> Path:
     """Create the managed template directory and migrate legacy templates when needed."""
     target_dir = resolve_managed_templates_dir_path()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _logger.warning("템플릿 디렉토리 생성 실패 path=%s error=%s", target_dir, exc)
+        return target_dir
 
     legacy_dir = PROJECT_ROOT / LEGACY_TEMPLATES_DIR
     bundled_dir = resolve_bundle_path(RESOURCE_TEMPLATES_DIR)
@@ -188,35 +223,44 @@ def ensure_managed_templates_dir() -> Path:
                 continue
             relative = source.relative_to(source_dir)
             destination = target_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
             if not destination.exists():
-                shutil.copy2(str(source), str(destination))
+                _safe_copy2(source, destination)
     return target_dir
 
 
 def ensure_managed_data_file() -> Path:
     """Create the managed data directory and migrate legacy root data.xlsx when needed."""
     target = resolve_managed_data_file_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir(target.parent)
 
     legacy = resolve_project_path(LEGACY_DATA_FILE)
     bundled = resolve_bundle_path(RESOURCE_DATA_FILE)
     if not target.exists():
-        if legacy.exists():
-            shutil.copy2(str(legacy), str(target))
-        elif bundled.exists() and bundled != target:
-            shutil.copy2(str(bundled), str(target))
+        for src in (legacy, bundled):
+            if src.exists() and src != target:
+                _safe_copy2(src, target)
+                break
     return target
 
 
 def copy_data_file_to_managed_location(src_path: str | Path) -> Path:
     """Copy a user-selected Excel file into the managed app data location."""
     target = resolve_managed_data_file_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir(target.parent)
 
     source = Path(src_path)
     if source.resolve() == target.resolve():
         return target
 
-    shutil.copy2(str(source), str(target))
+    try:
+        shutil.copy2(str(source), str(target))
+    except OSError as exc:
+        raise RuntimeError(
+            f"데이터 파일을 복사할 수 없습니다: {source}\n"
+            f"파일 접근 권한을 확인해주세요. (오류: {exc})"
+        ) from exc
     return target

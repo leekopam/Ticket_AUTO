@@ -86,10 +86,20 @@ class WindowsPrinterService:
         ESC/POS 실패 시 GDI 폴백.
         """
         _, win32print, _ = self._import_win32()
-        target = printer_name or self.get_default_printer()
+        try:
+            target = printer_name or self.get_default_printer()
+        except Exception as exc:
+            raise RuntimeError(
+                "인쇄할 프린터를 찾을 수 없습니다.\n"
+                "설정에서 프린터를 선택하거나 기본 프린터를 설정해주세요."
+            ) from exc
 
         # 프린터 실제 인쇄 폭 조회 후 이미지 리사이즈
-        printer_width = self._query_printable_width(target)
+        try:
+            printer_width = self._query_printable_width(target)
+        except Exception as exc:
+            logger.warning("프린터 폭 조회 실패, 원본 이미지 폭 사용: %s", exc)
+            printer_width = 0
         fitted = self._fit_to_printer_width(image.convert("RGB"), printer_width)
 
         try:

@@ -91,12 +91,23 @@ def _build_app(
     app._browser_service = browser_service
     app._excel_service = SimpleNamespace(
         find_orders_by_customer=lambda *_args, **_kwargs: list(excel_matches or []),
+        mark_order_status=lambda *_args, **_kwargs: None,
     )
 
     order_vm = _FakeOrderViewModel(
         Order(order_number="", name="Test", phone="010", seat="A-1", goods=[])
     )
     app._order_viewmodel = order_vm
+    app._order_listener = None
+    app._status_listener = None
+    app._stop_requested = False
+    app._ticket_debug_tools_service = SimpleNamespace(
+        load_settings=lambda: SimpleNamespace(
+            offline_scan_mode=False,
+            play_duplicate_received_sound=False,
+            count_scan_success_as_processed=False,
+        )
+    )
     return app, order_vm
 
 

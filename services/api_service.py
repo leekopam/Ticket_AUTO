@@ -11,7 +11,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
-ORDER_NUMBER_PATTERN = re.compile(r"[A-Z0-9]{4,}_[A-Z0-9]{4,}")
+# re.IGNORECASE로 소문자 URL도 처리, fullmatch/search 후 .upper()로 정규화
+ORDER_NUMBER_PATTERN = re.compile(r"[A-Z0-9]{4,}_[A-Z0-9]{4,}", re.IGNORECASE)
 
 
 @dataclass
@@ -48,17 +49,17 @@ class ApiService:
         # Newer Witchform links sometimes already include the full order number
         # in the trailing path segment, e.g. WFLM7QSDTC_69D53CU23685.
         if ORDER_NUMBER_PATTERN.fullmatch(last_part):
-            return last_part
+            return last_part.upper()
 
         # Some Witchform QR redirects split the order number across the path
         # and query string, e.g. /.../69D1IASG67A8?uuid=WFLM7QSDTC.
         if uuid_value and last_part:
             composite_order_number = f"{uuid_value}_{last_part}"
             if ORDER_NUMBER_PATTERN.fullmatch(composite_order_number):
-                return composite_order_number
+                return composite_order_number.upper()
 
         if idx_value and last_part:
-            return f"{idx_value}_{last_part}"
+            return f"{idx_value}_{last_part}".upper()
 
         prioritized_keys = (
             "order_number",
@@ -72,7 +73,7 @@ class ApiService:
             for value in query_params.get(key, []):
                 candidate = str(value).strip()
                 if ORDER_NUMBER_PATTERN.fullmatch(candidate):
-                    return candidate
+                    return candidate.upper()
 
         direct_candidates = path_parts + [
             str(value).strip()
@@ -81,12 +82,12 @@ class ApiService:
         ]
         for candidate in direct_candidates:
             if ORDER_NUMBER_PATTERN.fullmatch(candidate):
-                return candidate
+                return candidate.upper()
 
         for text in (decoded_path, decoded_query, decoded_fragment):
             match = ORDER_NUMBER_PATTERN.search(text)
             if match:
-                return match.group(0)
+                return match.group(0).upper()
 
         return ""
 

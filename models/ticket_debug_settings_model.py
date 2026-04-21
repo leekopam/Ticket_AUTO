@@ -11,11 +11,13 @@ class TicketDebugSettings:
 
     count_scan_success_as_processed: bool = False
     play_sound_for_duplicate_received_qr: bool = False
+    offline_scan_mode: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "count_scan_success_as_processed": bool(self.count_scan_success_as_processed),
             "play_sound_for_duplicate_received_qr": bool(self.play_sound_for_duplicate_received_qr),
+            "offline_scan_mode": bool(self.offline_scan_mode),
         }
 
     @classmethod
@@ -24,4 +26,5 @@ class TicketDebugSettings:
         return cls(
             count_scan_success_as_processed=bool(data.get("count_scan_success_as_processed", False)),
             play_sound_for_duplicate_received_qr=bool(data.get("play_sound_for_duplicate_received_qr", False)),
+            offline_scan_mode=bool(data.get("offline_scan_mode", False)),
         )

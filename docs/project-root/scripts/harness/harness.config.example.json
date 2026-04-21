@@ -1,0 +1,13 @@
+{
+  "general": {
+    "commands": [
+      "echo TODO: replace with project test command"
+    ]
+  },
+  "unity": {
+    "commands": [
+      "echo TODO: replace with Unity EditMode command",
+      "echo TODO: replace with Unity PlayMode command"
+    ]
+  }
+}

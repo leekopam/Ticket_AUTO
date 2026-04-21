@@ -4,6 +4,7 @@
 __pycache__/
 *.pyc
 data.xlsx
+Resources/data/
 session.txt
 dist/
 build/

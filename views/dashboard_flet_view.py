@@ -1706,6 +1706,7 @@ def build_search_result_rows(
     row_states: tuple[SearchResultRowState, ...],
     *,
     on_order_number_click: Callable[[str], None] | None = None,
+    on_copy_order_number: Callable[[str], None] | None = None,
 ) -> list[ft.Container]:
     """검색 결과 row state 목록을 Flet 행 컨트롤 목록으로 변환한다."""
 
@@ -1753,15 +1754,35 @@ def build_search_result_rows(
     def _build_order_number_cell(order_number: str) -> ft.Control:
         """주문번호 셀을 생성한다. 콜백이 있으면 클릭 가능한 링크로 표시한다."""
         text = ft.Text(order_number, size=13, color=ACCENT_PRIMARY_DARK)
-        if on_order_number_click is None:
-            return text
-        return ft.GestureDetector(
-            content=ft.Container(
-                content=text,
-                on_hover=lambda e: _apply_hover(e, text),
-            ),
-            on_tap=lambda _: on_order_number_click(order_number),
-            mouse_cursor=ft.MouseCursor.CLICK,
+        if on_order_number_click is not None:
+            order_text_widget: ft.Control = ft.GestureDetector(
+                content=ft.Container(
+                    content=text,
+                    on_hover=lambda e: _apply_hover(e, text),
+                ),
+                on_tap=lambda _: on_order_number_click(order_number),
+                mouse_cursor=ft.MouseCursor.CLICK,
+            )
+        else:
+            order_text_widget = text
+
+        if on_copy_order_number is None:
+            return order_text_widget
+
+        copy_btn = ft.IconButton(
+            icon=ft.icons.CONTENT_COPY_ROUNDED,
+            icon_size=14,
+            icon_color="#94A3B8",
+            tooltip="주문번호 복사",
+            width=28,
+            height=28,
+            on_click=lambda _e, on=order_number: on_copy_order_number(on),
+        )
+        return ft.Row(
+            controls=[copy_btn, order_text_widget],
+            spacing=2,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
         )
 
     def _apply_hover(e: ft.HoverEvent, text: ft.Text) -> None:
@@ -1818,6 +1839,7 @@ def apply_order_search_dashboard_state(
     search_feedback_text: ft.Text,
     last_search_signature: dict[str, tuple[object, ...] | None],
     on_order_number_click: Callable[[str], None] | None = None,
+    on_copy_order_number: Callable[[str], None] | None = None,
 ) -> None:
     """계산된 주문 검색 상태를 대시보드 검색 UI에 반영한다."""
     filter_count_text.value = search_view_state.filter_count_text
@@ -1828,6 +1850,7 @@ def apply_order_search_dashboard_state(
     search_result_list.controls = build_search_result_rows(
         search_view_state.row_states,
         on_order_number_click=on_order_number_click,
+        on_copy_order_number=on_copy_order_number,
     )
     search_feedback_text.value = search_view_state.feedback_message
     search_feedback_text.color = search_view_state.feedback_color
@@ -1862,6 +1885,11 @@ def apply_runtime_controls_state(
 ) -> None:
     """런타임 컨트롤 상태를 실제 버튼들에 적용한다."""
     btn_relogin.disabled = controls_state.relogin_disabled
+
+    # 이전에 적용한 상태와 동일하면 버튼 재렌더링을 건너뛴다 (스캔마다 깜빡임 방지)
+    if getattr(btn_start_stop, "_last_controls_state", None) == controls_state:
+        return
+
     btn_start_stop.text = controls_state.primary_text
     btn_start_stop.icon = controls_state.primary_icon
     btn_start_stop.style = ft.ButtonStyle(
@@ -1871,6 +1899,7 @@ def apply_runtime_controls_state(
     )
     btn_start_stop.disabled = controls_state.primary_disabled
     btn_start_stop.on_click = on_stop if controls_state.uses_stop_action else on_start
+    btn_start_stop._last_controls_state = controls_state
 
 
 def apply_runtime_status_dashboard_state(
@@ -2159,7 +2188,8 @@ def call_page_from_thread(
                 return
             if callback_started:
                 return
-    guarded_callback()
+    # 비-UI 스레드에서 직접 Flet 컨트롤을 건드리면 이벤트 루프가 손상되므로 스킵
+    logger.warning("call_page_from_thread: UI 브릿지를 찾지 못해 콜백 실행 생략")
 
 
 class DashboardFletView:
@@ -2184,8 +2214,8 @@ class DashboardFletView:
         page.theme_mode = ft.ThemeMode.LIGHT
         page.theme = ft.Theme(font_family="Segoe UI")
 
-        # 캔버스 미리보기용 폰트 등록
-        page.fonts = {
+        # 캔버스 미리보기용 폰트 등록 (존재하는 파일만 등록해 Flet 로딩 오류 방지)
+        _font_candidates = {
             "malgun":      r"C:\Windows\Fonts\malgun.ttf",
             "gulim":       r"C:\Windows\Fonts\gulim.ttc",
             "batang":      r"C:\Windows\Fonts\batang.ttc",
@@ -2199,6 +2229,7 @@ class DashboardFletView:
             "consolas":    r"C:\Windows\Fonts\consola.ttf",
             "impact":      r"C:\Windows\Fonts\impact.ttf",
         }
+        page.fonts = {k: v for k, v in _font_candidates.items() if Path(v).exists()}
 
         current_tab = {"value": "ticket"}
         current_state = {"value": "IDLE"}
@@ -2206,6 +2237,7 @@ class DashboardFletView:
         excel_service = ExcelService(str(data_file_state["path"]))
         excel_service.ensure_seat_column()
         excel_service.ensure_receipt_column()
+        excel_service.ensure_order_status_column()
         settings_store = ReceiptSettingsStore(str(resolve_project_path(".runtime/receipt_settings.json")))
         scan_success_count_store = ScanSuccessSoundStateStore()
         scan_success_sound_service = ScanSuccessSoundService(state_store=scan_success_count_store)
@@ -2512,6 +2544,9 @@ class DashboardFletView:
                 if order:
                     _on_order_print(order)
 
+            def _on_copy_order_number(order_number: str) -> None:
+                page.set_clipboard(order_number)
+
             apply_order_search_dashboard_state(
                 search_view_state,
                 orders_map=orders_map,
@@ -2522,6 +2557,7 @@ class DashboardFletView:
                 search_feedback_text=search_feedback_text,
                 last_search_signature=last_search_signature,
                 on_order_number_click=_on_order_number_click,
+                on_copy_order_number=_on_copy_order_number,
             )
             search_result_highlight_state["value"] = False
             search_feedback_override_state["value"] = ""
@@ -2566,13 +2602,24 @@ class DashboardFletView:
                 return
 
             try:
+                # 교체 전에 현재 처리완료 상태 스냅샷 저장
+                received_snapshot = excel_service.get_received_status_map()
+
                 imported_path = copy_data_file_to_managed_location(source_path)
                 data_file_state["path"] = imported_path
                 excel_service.ensure_seat_column()
                 excel_service.ensure_receipt_column()
+                excel_service.ensure_order_status_column()
+
+                # 이전 파일의 처리완료 상태를 새 파일에 복원
+                restored_count = excel_service.bulk_restore_received_status(received_snapshot)
+
                 _refresh_ticket_product_option_panels()
                 last_search_signature["value"] = None
-                search_feedback_override_state["value"] = f"data 파일 적용 완료: {Path(source_path).name}"
+                status_msg = f"data 파일 적용 완료: {Path(source_path).name}"
+                if restored_count > 0:
+                    status_msg += f" (처리완료 {restored_count}건 복원)"
+                search_feedback_override_state["value"] = status_msg
                 do_search(push_update=False)
                 safe_page_update(page, search_refresh_stop)
                 _show_dashboard_success("data 파일 가져오기 완료")
@@ -3427,7 +3474,28 @@ class DashboardFletView:
         do_search(push_update=True)
 
 
+def _setup_file_logging() -> None:
+    """빌드 환경에서 파일 로그를 활성화한다. 콘솔 없는 exe에서 오류 추적용."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        from logging.handlers import RotatingFileHandler
+        from project_paths import resolve_project_path
+        log_path = resolve_project_path(".runtime/app.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            str(log_path), maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG)
+        root_logger.addHandler(handler)
+    except Exception:
+        pass
+
+
 def run_dashboard_app() -> None:
+    _setup_file_logging()
     DashboardFletView().run()
 
 

@@ -1,0 +1,39 @@
+# Ticket_AUTO 직접 의존성
+# Python 3.13 기준 (pip install -r requirements.txt)
+
+# UI 프레임워크
+flet==0.23.2
+
+# 브라우저 자동화 (witchform QR 처리)
+playwright==1.57.0
+
+# QR 코드 스캔/생성
+pyzbar==0.1.9
+qrcode==7.4.2
+
+# 이미지 처리 (영수증 렌더링)
+Pillow==12.1.0
+opencv-python==4.13.0.90
+numpy==2.4.1
+
+# Excel 읽기/쓰기
+openpyxl==3.1.5
+
+# 파일 시스템 감시 (data.xlsx 변경 감지)
+watchdog==4.0.2
+
+# 콘솔 출력
+rich==14.3.3
+
+# 설정/템플릿
+PyYAML==6.0.3
+
+# 빌드 도구 (개발용)
+pyinstaller==6.19.0
+
+# Flet 런타임 의존성 (flet이 내부적으로 사용)
+flet-core==0.23.2
+flet-runtime==0.23.2
+fastapi==0.123.10
+uvicorn==0.38.0
+httpx==0.28.1

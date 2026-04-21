@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -10,6 +11,8 @@ import qrcode
 
 from models.receipt_canvas_model import ReceiptCanvasDocument, ReceiptCanvasElement, paper_width_to_px
 from services.receipt_template import substitute
+
+logger = logging.getLogger(__name__)
 
 
 # 폰트 매핑: key → (regular_path, bold_path)
@@ -269,14 +272,20 @@ def _render_text_element(
 
 
 def _load_image_source(element: ReceiptCanvasElement) -> Image.Image | None:
-    """asset_path 또는 embedded_data에서 이미지 로드"""
-    # 1) 파일 경로가 존재하면 파일에서 로드
+    """asset_path 또는 embedded_data에서 이미지 로드. 파일 실패 시 embedded_data로 fallback."""
     if element.asset_path:
         path = Path(element.asset_path)
         if path.exists():
-            with Image.open(path) as source:
-                return source.convert("RGBA")
-    # 2) embedded_data(base64)가 있으면 메모리에서 로드
+            try:
+                with Image.open(path) as source:
+                    return source.convert("RGBA")
+            except Exception as exc:
+                logger.warning(
+                    "이미지 파일 로드 실패 path=%s element=%s error=%s",
+                    path, element.id, exc,
+                )
+        else:
+            logger.warning("이미지 파일 없음 path=%s element=%s", path, element.id)
     if element.embedded_data:
         try:
             data_str = element.embedded_data
@@ -286,7 +295,8 @@ def _load_image_source(element: ReceiptCanvasElement) -> Image.Image | None:
                 b64_data = data_str
             raw = base64.b64decode(b64_data)
             return Image.open(io.BytesIO(raw)).convert("RGBA")
-        except Exception:
+        except Exception as exc:
+            logger.warning("embedded 이미지 디코드 실패 element=%s error=%s", element.id, exc)
             return None
     return None
 

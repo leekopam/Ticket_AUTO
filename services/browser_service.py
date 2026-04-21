@@ -6,6 +6,7 @@ Playwright 브라우저 서비스.
 """
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import re
@@ -14,6 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import unquote
+
+logger = logging.getLogger(__name__)
 
 from playwright.sync_api import (
     BrowserContext,
@@ -384,6 +387,11 @@ class BrowserService:
                 )
             message = f"수령 완료 1차 버튼 클릭 실패: {exc}"
             print(message)
+            try:
+                body_text = (self._current_page.inner_text("body") or "")[:500]
+                logger.warning("PRIMARY_CLICK_FAIL 페이지 본문(500자): %s", body_text)
+            except Exception:
+                pass
             self._invoke_receipt_complete_callback()
             return ReceiptClickResult(
                 success=False,
@@ -464,7 +472,17 @@ class BrowserService:
                 error_message=f"수령 완료 처리 후 페이지 상태 확인 실패: {exc}",
             )
 
-        # 수령완료 처리 성공 후 구매자 정보 페이지를 닫는다
+        # 수령완료 처리 성공 후 거래종료 버튼이 있으면 클릭 시도 (없으면 조용히 스킵)
+        try:
+            self._current_page.click("text=거래종료", timeout=2000)
+            print("CLOSE_DEAL_CLICKED")
+            try:
+                self._current_page.click("text=확인", timeout=2000)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         self._close_current_page()
         self._invoke_receipt_complete_callback()
         return ReceiptClickResult(success=True)

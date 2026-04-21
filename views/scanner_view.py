@@ -734,6 +734,7 @@ class ScannerView:
             except Exception:
                 continue
             if cap and cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 if verbose and backend is not None:
                     print(f"CAMERA_OPEN_OK backend=DSHOW")
                 elif verbose:

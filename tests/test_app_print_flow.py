@@ -59,6 +59,7 @@ class _FakeOrderViewModel:
         *,
         order: Order,
         click_result: ReceiptClickResult | None = None,
+        click_result_seq: list[ReceiptClickResult] | None = None,
         load_result: Order | None | object = _USE_DEFAULT_LOAD_RESULT,
         open_ok: bool = True,
         mark_ok: bool = True,
@@ -66,6 +67,7 @@ class _FakeOrderViewModel:
     ) -> None:
         self.order = order
         self.click_result = click_result or ReceiptClickResult(success=True)
+        self._click_result_seq: list[ReceiptClickResult] = list(click_result_seq or [])
         self.load_result = order if load_result is _USE_DEFAULT_LOAD_RESULT else load_result
         self.open_ok = open_ok
         self.mark_ok = mark_ok
@@ -90,6 +92,8 @@ class _FakeOrderViewModel:
 
     def complete_receipt(self) -> ReceiptClickResult:
         self.complete_calls += 1
+        if self._click_result_seq:
+            return self._click_result_seq.pop(0)
         return self.click_result
 
     def mark_current_order_received(self, timestamp_str: str | None = None) -> bool:
@@ -128,6 +132,7 @@ def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
         load_settings=lambda: SimpleNamespace(
             count_scan_success_as_processed=False,
             play_sound_for_duplicate_received_qr=False,
+            offline_scan_mode=False,
         ),
         should_count_scan_success_as_processed=lambda settings=None: bool(
             getattr(settings, "count_scan_success_as_processed", False)
@@ -461,6 +466,7 @@ class AppPrintFlowTest(unittest.TestCase):
             load_settings=lambda: SimpleNamespace(
                 count_scan_success_as_processed=False,
                 play_sound_for_duplicate_received_qr=True,
+                offline_scan_mode=False,
             ),
             should_play_sound_for_duplicate_received_qr=lambda settings=None: bool(
                 getattr(settings, "play_sound_for_duplicate_received_qr", False)
@@ -496,6 +502,7 @@ class AppPrintFlowTest(unittest.TestCase):
             load_settings=lambda: SimpleNamespace(
                 count_scan_success_as_processed=True,
                 play_sound_for_duplicate_received_qr=False,
+                offline_scan_mode=False,
             ),
             should_play_sound_for_duplicate_received_qr=lambda settings=None: bool(
                 getattr(settings, "play_sound_for_duplicate_received_qr", False)
@@ -533,6 +540,7 @@ class AppPrintFlowTest(unittest.TestCase):
             load_settings=lambda: SimpleNamespace(
                 count_scan_success_as_processed=False,
                 play_sound_for_duplicate_received_qr=True,
+                offline_scan_mode=False,
             ),
             should_play_sound_for_duplicate_received_qr=lambda settings=None: bool(
                 getattr(settings, "play_sound_for_duplicate_received_qr", False)
@@ -567,6 +575,7 @@ class AppPrintFlowTest(unittest.TestCase):
             load_settings=lambda: SimpleNamespace(
                 count_scan_success_as_processed=True,
                 play_sound_for_duplicate_received_qr=False,
+                offline_scan_mode=False,
             ),
             should_play_sound_for_duplicate_received_qr=lambda settings=None: bool(
                 getattr(settings, "play_sound_for_duplicate_received_qr", False)
@@ -588,6 +597,301 @@ class AppPrintFlowTest(unittest.TestCase):
         print_mock.assert_not_called()
         sound_mock.assert_called_once_with(order, increment_count=True, persist_count=False)
         commit_mock.assert_called_once_with()
+        self.assertEqual(app._state, app_main.AppState.READY)
+
+
+class ReceiptClickRetryTest(unittest.TestCase):
+    """complete_receipt() 자동 재시도 및 주문상태 롤백 시나리오 검증."""
+
+    def _make_app(self, order_vm: _FakeOrderViewModel):
+        app = _build_app_with_order_vm(order_vm)
+        app._excel_service = SimpleNamespace(
+            mark_order_status=lambda *_a, **_kw: None,
+        )
+        return app
+
+    def test_click_fail_then_retry_succeeds_completes_normally(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(
+            order=order,
+            click_result_seq=[
+                ReceiptClickResult(success=False, error_code="PRIMARY_CLICK_FAIL", error_message="로딩 지연"),
+                ReceiptClickResult(success=True),
+            ],
+        )
+        app = self._make_app(order_vm)
+
+        with patch("main.print_order_receipt"), patch("main.time") as mock_time:
+            mock_time.sleep = lambda _s: None
+            mock_time.monotonic = __import__("time").monotonic
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(order_vm.complete_calls, 2)
+        self.assertEqual(app._state, app_main.AppState.READY)
+
+    def test_click_fail_then_retry_also_fails_enters_error(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(
+            order=order,
+            click_result_seq=[
+                ReceiptClickResult(success=False, error_code="PRIMARY_CLICK_FAIL", error_message="실패1"),
+                ReceiptClickResult(success=False, error_code="PRIMARY_CLICK_FAIL", error_message="실패2"),
+            ],
+        )
+        app = self._make_app(order_vm)
+
+        with patch("main.print_order_receipt"), patch("main.time") as mock_time:
+            mock_time.sleep = lambda _s: None
+            mock_time.monotonic = __import__("time").monotonic
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(order_vm.complete_calls, 2)
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+
+    def test_print_failure_rolls_back_order_status(self) -> None:
+        order = Order(
+            order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[],
+            order_status="거래중",
+        )
+        order_vm = _FakeOrderViewModel(order=order)
+        app = self._make_app(order_vm)
+
+        status_calls: list[tuple[str, str]] = []
+        app._excel_service = SimpleNamespace(
+            mark_order_status=lambda on, st: status_calls.append((on, st)),
+        )
+
+        with patch("main.print_order_receipt", side_effect=RuntimeError("프린터 오류")):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+        # 첫 호출: 거래종료 기록, 두 번째 호출: 이전 상태(거래중)로 롤백
+        self.assertEqual(len(status_calls), 2)
+        self.assertEqual(status_calls[0], ("ORDER-001", "거래종료"))
+        self.assertEqual(status_calls[1], ("ORDER-001", "거래중"))
+
+
+class SessionTimeoutRecoveryTest(unittest.TestCase):
+    """_recover_auth_and_retry() 세션 타임아웃 후 READY 복구 검증."""
+
+    def test_login_timeout_returns_to_ready_state(self) -> None:
+        app = app_main.Application.__new__(app_main.Application)
+        app._state = app_main.AppState.RECOVERING
+        app._scanner_view = _FakeScannerView()
+        app._stop_requested = False
+
+        with patch.object(app, "_wait_for_login", return_value=False), \
+             patch.object(app, "_is_stop_requested", return_value=False):
+            app._recover_auth_and_retry("https://witchform.com/qrcode_link.php?a=1")
+
+        self.assertEqual(app._state, app_main.AppState.READY)
+
+
+class ResolveQrOfflineTest(unittest.TestCase):
+    """_resolve_qr_offline: test_order 단축 경로와 httpx 경로를 분리 검증."""
+
+    def _make_app(self) -> app_main.Application:
+        app = app_main.Application.__new__(app_main.Application)
+        return app
+
+    def test_test_order_param_returns_fake_redirect_without_http(self) -> None:
+        app = self._make_app()
+        url = "https://witchform.com/qrcode_link.php?test_order=WFLM_123456"
+        with patch("httpx.get") as mock_get:
+            result = app._resolve_qr_offline(url)
+        mock_get.assert_not_called()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result.location, "/w/myform/sellForm-history-detail/WFLM_123456")
+
+    def test_test_order_param_is_uppercased_in_location(self) -> None:
+        app = self._make_app()
+        url = "https://witchform.com/qrcode_link.php?test_order=wflm_abcdef"
+        with patch("httpx.get") as mock_get:
+            result = app._resolve_qr_offline(url)
+        mock_get.assert_not_called()
+        self.assertIn("wflm_abcdef", result.location)
+
+    def test_no_test_order_param_calls_httpx_with_follow_redirects(self) -> None:
+        app = self._make_app()
+        url = "https://witchform.com/qrcode_link.php?a=1"
+        final_url = "https://witchform.com/w/myform/sellForm-history-detail/ORDER-001"
+        fake_resp = SimpleNamespace(
+            status_code=200,
+            url=final_url,
+        )
+        with patch("httpx.get", return_value=fake_resp) as mock_get:
+            result = app._resolve_qr_offline(url)
+        _, kwargs = mock_get.call_args
+        self.assertTrue(kwargs.get("follow_redirects", False), "follow_redirects=True 이어야 합니다")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.location, final_url)
+
+    def test_login_final_url_returns_fake_302(self) -> None:
+        app = self._make_app()
+        url = "https://witchform.com/qrcode_link.php?a=1"
+        login_url = "https://witchform.com/w/login?redirect=%2Fw%2Fmyform%2FsellForm-history-detail%2FORDER-001"
+        fake_resp = SimpleNamespace(
+            status_code=200,
+            url=login_url,
+        )
+        with patch("httpx.get", return_value=fake_resp):
+            result = app._resolve_qr_offline(url)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result.location, login_url)
+
+    def test_httpx_exception_returns_error_result(self) -> None:
+        app = self._make_app()
+        url = "https://witchform.com/qrcode_link.php?a=1"
+        with patch("httpx.get", side_effect=Exception("연결 실패")):
+            result = app._resolve_qr_offline(url)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "OFFLINE_HTTP_FAIL")
+
+
+class OnlineModeGuaranteeTest(unittest.TestCase):
+    """온라인 모드에서 complete_receipt 성공 없이는 수령완료/카운트가 절대 실행되지 않음을 보호한다."""
+
+    def _make_app(self, order_vm: _FakeOrderViewModel):
+        app = _build_app_with_order_vm(order_vm)
+        app._excel_service = SimpleNamespace(mark_order_status=lambda *_a, **_kw: None)
+        return app
+
+    def test_click_failure_never_reaches_main_mark_and_count(self) -> None:
+        """일반 실패 에러 코드에서 메인 경로의 수령완료 표시와 카운트가 호출되지 않는다."""
+        failure_codes = [
+            "PAGE_NOT_FOUND",
+            "TIMEOUT",
+            "RECEIPT_EXCEPTION",
+            "UNKNOWN_FAILURE",
+        ]
+        for error_code in failure_codes:
+            with self.subTest(error_code=error_code):
+                order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+                order_vm = _FakeOrderViewModel(
+                    order=order,
+                    click_result=ReceiptClickResult(success=False, error_code=error_code),
+                )
+                app = self._make_app(order_vm)
+                with (
+                    patch("main.print_order_receipt") as print_mock,
+                    patch.object(app, "_commit_scan_success_count") as commit_mock,
+                ):
+                    app._process_resolved_qr(
+                        "https://witchform.com/qrcode_link.php?a=1",
+                        BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                        allow_auth_retry=False,
+                    )
+                self.assertEqual(order_vm.mark_calls, 0, f"mark_calls != 0 for error_code={error_code}")
+                commit_mock.assert_not_called()
+                print_mock.assert_not_called()
+
+    def test_click_retry_failures_never_reach_main_mark_and_count(self) -> None:
+        """재시도 포함 실패 경로(PRIMARY/CONFIRM_CLICK_FAIL)에서도 mark/count가 호출되지 않는다."""
+        for error_code in ("PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"):
+            with self.subTest(error_code=error_code):
+                order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+                order_vm = _FakeOrderViewModel(
+                    order=order,
+                    click_result_seq=[
+                        ReceiptClickResult(success=False, error_code=error_code),
+                        ReceiptClickResult(success=False, error_code=error_code),
+                    ],
+                )
+                app = self._make_app(order_vm)
+                with (
+                    patch("main.print_order_receipt") as print_mock,
+                    patch.object(app, "_commit_scan_success_count") as commit_mock,
+                    patch("main.time") as mock_time,
+                ):
+                    mock_time.sleep = lambda _s: None
+                    mock_time.monotonic = __import__("time").monotonic
+                    app._process_resolved_qr(
+                        "https://witchform.com/qrcode_link.php?a=1",
+                        BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                        allow_auth_retry=False,
+                    )
+                self.assertEqual(order_vm.mark_calls, 0, f"mark_calls != 0 for error_code={error_code}")
+                commit_mock.assert_not_called()
+                print_mock.assert_not_called()
+
+    def test_complete_receipt_exception_blocks_mark_and_count(self) -> None:
+        """complete_receipt가 예외를 던지면 수령완료 표시와 카운트가 실행되지 않는다."""
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order)
+        app = self._make_app(order_vm)
+
+        def _raise() -> ReceiptClickResult:
+            raise RuntimeError("브라우저 예외 발생")
+
+        order_vm.complete_receipt = _raise  # type: ignore[assignment]
+
+        with (
+            patch("main.print_order_receipt") as print_mock,
+            patch.object(app, "_commit_scan_success_count") as commit_mock,
+        ):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(order_vm.mark_calls, 0)
+        commit_mock.assert_not_called()
+        print_mock.assert_not_called()
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+
+    def test_count_not_committed_when_print_fails(self) -> None:
+        """영수증 출력이 실패하면 카운트가 확정되지 않는다."""
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order)
+        app = self._make_app(order_vm)
+
+        with (
+            patch("main.print_order_receipt", side_effect=RuntimeError("프린터 오류")),
+            patch.object(app, "_commit_scan_success_count") as commit_mock,
+        ):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        commit_mock.assert_not_called()
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+
+    def test_count_committed_only_after_full_success(self) -> None:
+        """complete_receipt + mark + print 모두 성공한 후에만 카운트가 확정된다."""
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order)
+        app = self._make_app(order_vm)
+
+        with (
+            patch("main.print_order_receipt"),
+            patch.object(app, "_commit_scan_success_count") as commit_mock,
+        ):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        commit_mock.assert_called_once()
+        self.assertEqual(order_vm.complete_calls, 1)
+        self.assertEqual(order_vm.mark_calls, 1)
         self.assertEqual(app._state, app_main.AppState.READY)
 
 

@@ -2,6 +2,7 @@
 """Flet receipt settings panel with drag-and-drop canvas editor."""
 from __future__ import annotations
 
+import copy
 import shutil
 import subprocess
 import sys
@@ -966,6 +967,8 @@ def _build_ticket_debug_tools_panel(
     debug_status_summary_text: ft.Control,
     debug_count_scan_success_switch: ft.Control,
     debug_duplicate_sound_switch: ft.Control,
+    debug_offline_scan_switch: ft.Control,
+    debug_qr_section: ft.Control,
 ) -> ft.Container:
     return ft.Container(
         bgcolor="#F8FAFD",
@@ -974,7 +977,7 @@ def _build_ticket_debug_tools_panel(
         padding=16,
         content=ft.Column(
             controls=[
-                ft.Text("디버깅 모드", size=18, weight=ft.FontWeight.BOLD),
+                ft.Text("개발자 도구", size=18, weight=ft.FontWeight.BOLD),
                 ft.Container(
                     bgcolor="#FFFFFF",
                     border_radius=12,
@@ -1016,6 +1019,26 @@ def _build_ticket_debug_tools_panel(
                         spacing=6,
                     ),
                 ),
+                ft.Container(
+                    bgcolor="#FFF8F0",
+                    border_radius=12,
+                    border=ft.border.all(1, "#FDDCB5"),
+                    padding=12,
+                    content=ft.Column(
+                        controls=[
+                            debug_offline_scan_switch,
+                            ft.Text(
+                                "로그인 없이 QR 스캔 흐름을 테스트합니다. "
+                                "브라우저를 시작하지 않고 HTTP로 주문번호를 추출하며, "
+                                "위치폼 수령 완료 버튼 클릭은 건너뜁니다.",
+                                size=12,
+                                color="#92400E",
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                ),
+                debug_qr_section,
             ],
             spacing=10,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -1768,6 +1791,30 @@ def _apply_selected_alignment_action(
     return updated
 
 
+def _element_display_content(el) -> str:
+    """요소 목록 테이블에 표시할 내용 요약 문자열."""
+    if el.type == "text":
+        return el.text_template[:32] if el.text_template else "(빈 텍스트)"
+    if el.type == "image":
+        return Path(el.asset_path).name if el.asset_path else "(이미지)"
+    if el.type == "divider":
+        return el.text_template[:32] if el.text_template else "(구분선)"
+    if el.type == "qr":
+        return el.data_template[:32] if el.data_template else "(QR 코드)"
+    return el.type
+
+
+_ELEMENT_TYPE_BADGE_COLOR: dict[str, tuple[str, str]] = {
+    "text":    ("#E3F2FD", "#1565C0"),
+    "image":   ("#E8F5E9", "#2E7D32"),
+    "divider": ("#EEEEEE", "#616161"),
+    "qr":      ("#F3E5F5", "#6A1B9A"),
+}
+_ELEMENT_TYPE_LABEL: dict[str, str] = {
+    "text": "텍스트", "image": "이미지", "divider": "구분선", "qr": "QR",
+}
+
+
 def _refresh_editor_view_state(
     *,
     refresh_canvas,
@@ -2410,6 +2457,7 @@ def build_receipt_settings_panel(
         "drag_start_y": 0,
         "drag_accum_dx": 0.0,
         "drag_accum_dy": 0.0,
+        "drag_accum_dx__src": None,
         "drag_pointer_start_gx": None,
         "drag_pointer_start_gy": None,
         "drag_bottom_start_y": None,    # 드래그 시작 시 고정한 하단 여백 앵커 Y
@@ -2419,9 +2467,14 @@ def build_receipt_settings_panel(
         "resize_start_h": 0,
         "resize_accum_dx": 0.0,
         "resize_accum_dy": 0.0,
+        "resize_accum_dx__src": None,
         "resize_pointer_start_gx": None,
         "resize_pointer_start_gy": None,
         "resize_bottom_start_y": None,  # 리사이즈 시작 시 고정한 하단 여백 앵커 Y
+        "undo_stack": [],
+        "redo_stack": [],
+        "last_nudge_time": 0.0,
+        "last_pan_update_time": 0.0,
         "canvas_scroll_ctrl": None,
         "scroll_gutter_ctrl": None,
         "canvas_stack_ctrl": None,
@@ -2586,6 +2639,63 @@ def build_receipt_settings_panel(
             active_layout=_editor_layout_key(),
             doc=doc,
         )
+
+    _HISTORY_LIMIT = 50
+
+    def _begin_undo_unit() -> None:
+        """사용자 작업 시작 직전 현재 doc를 undo 스택에 푸시한다."""
+        snapshot = copy.deepcopy(_doc())
+        undo_stack = state["undo_stack"]  # type: ignore[assignment]
+        if not isinstance(undo_stack, list):
+            undo_stack = []
+            state["undo_stack"] = undo_stack
+        undo_stack.append(snapshot)
+        if len(undo_stack) > _HISTORY_LIMIT:
+            del undo_stack[0:len(undo_stack) - _HISTORY_LIMIT]
+        redo_stack = state["redo_stack"]  # type: ignore[assignment]
+        if isinstance(redo_stack, list):
+            redo_stack.clear()
+
+    def _undo() -> bool:
+        undo_stack = state["undo_stack"]  # type: ignore[assignment]
+        if not isinstance(undo_stack, list) or not undo_stack:
+            return False
+        redo_stack = state["redo_stack"]  # type: ignore[assignment]
+        if not isinstance(redo_stack, list):
+            redo_stack = []
+            state["redo_stack"] = redo_stack
+        redo_stack.append(copy.deepcopy(_doc()))
+        if len(redo_stack) > _HISTORY_LIMIT:
+            del redo_stack[0:len(redo_stack) - _HISTORY_LIMIT]
+        prev_doc = undo_stack.pop()
+        _set_doc(prev_doc)
+        # 복원된 doc에 더 이상 존재하지 않는 요소가 선택되어 있을 수 있어 해제
+        if _selected_id() and not any(el.id == _selected_id() for el in prev_doc.elements):
+            _clear_canvas_selection(
+                set_selected_id=_set_selected_id,
+                set_active_binding_target=_set_active_binding_target,
+            )
+        return True
+
+    def _redo() -> bool:
+        redo_stack = state["redo_stack"]  # type: ignore[assignment]
+        if not isinstance(redo_stack, list) or not redo_stack:
+            return False
+        undo_stack = state["undo_stack"]  # type: ignore[assignment]
+        if not isinstance(undo_stack, list):
+            undo_stack = []
+            state["undo_stack"] = undo_stack
+        undo_stack.append(copy.deepcopy(_doc()))
+        if len(undo_stack) > _HISTORY_LIMIT:
+            del undo_stack[0:len(undo_stack) - _HISTORY_LIMIT]
+        next_doc = redo_stack.pop()
+        _set_doc(next_doc)
+        if _selected_id() and not any(el.id == _selected_id() for el in next_doc.elements):
+            _clear_canvas_selection(
+                set_selected_id=_set_selected_id,
+                set_active_binding_target=_set_active_binding_target,
+            )
+        return True
 
     def _selected_id() -> str | None:
         return _get_editor_selected_id(state=state)
@@ -2804,13 +2914,13 @@ def build_receipt_settings_panel(
         _set_doc(replace(_doc(), elements=update_element_in_list(_doc().elements, updated)))
 
     def _resolve_overlaps(exclude_id: str | None = None) -> None:
-        """요소 간 겹침 해소: Y 순서대로 아래 요소를 밀어냄 (gap=4px)"""
+        """요소 간 겹침 해소: Y 순서대로 아래 요소를 밀어냄 (gap=0px, snap과 일관성 유지)"""
         elements = list(_doc().elements)
         if len(elements) < 2:
             return
         # Y 기준 정렬된 인덱스
         order = sorted(range(len(elements)), key=lambda i: (elements[i].y, elements[i].x))
-        gap = 4
+        gap = 0
         changed = False
         for pos in range(len(order)):
             i = order[pos]
@@ -2852,15 +2962,16 @@ def build_receipt_settings_panel(
             if new_y != el.y:
                 elements[i] = replace(el, y=new_y)
                 changed = True
-        _set_doc(replace(_doc(), elements=elements))
+        if changed:
+            _set_doc(replace(_doc(), elements=elements))
         _resolve_overlaps_sticky()
 
     def _resolve_overlaps_sticky() -> None:
-        """리사이즈 후 스티키 정렬: 위로 당김 + 아래로 밀기 (2-패스)"""
+        """리사이즈 후 스티키 정렬: 위로 당김 + 아래로 밀기 (2-패스, gap=0 snap 일관성)"""
         elements = list(_doc().elements)
         if len(elements) < 2:
             return
-        gap = 4
+        gap = 0
         changed = False
         order = sorted(range(len(elements)), key=lambda i: (elements[i].y, elements[i].x))
 
@@ -2920,10 +3031,28 @@ def build_receipt_settings_panel(
         if changed:
             _set_doc(replace(_doc(), elements=elements))
 
+    def _scroll_canvas_to_element(element_id: str) -> None:
+        """추가/이동된 요소가 보이도록 캔버스 뷰포트를 스크롤한다."""
+        target = next((el for el in _doc().elements if el.id == element_id), None)
+        if target is None:
+            return
+        scroll_ctrl = state.get("canvas_scroll_ctrl")
+        if not isinstance(scroll_ctrl, ft.Column):
+            return
+        real_w = _real_canvas_width()
+        preview_w = _preview_canvas_width()
+        preview_y = real_to_preview(target.y, real_width=real_w, preview_width=preview_w)
+        try:
+            scroll_ctrl.scroll_to(offset=max(0, preview_y - 40), duration=200)
+        except Exception:
+            logger.debug("canvas scroll_to 실패", exc_info=True)
+
     def _add_element(element: ReceiptCanvasElement) -> None:
+        _begin_undo_unit()
         _set_doc(replace(_doc(), elements=[*_doc().elements, element]))
         _resolve_overlaps()
         _set_selected_id(element.id)
+        _scroll_canvas_to_element(element.id)
 
     def _remove_selected_element() -> None:
         selected = _require_selected_id(
@@ -2933,6 +3062,7 @@ def build_receipt_settings_panel(
         )
         if not selected:
             return
+        _begin_undo_unit()
         elements = _remove_selected_element_from_elements(
             elements=_doc().elements,
             selected_id=selected,
@@ -2943,7 +3073,7 @@ def build_receipt_settings_panel(
             set_active_binding_target=_set_active_binding_target,
         )
         _refresh_all()
-        _show_status("선택 요소를 삭제했습니다.")
+        _show_status("선택 요소를 삭제했습니다. (Ctrl+Z로 되돌리기)")
 
     def _apply_align_to_selected(align: str) -> None:
         element = _require_selected_element(
@@ -2953,6 +3083,7 @@ def build_receipt_settings_panel(
         )
         if not element:
             return
+        _begin_undo_unit()
         _apply_selected_alignment_action(
             element=element,
             align=align,
@@ -3732,29 +3863,53 @@ def build_receipt_settings_panel(
         accum_dx_key: str,
         accum_dy_key: str,
     ) -> tuple[float, float]:
-        """Return cumulative drag delta in preview pixels across Flet versions."""
+        """Return cumulative drag delta in preview pixels.
+
+        한 드래그 시퀀스 내에서는 단일 이벤트 소스(global / delta / local)에 고정해
+        Flet 버전·환경에 따라 좌표가 섞여 누적 오차가 생기는 문제를 방지한다.
+        """
+        source_key = f"{accum_dx_key}__src"
+        source = state.get(source_key)
+
         global_gx = getattr(e, "global_x", None)
         global_gy = getattr(e, "global_y", None)
         start_gx = state.get(start_gx_key)
         start_gy = state.get(start_gy_key)
-        if global_gx is not None and global_gy is not None and isinstance(start_gx, (int, float)) and isinstance(start_gy, (int, float)):
+        delta_x = getattr(e, "delta_x", None)
+        delta_y = getattr(e, "delta_y", None)
+        local_delta = getattr(e, "local_delta", None)
+
+        if source is None:
+            if (
+                global_gx is not None and global_gy is not None
+                and isinstance(start_gx, (int, float))
+                and isinstance(start_gy, (int, float))
+            ):
+                source = "global"
+            elif delta_x is not None and delta_y is not None:
+                source = "delta"
+            elif local_delta is not None:
+                source = "local"
+            else:
+                source = "none"
+            state[source_key] = source
+
+        if source == "global" and global_gx is not None and global_gy is not None \
+                and isinstance(start_gx, (int, float)) and isinstance(start_gy, (int, float)):
             dx = float(global_gx) - float(start_gx)
             dy = float(global_gy) - float(start_gy)
             state[accum_dx_key] = dx
             state[accum_dy_key] = dy
             return dx, dy
 
-        delta_x = getattr(e, "delta_x", None)
-        delta_y = getattr(e, "delta_y", None)
-        if delta_x is not None and delta_y is not None:
+        if source == "delta" and delta_x is not None and delta_y is not None:
             accum_dx = float(state[accum_dx_key]) + float(delta_x)
             accum_dy = float(state[accum_dy_key]) + float(delta_y)
             state[accum_dx_key] = accum_dx
             state[accum_dy_key] = accum_dy
             return accum_dx, accum_dy
 
-        local_delta = getattr(e, "local_delta", None)
-        if local_delta is not None:
+        if source == "local" and local_delta is not None:
             dx = float(getattr(local_delta, "x", 0.0) or 0.0)
             dy = float(getattr(local_delta, "y", 0.0) or 0.0)
             state[accum_dx_key] = dx
@@ -3765,6 +3920,7 @@ def build_receipt_settings_panel(
 
     def _start_resize(element_id: str, e: ft.DragStartEvent) -> None:
         """리사이즈 드래그 시작 시 원본 치수 저장"""
+        _begin_undo_unit()
         current = next((item for item in _doc().elements if item.id == element_id), None)
         if current:
             state["resize_start_x"] = current.x
@@ -3776,6 +3932,7 @@ def build_receipt_settings_panel(
         state["resize_pointer_start_gy"] = float(e.global_y)
         state["resize_accum_dx"] = 0.0
         state["resize_accum_dy"] = 0.0
+        state["resize_accum_dx__src"] = None
 
     def _handle_resize(element_id: str, corner: str, e: ft.DragUpdateEvent) -> None:
         """리사이즈 핸들 드래그 처리 (누적 delta로 부드러운 변환)"""
@@ -3877,9 +4034,14 @@ def build_receipt_settings_panel(
 
     def _end_resize(_: ft.DragEndEvent) -> None:
         """리사이즈 종료 시 스티키 정렬 + 전체 리프레시"""
-        _reset_resize_interaction_state(state=state)
-        _resolve_overlaps_sticky()
-        _refresh_all()
+        try:
+            _resolve_overlaps_sticky()
+            _refresh_all()
+        except Exception:
+            logger.exception("리사이즈 종료 처리 중 예외")
+        finally:
+            _reset_resize_interaction_state(state=state)
+            state["resize_accum_dx__src"] = None
 
     def _calc_optimal_size(element: ReceiptCanvasElement) -> tuple[int, int]:
         """요소의 텍스트 내용에 맞는 최적 크기(w, h) 계산 (실제 px)"""
@@ -4311,6 +4473,7 @@ def build_receipt_settings_panel(
         def on_pan_start(e: ft.DragStartEvent) -> None:
             _set_canvas_focus(True)
             _set_selected_id(element.id)
+            _begin_undo_unit()
             state["drag_bottom_start_y"] = _fixed_bottom_anchor_y(moving_ids={element.id})
             current = next((item for item in _doc().elements if item.id == element.id), None)
             if current:
@@ -4320,6 +4483,7 @@ def build_receipt_settings_panel(
             state["drag_pointer_start_gy"] = float(e.global_y)
             state["drag_accum_dx"] = 0.0
             state["drag_accum_dy"] = 0.0
+            state["drag_accum_dx__src"] = None
 
         def on_pan_update(e: ft.DragUpdateEvent) -> None:
             moving_ids = {element.id}
@@ -4381,26 +4545,32 @@ def build_receipt_settings_panel(
                 real_to_preview(updated.y, real_width=real_w, preview_width=preview_w),
                 real_to_preview(updated.h, real_width=real_w, preview_width=preview_w),
             )
-            _refresh_property_panel()
-            page.update()
+            # 드래그 중 property panel 갱신 생략 (on_pan_end → _refresh_all에서 갱신)
+            # 30fps(33ms) throttle: 매 프레임 page.update 대신 부하 절반으로 감소
+            _now = time.monotonic()
+            if _now - float(state.get("last_pan_update_time", 0.0)) >= 0.033:
+                state["last_pan_update_time"] = _now
+                page.update()
 
         def on_pan_end(_: ft.DragEndEvent) -> None:
-            _reset_drag_interaction_state(state=state)
+            try:
+                canvas_stack = state.get("canvas_stack")
+                _clear_canvas_insertion_indicator(
+                    state=state,
+                    canvas_stack=canvas_stack if isinstance(canvas_stack, ft.Stack) else None,
+                )
 
-            # 삽입 인디케이터 제거
-            canvas_stack = state.get("canvas_stack")
-            _clear_canvas_insertion_indicator(
-                state=state,
-                canvas_stack=canvas_stack if isinstance(canvas_stack, ft.Stack) else None,
-            )
-
-            target_y = _consume_canvas_insertion_target(state=state)
-            if target_y is not None:
-                _apply_insertion_drop(element.id, target_y)
-            else:
-                _enforce_margin_boundaries()
-                _resolve_overlaps()
-            _refresh_all()
+                target_y = _consume_canvas_insertion_target(state=state)
+                if target_y is not None:
+                    _apply_insertion_drop(element.id, target_y)
+                else:
+                    _enforce_margin_boundaries()   # 내부에서 _resolve_overlaps_sticky() 포함
+                _refresh_all()
+            except Exception:
+                logger.exception("on_pan_end 처리 중 예외")
+            finally:
+                _reset_drag_interaction_state(state=state)
+                state["drag_accum_dx__src"] = None
 
         detector.on_tap = on_tap
         detector.on_double_tap = on_double_tap
@@ -4584,7 +4754,7 @@ def build_receipt_settings_panel(
         exclude_ids: set[str],
     ) -> int | None:
         """드래그 중심 Y 기준, X겹침 요소들 사이 삽입 슬롯 계산"""
-        gap = 4
+        gap = 0
         threshold = 30
         drag_center_y = drag_y + dragging.h // 2
 
@@ -4641,8 +4811,8 @@ def build_receipt_settings_panel(
         if not el:
             return
         updated = replace(el, y=slot_y)
-        # 삽입 위치에 겹치는 기존 요소들을 먼저 아래로 밀어냄
-        gap = 4
+        # 삽입 위치에 겹치는 기존 요소들을 먼저 아래로 밀어냄 (gap=0, resolve와 일관성)
+        gap = 0
         push_below = slot_y + updated.h + gap
         elements = list(_doc().elements)
         changed = False
@@ -4657,7 +4827,7 @@ def build_receipt_settings_panel(
         if changed:
             _set_doc(replace(_doc(), elements=elements))
         _upsert_element(updated)
-        _resolve_overlaps()
+        _resolve_overlaps_sticky()   # pull-up + push-down: 삽입 후 전체 빈 공간 제거
 
     def _build_guide_lines(guides: list[dict]) -> list[ft.Control]:
         """스냅 가이드선 컨트롤 생성"""
@@ -5332,10 +5502,76 @@ def build_receipt_settings_panel(
         settings_section["value"] = section_key
         _apply_settings_section()
 
-    # 키보드 이벤트: Del 삭제
+    # 키보드 이벤트: Delete/Esc/화살표 이동/Ctrl+Z·Y (캔버스 포커스 시에만 동작)
     def _on_keyboard(e: ft.KeyboardEvent) -> None:
-        if e.key == "Delete" and state["canvas_focused"] and _selected_id():
+        if not state["canvas_focused"]:
+            return
+
+        key = str(getattr(e, "key", "") or "")
+        ctrl = bool(getattr(e, "ctrl", False))
+        shift = bool(getattr(e, "shift", False))
+
+        # Undo/Redo
+        if ctrl and key.upper() == "Z" and not shift:
+            if _undo():
+                _refresh_all()
+                _show_status("되돌리기")
+            return
+        if ctrl and (key.upper() == "Y" or (key.upper() == "Z" and shift)):
+            if _redo():
+                _refresh_all()
+                _show_status("다시 실행")
+            return
+
+        if key == "Escape":
+            if _selected_id():
+                _clear_canvas_selection(
+                    set_selected_id=_set_selected_id,
+                    set_active_binding_target=_set_active_binding_target,
+                )
+                _refresh_all()
+            return
+
+        if key == "Delete" and _selected_id():
             _remove_selected_element()
+            return
+
+        # 화살표 키 미세 이동 (Shift = 10px)
+        nudge_map = {
+            "Arrow Up": (0, -1),
+            "ArrowUp": (0, -1),
+            "Arrow Down": (0, 1),
+            "ArrowDown": (0, 1),
+            "Arrow Left": (-1, 0),
+            "ArrowLeft": (-1, 0),
+            "Arrow Right": (1, 0),
+            "ArrowRight": (1, 0),
+        }
+        if key in nudge_map and _selected_id():
+            selected = _find_selected_element()
+            if selected is None:
+                return
+            step = 10 if shift else 1
+            dx, dy = nudge_map[key]
+            new_x = selected.x + dx * step
+            new_y = selected.y + dy * step
+            canvas_w = _real_canvas_width()
+            canvas_h = _calc_real_canvas_height()
+            new_x, new_y = clamp_element_position(
+                x=new_x, y=new_y, w=selected.w, h=selected.h,
+                canvas_w=canvas_w, canvas_h=canvas_h,
+            )
+            if new_x == selected.x and new_y == selected.y:
+                return
+            # 연속 화살표 입력은 0.5초 윈도우로 단일 undo 단위로 묶음
+            now = time.monotonic()
+            last_nudge = state.get("last_nudge_time")
+            last_nudge_val = float(last_nudge) if isinstance(last_nudge, (int, float)) else 0.0
+            if now - last_nudge_val > 0.5:
+                _begin_undo_unit()
+            state["last_nudge_time"] = now
+            _upsert_element(replace(selected, x=new_x, y=new_y))
+            _refresh_all()
 
     _wire_receipt_settings_navigation_handlers(
         page=page,
@@ -5481,6 +5717,41 @@ def build_app_settings_panel(
         value=debug_settings.play_sound_for_duplicate_received_qr,
         **_switch_theme_kwargs(),
     )
+    debug_offline_scan_switch = ft.Switch(
+        label="오프라인 스캔 테스트 모드",
+        value=debug_settings.offline_scan_mode,
+        **_switch_theme_kwargs(),
+    )
+    debug_qr_order_input = ft.TextField(
+        label="주문번호",
+        hint_text="예: WFLM7QSDTC_69D53CU23685",
+        expand=True,
+        height=48,
+    )
+    btn_generate_qr = ft.ElevatedButton(text="QR 생성", height=48)
+    debug_qr_image = ft.Image(visible=False, width=180, height=180, fit=ft.ImageFit.CONTAIN)
+    debug_qr_status_text = ft.Text("", size=12, color="#64748B")
+    debug_qr_section = ft.Container(
+        bgcolor="#F0F7FF",
+        border_radius=12,
+        border=ft.border.all(1, "#B8D4F5"),
+        padding=12,
+        content=ft.Column(
+            controls=[
+                ft.Text("테스트 QR 코드 생성", size=14, weight=ft.FontWeight.W_600, color="#1E40AF"),
+                ft.Text(
+                    "오프라인 스캔 모드에서 사용할 테스트 QR 코드를 생성합니다. "
+                    "data 파일에 있는 주문번호를 입력하면 카메라로 스캔 가능한 QR 이미지를 만들어드립니다.",
+                    size=12,
+                    color="#1E3A8A",
+                ),
+                ft.Row([debug_qr_order_input, btn_generate_qr], spacing=8),
+                debug_qr_status_text,
+                debug_qr_image,
+            ],
+            spacing=8,
+        ),
+    )
     debug_status_summary_text = ft.Text(size=12, color="#475569", selectable=True)
     scan_sound_rules_state: dict[str, object] = {
         "rules": _load_scan_success_sound_rules(settings),
@@ -5512,6 +5783,8 @@ def build_app_settings_panel(
         debug_status_summary_text=debug_status_summary_text,
         debug_count_scan_success_switch=debug_count_scan_success_switch,
         debug_duplicate_sound_switch=debug_duplicate_sound_switch,
+        debug_offline_scan_switch=debug_offline_scan_switch,
+        debug_qr_section=debug_qr_section,
     )
     scan_sound_rules_management_panel = _build_scan_success_sound_management_panel(
         summary_text=scan_sound_rule_summary_text,
@@ -5542,6 +5815,8 @@ def build_app_settings_panel(
             enabled_items.append("QR 스캔 성공 시 누적 카운트 반영")
         if bool(debug_duplicate_sound_switch.value):
             enabled_items.append("중복 스캔 시 효과음 재생")
+        if bool(debug_offline_scan_switch.value):
+            enabled_items.append("오프라인 스캔 테스트 모드")
 
         if enabled_items:
             debug_status_summary_text.value = "현재 활성 디버그 기능: " + ", ".join(enabled_items)
@@ -5779,7 +6054,9 @@ def build_app_settings_panel(
         latest_debug = _load_latest_debug_settings()
         latest_debug.count_scan_success_as_processed = bool(debug_count_scan_success_switch.value)
         latest_debug.play_sound_for_duplicate_received_qr = bool(debug_duplicate_sound_switch.value)
+        latest_debug.offline_scan_mode = bool(debug_offline_scan_switch.value)
         debug_tools_service.save_settings(latest_debug)
+        _refresh_debug_settings_summary(push_update=False)
         settings_status_text.value = message
         page.update()
         return latest_debug
@@ -5791,6 +6068,42 @@ def build_app_settings_panel(
     def on_debug_duplicate_sound_change(_: ft.ControlEvent) -> None:
         _refresh_debug_settings_summary(push_update=False)
         _save_debug_settings("디버그 중복 스캔 효과음 설정 저장 완료")
+
+    def on_debug_offline_scan_change(_: ft.ControlEvent) -> None:
+        _refresh_debug_settings_summary(push_update=False)
+        _save_debug_settings("오프라인 스캔 테스트 모드 설정 저장 완료")
+
+    def _make_test_qr_base64(order_number: str) -> str:
+        import base64
+        import io
+
+        import qrcode  # type: ignore[import-untyped]
+
+        url = f"https://witchform.com/qrcode_link.php?test_order={order_number}"
+        qr = qrcode.QRCode(box_size=6, border=4)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def on_generate_test_qr(_: ft.ControlEvent) -> None:
+        order_num = (debug_qr_order_input.value or "").strip().upper()
+        if not order_num:
+            debug_qr_status_text.value = "주문번호를 입력하세요."
+            debug_qr_image.visible = False
+            page.update()
+            return
+        try:
+            b64 = _make_test_qr_base64(order_num)
+            debug_qr_image.src_base64 = b64
+            debug_qr_image.visible = True
+            debug_qr_status_text.value = f"생성 완료: {order_num}"
+        except Exception as e:
+            debug_qr_status_text.value = f"QR 생성 실패: {e}"
+            debug_qr_image.visible = False
+        page.update()
 
     def _save_and_apply_focus_settings() -> None:
         latest = _save_modal_settings("카메라 초점 설정 저장 완료 (다음 앱 시작 후 적용)")
@@ -5990,6 +6303,8 @@ def build_app_settings_panel(
     manual_focus_value_field.on_submit = on_manual_focus_value_submit
     debug_count_scan_success_switch.on_change = on_debug_count_scan_success_change
     debug_duplicate_sound_switch.on_change = on_debug_duplicate_sound_change
+    debug_offline_scan_switch.on_change = on_debug_offline_scan_change
+    btn_generate_qr.on_click = on_generate_test_qr
 
     ticket_settings_panel = _build_app_settings_ticket_panel(
         sound_path_field=sound_path_field,

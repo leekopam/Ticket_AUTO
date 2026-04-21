@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from models.ticket_debug_settings_model import TicketDebugSettings
 from project_paths import resolve_project_path
+
+_logger = logging.getLogger(__name__)
 
 
 class TicketDebugSettingsStore:
@@ -27,8 +30,11 @@ class TicketDebugSettingsStore:
         return TicketDebugSettings.from_dict(payload)
 
     def save(self, settings: TicketDebugSettings) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(settings.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(
+                json.dumps(settings.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            _logger.warning("설정 파일 저장 실패 path=%s error=%s", self._path, exc)

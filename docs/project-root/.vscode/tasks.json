@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AI Harness: Auto Self Test",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/harness/auto_self_test.ps1"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "AI Harness: Auto Self Test + General",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/harness/auto_self_test.ps1",
+        "-General"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "AI Harness: Auto Self Test + Unity",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/harness/auto_self_test.ps1",
+        "-Unity"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

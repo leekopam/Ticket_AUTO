@@ -15,7 +15,7 @@ from models.receipt_settings_model import ReceiptSettings
 from models.ticket_debug_settings_model import TicketDebugSettings
 from project_paths import ensure_managed_data_file, resolve_project_path
 from services.api_service import ApiService, QRParseResult
-from services.browser_service import BrowserResolveResult, BrowserService
+from services.browser_service import BrowserResolveResult, BrowserService, ReceiptClickResult
 from services.excel_service import ExcelService
 from services.receipt_print_pipeline import print_order_receipt
 from services.receipt_settings_store import ReceiptSettingsStore
@@ -80,6 +80,7 @@ class Application:
         self._excel_service = ExcelService(str(ensure_managed_data_file()))
         self._excel_service.ensure_seat_column()
         self._excel_service.ensure_receipt_column()
+        self._excel_service.ensure_order_status_column()
         self._browser_service = BrowserService(require_login_each_run=True)
         self._api_service = ApiService()
 
@@ -220,20 +221,26 @@ class Application:
         self._emit_status("STARTING", "티켓 확인 런타임 시작 중")
 
         try:
-            self._browser_service.start()
+            offline_mode = self._load_ticket_debug_settings().offline_scan_mode
+            # 카메라를 가장 먼저 시작해 브라우저/뷰 초기화와 병렬로 준비되도록 한다
+            self._scanner_view.start()
+            if not offline_mode:
+                self._browser_service.start()
             if self._order_view is not None:
                 self._order_view.start()
-            self._scanner_view.start()
 
             # 카메라 비동기 초기화 대기 (최대 30초)
             if not self._wait_for_camera(timeout_sec=30):
                 self._enter_error("카메라를 열 수 없습니다. 장치를 확인해주세요.")
                 return
 
-            self._enter_auth_wait("브라우저에서 로그인이 필요합니다")
-            if not self._wait_for_initial_login():
-                print("RUN_EXIT reason=login_failed_or_stop_requested")
-                return
+            if offline_mode:
+                self._enter_ready("[오프라인] 로그인 없이 스캔 테스트 모드")
+            else:
+                self._enter_auth_wait("브라우저에서 로그인이 필요합니다")
+                if not self._wait_for_initial_login():
+                    print("RUN_EXIT reason=login_failed_or_stop_requested")
+                    return
 
             self._main_loop()
             print("RUN_EXIT reason=main_loop_finished")
@@ -262,7 +269,7 @@ class Application:
                 return False
             if self._scanner_view.is_camera_ready():
                 return True
-            time.sleep(0.5)
+            time.sleep(0.1)
         return self._scanner_view.is_camera_ready()
 
     def _is_stop_requested(self) -> bool:
@@ -438,6 +445,54 @@ class Application:
             logger.warning("디버그 누적 카운트 반영 설정 확인 실패", exc_info=True)
             return False
 
+    def _resolve_qr_offline(self, qr_url: str) -> BrowserResolveResult:
+        """브라우저/인증 없이 QR URL 리다이렉트를 추적한다 (오프라인 테스트 전용).
+
+        test_order 파라미터가 있으면 HTTP 요청 없이 즉시 가짜 리다이렉트를 반환한다.
+        """
+        from urllib.parse import parse_qs, urlparse as _urlparse
+        _parsed = _urlparse(qr_url)
+        test_order = parse_qs(_parsed.query).get("test_order", [""])[0].strip()
+        if test_order:
+            return BrowserResolveResult(
+                ok=True,
+                status_code=302,
+                location=f"/w/myform/sellForm-history-detail/{test_order}",
+            )
+        try:
+            import httpx
+            resp = httpx.get(qr_url, follow_redirects=True, timeout=5.0)
+            final_url = str(resp.url)
+            # 최종 도착 URL이 로그인 페이지이면 AUTH_REQUIRED 처리 경로로 유도
+            if "/w/login" in final_url:
+                return BrowserResolveResult(ok=True, status_code=302, location=final_url)
+            return BrowserResolveResult(ok=True, status_code=resp.status_code, location=final_url)
+        except Exception as exc:
+            return BrowserResolveResult(
+                ok=False, error_code="OFFLINE_HTTP_FAIL", error_message=str(exc)
+            )
+
+    def _extract_order_from_login_redirect(self, location: str) -> QRParseResult | None:
+        """비인증 리다이렉트(/w/login?redirect=...)에서 주문번호를 추출한다."""
+        from urllib.parse import parse_qs, unquote, urlparse
+        parsed = urlparse(location)
+        redirect_raw = parse_qs(parsed.query).get("redirect", [""])[0]
+        if not redirect_raw:
+            return None
+        redirect_url = unquote(redirect_raw)
+        parsed_redirect = urlparse(redirect_url)
+        order_number = ApiService._extract_order_number(
+            parsed_redirect.path, parsed_redirect.query, parsed_redirect.fragment
+        )
+        if not order_number:
+            return None
+        full_url = (
+            f"{ApiService.WITCHFORM_BASE}{redirect_url}"
+            if redirect_url.startswith("/")
+            else redirect_url
+        )
+        return QRParseResult(success=True, order_number=order_number, full_url=full_url)
+
     def _wait_for_initial_login(self) -> bool:
         return self._wait_for_login(timeout_sec=0)
 
@@ -527,13 +582,17 @@ class Application:
         if not normalized_qr_url.lower().startswith(ApiService.QR_PREFIX.lower()):
             self._enter_error("유효한 Witchform QR 코드가 아닙니다.")
             return
-        try:
-            browser_result = self._browser_service.resolve_qr_redirect(normalized_qr_url)
-        except Exception as exc:
-            if not self._is_stop_requested():
-                logger.warning("QR 브라우저 요청 실패", exc_info=True)
-                self._enter_error("브라우저 요청을 확인하지 못했습니다. 다시 스캔해주세요.")
-            return
+        offline_mode = self._load_ticket_debug_settings().offline_scan_mode
+        if offline_mode:
+            browser_result = self._resolve_qr_offline(normalized_qr_url)
+        else:
+            try:
+                browser_result = self._browser_service.resolve_qr_redirect(normalized_qr_url)
+            except Exception:
+                if not self._is_stop_requested():
+                    logger.warning("QR 브라우저 요청 실패", exc_info=True)
+                    self._enter_error("브라우저 요청을 확인하지 못했습니다. 다시 스캔해주세요.")
+                return
 
         self._process_resolved_qr(normalized_qr_url, browser_result, allow_auth_retry)
 
@@ -556,6 +615,8 @@ class Application:
             browser_result.location,
         )
 
+        offline_mode = self._load_ticket_debug_settings().offline_scan_mode
+
         if not parse_result.success:
             print(
                 "QR_PARSE_FAIL "
@@ -563,10 +624,18 @@ class Application:
                 f"status={browser_result.status_code} "
                 f"location={browser_result.location}"
             )
-            if parse_result.error_code == "AUTH_REQUIRED" and allow_auth_retry:
+            if parse_result.error_code == "AUTH_REQUIRED" and offline_mode:
+                # 비인증 리다이렉트(/w/login?redirect=...)에서 주문번호 추출 시도
+                recovered = self._extract_order_from_login_redirect(browser_result.location)
+                if recovered:
+                    parse_result = recovered
+                else:
+                    self._enter_error("오프라인 모드: 주문번호를 QR URL에서 추출하지 못했습니다.")
+                    return
+            elif parse_result.error_code == "AUTH_REQUIRED" and allow_auth_retry:
                 self._recover_auth_and_retry(qr_url)
                 return
-            if parse_result.error_code == "ORDER_NUMBER_MISSING":
+            elif parse_result.error_code == "ORDER_NUMBER_MISSING":
                 recovered_parse_result = self._recover_missing_order_number(browser_result)
                 if recovered_parse_result is not None:
                     parse_result = recovered_parse_result
@@ -584,6 +653,8 @@ class Application:
         )
 
         if not order:
+            data_path = ensure_managed_data_file()
+            logger.warning("주문번호 조회 실패 order=%s file=%s", parse_result.order_number, data_path)
             self._enter_error(f"주문번호를 찾을 수 없습니다: {parse_result.order_number}")
             return
 
@@ -606,44 +677,73 @@ class Application:
             self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
             return
 
-        if not self._order_viewmodel.open_current_order_page():
-            self._enter_error("주문 상세 페이지를 열 수 없습니다.")
-            return
-
-        click_result = self._order_viewmodel.complete_receipt()
-        if not click_result.success:
-            # 웹 페이지에서 이미 수령완료 상태인 경우 엑셀에 반영하고 정상 처리
-            if click_result.error_code == "ALREADY_RECEIVED":
-                received_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._order_viewmodel.mark_current_order_received(received_at)
-                debug_settings = self._load_ticket_debug_settings()
-                count_as_processed = self._should_count_scan_success_as_processed(debug_settings)
-                play_duplicate_sound = self._should_play_duplicate_received_sound(debug_settings)
-                if count_as_processed or play_duplicate_sound:
-                    self._play_scan_success_sound(
-                        order,
-                        increment_count=count_as_processed,
-                        persist_count=not count_as_processed,
-                    )
-                if count_as_processed:
-                    self._commit_scan_success_count()
-                self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
+        if not offline_mode:
+            if not self._order_viewmodel.open_current_order_page():
+                self._enter_error("주문 상세 페이지를 열 수 없습니다.")
                 return
-            if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
-                self._play_scan_success_sound(order, increment_count=False)
-            logger.warning(
-                "수령 완료 처리 실패 code=%s message=%s",
-                click_result.error_code,
-                click_result.error_message,
-            )
-            self._enter_error(self._receipt_failure_status_message(click_result))
-            return
+
+            try:
+                click_result = self._order_viewmodel.complete_receipt()
+            except Exception as exc:
+                logger.warning("수령 완료 처리 중 예외 발생", exc_info=True)
+                click_result = ReceiptClickResult(
+                    success=False, error_code="RECEIPT_EXCEPTION", error_message=str(exc)
+                )
+            if not click_result.success and click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
+                # 페이지 로딩 지연으로 인한 일시적 실패 가능성 — 1.5초 대기 후 1회 자동 재시도
+                self._enter_processing("수령 완료 처리 재시도 중...")
+                time.sleep(1.5)
+                if self._order_viewmodel.open_current_order_page():
+                    try:
+                        click_result = self._order_viewmodel.complete_receipt()
+                    except Exception as exc:
+                        logger.warning("수령 완료 재시도 중 예외 발생", exc_info=True)
+                        click_result = ReceiptClickResult(
+                            success=False, error_code="RECEIPT_EXCEPTION", error_message=str(exc)
+                        )
+
+            if not click_result.success:
+                # 웹 페이지에서 이미 수령완료 상태인 경우 엑셀에 반영하고 정상 처리
+                if click_result.error_code == "ALREADY_RECEIVED":
+                    received_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._order_viewmodel.mark_current_order_received(received_at)
+                    debug_settings = self._load_ticket_debug_settings()
+                    count_as_processed = self._should_count_scan_success_as_processed(debug_settings)
+                    play_duplicate_sound = self._should_play_duplicate_received_sound(debug_settings)
+                    if count_as_processed or play_duplicate_sound:
+                        self._play_scan_success_sound(
+                            order,
+                            increment_count=count_as_processed,
+                            persist_count=not count_as_processed,
+                        )
+                    if count_as_processed:
+                        self._commit_scan_success_count()
+                    self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
+                    return
+                if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
+                    self._play_scan_success_sound(order, increment_count=False)
+                logger.warning(
+                    "수령 완료 처리 실패 code=%s message=%s",
+                    click_result.error_code,
+                    click_result.error_message,
+                )
+                self._enter_error(self._receipt_failure_status_message(click_result))
+                return
 
         previous_received = order.received_at
         received_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not self._order_viewmodel.mark_current_order_received(received_at):
-            self._enter_error("수령확인 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요.")
+            data_path = ensure_managed_data_file()
+            logger.warning("수령확인 저장 실패 order=%s file=%s", order.order_number, data_path)
+            self._enter_error(f"수령확인 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요. (파일: {data_path})")
             return
+
+        # QR 스캔 성공 후 주문상태를 거래종료로 기록
+        previous_status = order.order_status
+        try:
+            self._excel_service.mark_order_status(order.order_number, "거래종료")
+        except Exception as exc:
+            logger.warning("주문상태 저장 실패 order=%s error=%s", order.order_number, exc)
 
         self._play_scan_success_sound(order, increment_count=True, persist_count=False)
 
@@ -656,6 +756,10 @@ class Application:
             print_order_receipt(order, self._receipt_settings)
         except Exception as exc:
             rollback_ok = self._order_viewmodel.rollback_current_order_received(previous_received)
+            try:
+                self._excel_service.mark_order_status(order.order_number, previous_status)
+            except Exception:
+                pass
             if rollback_ok:
                 self._enter_error(f"영수증 출력 실패로 수령확인을 원복했습니다: {exc}")
             else:
@@ -811,7 +915,7 @@ class Application:
 
         if not self._wait_for_login(timeout_sec=180):
             if not self._is_stop_requested():
-                self._scanner_view.set_scanning_enabled(True)
+                self._enter_ready("로그인 대기 시간 초과 - 준비 상태로 돌아갑니다.")
             return
 
         self._enter_processing("로그인 확인 완료 - 다시 처리 중")

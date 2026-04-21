@@ -15,6 +15,7 @@ from project_paths import ensure_managed_data_file, resolve_project_path
 PRODUCT_HEADER_RE = re.compile(r"^\[상품(\d+)\]")
 RECEIPT_HEADER = "수령확인"
 SEAT_HEADER = "좌석번호"
+ORDER_STATUS_HEADER = "주문상태"
 _WRITE_RETRY_COUNT = 3
 _WRITE_RETRY_DELAY_SEC = 0.2
 
@@ -45,6 +46,7 @@ class ExcelService:
             phone_col = self._find_col(headers, ("주문자연락처", "수령자연락처"))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
             goods_cols = self._parse_goods_cols(headers)
 
             for row in ws.iter_rows(min_row=2, values_only=True):
@@ -68,6 +70,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=goods_list,
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    order_status=str(self._cell(row, status_col)).strip() if status_col else "",
                 ))
                 if len(results) >= max_results:
                     break
@@ -91,12 +94,13 @@ class ExcelService:
             phone_col = self._find_col(headers, ("주문자연락처", "수령자연락처"))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
 
             goods_cols = self._parse_goods_cols(headers)
 
             for row in ws.iter_rows(min_row=2, values_only=True):
                 current_order = self._cell(row, order_col)
-                if str(current_order).strip() != order_number:
+                if str(current_order).strip().upper() != order_number.upper():
                     continue
 
                 return Order(
@@ -106,6 +110,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=self._build_goods_list(row, goods_cols),
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    order_status=str(self._cell(row, status_col)).strip() if status_col else "",
                 )
 
             return None
@@ -205,6 +210,96 @@ class ExcelService:
         """data.xlsx에 수령확인 컬럼이 없으면 자동 추가한다."""
         self._ensure_column(RECEIPT_HEADER)
 
+    def ensure_order_status_column(self) -> None:
+        """data.xlsx에 주문상태 컬럼이 없으면 자동 추가한다."""
+        self._ensure_column(ORDER_STATUS_HEADER)
+
+    def mark_order_status(self, order_number: str, status: str) -> bool:
+        """주문의 주문상태 값을 엑셀에 저장한다."""
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = workbook.active
+                headers = self._read_headers(ws)
+                order_col = self._find_col(headers, ("주문번호",))
+                if not order_col:
+                    return False
+                status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
+                if not status_col:
+                    status_col = ws.max_column + 1
+                    ws.cell(row=1, column=status_col, value=ORDER_STATUS_HEADER)
+                target_row = self._find_row_by_order(ws, order_col, order_number)
+                if not target_row:
+                    return False
+                ws.cell(row=target_row, column=status_col, value=(status or "").strip())
+                workbook.save(self._file_path)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        return False
+
+    def get_received_status_map(self) -> dict[str, str]:
+        """현재 파일에서 수령확인이 기록된 주문번호 → 타임스탬프 맵을 반환한다."""
+        try:
+            workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+            ws = workbook.active
+            headers = self._read_headers(ws)
+            order_col = self._find_col(headers, ("주문번호",))
+            received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            if not order_col or not received_col:
+                return {}
+            result: dict[str, str] = {}
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                order_number = str(self._cell(row, order_col)).strip()
+                received = str(self._cell(row, received_col)).strip()
+                if order_number and received:
+                    result[order_number] = received
+            return result
+        except Exception:
+            return {}
+        finally:
+            workbook.close()
+
+    def bulk_restore_received_status(self, received_map: dict[str, str]) -> int:
+        """파일 교체 후 수령확인 상태를 일괄 복원한다. 반환값: 복원된 건수."""
+        if not received_map:
+            return 0
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = workbook.active
+                headers = self._read_headers(ws)
+                order_col = self._find_col(headers, ("주문번호",))
+                if not order_col:
+                    return 0
+                receipt_col = self._find_col(headers, (RECEIPT_HEADER,))
+                if not receipt_col:
+                    receipt_col = ws.max_column + 1
+                    ws.cell(row=1, column=receipt_col, value=RECEIPT_HEADER)
+                count = 0
+                for row_idx in range(2, ws.max_row + 1):
+                    order_number = str(ws.cell(row=row_idx, column=order_col).value or "").strip()
+                    if order_number in received_map:
+                        ws.cell(row=row_idx, column=receipt_col, value=received_map[order_number])
+                        count += 1
+                workbook.save(self._file_path)
+                return count
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return 0
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        return 0
+
     def get_product_names(self) -> list[str]:
         """상품 컬럼명 리스트를 반환한다 (티켓 분류 UI용)."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
@@ -295,7 +390,7 @@ class ExcelService:
     def _find_row_by_order(ws, order_col: int, order_number: str) -> int | None:
         for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             current_order = ExcelService._cell(row, order_col)
-            if str(current_order).strip() == order_number:
+            if str(current_order).strip().upper() == order_number.upper():
                 return row_idx
         return None
 

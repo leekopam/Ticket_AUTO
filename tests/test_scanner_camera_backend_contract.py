@@ -156,11 +156,10 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         self.assertEqual(backend_name, "DEFAULT")
         # DirectShow 백엔드가 우선 시도된다
         video_capture_mock.assert_called_once_with(2, cv2.CAP_DSHOW)
-        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
-        if autofocus_prop is None:
-            self.assertEqual(fake_cap.set_calls, [])
-        else:
-            self.assertEqual(fake_cap.set_calls, [])
+        # _open_camera에서 CAP_PROP_BUFFERSIZE=1 설정 (첫 프레임 지연 감소)
+        self.assertIn((cv2.CAP_PROP_BUFFERSIZE, 1), fake_cap.set_calls)
+        # _configure_focus_for_capture는 이 레벨에서 호출되지 않으므로 set_calls는 1개여야 한다
+        self.assertEqual(len(fake_cap.set_calls), 1)
 
     def test_open_camera_returns_none_when_device_cannot_open(self) -> None:
         fake_cap = _FakeCapture(opened=False)
