@@ -1,14 +1,19 @@
 ﻿"""Main receipt flow tests."""
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from openpyxl import Workbook, load_workbook
 
 from models.order_model import Order
 from services.api_service import QRParseResult
 from services.browser_service import BrowserResolveResult, ReceiptClickResult
+from services.excel_service import ExcelService
 
 import main as app_main
 
@@ -200,6 +205,7 @@ class AppPrintFlowTest(unittest.TestCase):
         print_mock.assert_called_once()
         sound_mock.assert_called_once_with(order, increment_count=True, persist_count=False)
         commit_mock.assert_called_once_with()
+        self.assertEqual(app._excel_service.processing_time_calls, [("ORDER-001", order.received_at)])
         self.assertEqual(app._state, app_main.AppState.READY)
 
     def test_qr_scan_auto_print_off_marks_order_but_skips_print_and_rollback(self) -> None:
@@ -332,6 +338,37 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.ERROR)
         self.assertIn("원복", app._scanner_view.status_message)
+
+    def test_print_failure_restores_blank_app_owned_status_not_source_progress_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["주문번호", "주문자명", "주문상태", "진행상태"])
+            worksheet.append(["ORDER-001", "홍길동", "", "결제완료"])
+            workbook.save(file_path)
+            workbook.close()
+
+            excel_service = ExcelService(str(file_path))
+            order = excel_service.find_order("ORDER-001")
+            assert order is not None
+            self.assertEqual(order.order_status, "결제완료")
+            app = _build_app_with_order_vm(_FakeOrderViewModel(order=order))
+            app._excel_service = excel_service
+
+            with patch("main.print_order_receipt", side_effect=RuntimeError("printer down")):
+                app._process_resolved_qr(
+                    "https://witchform.com/qrcode_link.php?a=1",
+                    BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                    allow_auth_retry=False,
+                )
+
+            loaded = load_workbook(file_path, read_only=True, data_only=True)
+            try:
+                self.assertIn(loaded.active["C2"].value, (None, ""))
+                self.assertNotIn("처리시간", [cell.value for cell in loaded.active[1]])
+            finally:
+                loaded.close()
 
     def test_received_order_skips_click_print_and_is_silent_by_default(self) -> None:
         order = Order(

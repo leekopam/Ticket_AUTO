@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from openpyxl import load_workbook
+
 from models.order_model import Order
 from models.receipt_settings_model import ReceiptSettings
 from models.ticket_debug_settings_model import TicketDebugSettings
@@ -762,8 +764,8 @@ class Application:
             self._enter_error(f"수령확인 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요. (파일: {data_path})")
             return
 
-        # QR 스캔 성공 후 주문상태를 거래종료로 기록
-        previous_status = order.order_status
+        # 표시용 진행상태 fallback과 분리해 앱 소유 주문상태 원본을 보존함
+        previous_status = self._read_raw_order_status(order)
         try:
             status_saved = self._excel_service.mark_order_status(order.order_number, "거래종료")
         except Exception as exc:
@@ -791,10 +793,11 @@ class Application:
                 print_order_receipt(order, self._receipt_settings)
         except Exception as exc:
             rollback_ok = self._order_viewmodel.rollback_current_order_received(previous_received)
-            try:
-                self._excel_service.mark_order_status(order.order_number, previous_status)
-            except Exception:
-                pass
+            if previous_status is not None:
+                try:
+                    self._excel_service.mark_order_status(order.order_number, previous_status)
+                except Exception:
+                    pass
             if rollback_ok:
                 self._enter_error(f"영수증 출력 실패로 수령확인을 원복했습니다: {exc}")
             else:
@@ -819,6 +822,34 @@ class Application:
             self._enter_ready("수령 완료 및 영수증 출력 완료")
         else:
             self._enter_ready("수령 완료 (QR 영수증 자동 출력 꺼짐)")
+
+    def _read_raw_order_status(self, order: Order) -> str | None:
+        """앱 소유 주문상태 컬럼의 원본 값을 반환한다."""
+        file_path = getattr(self._excel_service, "_file_path", None)
+        if not file_path:
+            return order.order_status
+
+        workbook = None
+        try:
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            worksheet = workbook.active
+            headers = {
+                str(cell.value or "").strip().replace(" ", ""): index
+                for index, cell in enumerate(worksheet[1], start=1)
+            }
+            order_column = headers.get("주문번호")
+            status_column = headers.get("주문상태")
+            if not order_column or not status_column:
+                return ""
+            for row in worksheet.iter_rows(min_row=2, values_only=True):
+                if str(row[order_column - 1] or "").strip().upper() == order.order_number.upper():
+                    return str(row[status_column - 1] or "").strip()
+        except Exception:
+            logger.warning("주문상태 원본 조회 실패 order=%s", order.order_number, exc_info=True)
+        finally:
+            if workbook is not None:
+                workbook.close()
+        return None
 
     def _recover_missing_order_number(
         self,
