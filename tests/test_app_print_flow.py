@@ -266,6 +266,63 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertIs(app._order_view.last_order, order)
         self.assertIn("이미 수령완료", app._scanner_view.status_message)
 
+    def _assert_cancelled_order_is_blocked(self, raw_status: str) -> None:
+        order = Order(
+            order_number="ORDER-001",
+            name="홍길동",
+            phone="010",
+            seat="A-1",
+            goods=[],
+            order_status=raw_status,
+        )
+        order_vm = _FakeOrderViewModel(order=order)
+        app = _build_app_with_order_vm(order_vm)
+        emitted_orders: list[Order] = []
+        status_writes: list[tuple[str, str]] = []
+        app._order_listener = emitted_orders.append
+        app._excel_service = SimpleNamespace(
+            mark_order_status=lambda order_number, status: status_writes.append((order_number, status)),
+        )
+        app._state = app_main.AppState.PROCESSING
+        app._scanner_view.scanning_enabled = False
+
+        with (
+            patch("main.print_order_receipt") as print_mock,
+            patch.object(app, "_play_scan_success_sound") as sound_mock,
+            patch.object(app, "_commit_scan_success_count") as commit_mock,
+        ):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(order_vm.load_calls, 1)
+        self.assertIsNone(app._order_view.last_order)
+        self.assertEqual(emitted_orders, [])
+        self.assertEqual(order_vm.open_calls, 0)
+        self.assertEqual(order_vm.complete_calls, 0)
+        self.assertEqual(order_vm.mark_calls, 0)
+        self.assertEqual(order_vm.rollback_calls, 0)
+        self.assertEqual(status_writes, [])
+        print_mock.assert_not_called()
+        sound_mock.assert_not_called()
+        commit_mock.assert_not_called()
+        self.assertEqual(app._state, app_main.AppState.READY)
+        self.assertTrue(app._scanner_view.scanning_enabled)
+        self.assertIn("취소", app._scanner_view.status_message)
+        self.assertNotIn(order.order_number, app._scanner_view.status_message)
+
+    def test_cancelled_order_status_blocks_before_order_detail_emit_and_success_side_effects(self) -> None:
+        for raw_status in ("주문취소", " 주문취소 "):
+            with self.subTest(raw_status=raw_status):
+                self._assert_cancelled_order_is_blocked(raw_status)
+
+    def test_auto_cancelled_order_status_blocks_before_order_detail_emit_and_success_side_effects(self) -> None:
+        for raw_status in ("자동주문취소", " 자동주문취소 "):
+            with self.subTest(raw_status=raw_status):
+                self._assert_cancelled_order_is_blocked(raw_status)
+
     def test_load_order_missing_reports_error_without_side_effects(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order, load_result=None)

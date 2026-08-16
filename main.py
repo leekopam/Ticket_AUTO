@@ -667,6 +667,10 @@ class Application:
             self._enter_error(f"주문번호를 찾을 수 없습니다: {parse_result.order_number}")
             return
 
+        if (order.order_status or "").strip() in {"주문취소", "자동주문취소"}:
+            self._enter_ready("취소된 주문은 수령 처리할 수 없습니다.")
+            return
+
         if self._order_view is not None:
             self._order_view.show_or_update(order)
         self._emit_order(order)
