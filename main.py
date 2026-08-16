@@ -827,7 +827,7 @@ class Application:
         """앱 소유 주문상태 컬럼의 원본 값을 반환한다."""
         file_path = getattr(self._excel_service, "_file_path", None)
         if not file_path:
-            return order.order_status
+            return None
 
         workbook = None
         try:

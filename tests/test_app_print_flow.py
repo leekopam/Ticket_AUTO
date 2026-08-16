@@ -972,7 +972,7 @@ class ReceiptClickRetryTest(unittest.TestCase):
         self.assertEqual(order_vm.complete_calls, 2)
         self.assertEqual(app._state, app_main.AppState.ERROR)
 
-    def test_print_failure_rolls_back_order_status(self) -> None:
+    def test_print_failure_without_raw_status_source_does_not_write_display_status(self) -> None:
         order = Order(
             order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[],
             order_status="거래중",
@@ -993,11 +993,8 @@ class ReceiptClickRetryTest(unittest.TestCase):
                 allow_auth_retry=False,
             )
 
-        self.assertEqual(app._state, app_main.AppState.ERROR)
-        # 첫 호출: 거래종료 기록, 두 번째 호출: 이전 상태(거래중)로 롤백
-        self.assertEqual(len(status_calls), 2)
-        self.assertEqual(status_calls[0], ("ORDER-001", "거래종료"))
-        self.assertEqual(status_calls[1], ("ORDER-001", "거래중"))
+            self.assertEqual(app._state, app_main.AppState.ERROR)
+            self.assertEqual(status_calls, [("ORDER-001", "거래종료")])
 
 
 class SessionTimeoutRecoveryTest(unittest.TestCase):
