@@ -256,11 +256,11 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(app._excel_service.processing_time_calls, [("ORDER-001", "2026-08-17 12:34:56")])
         self.assertEqual(app._state, app_main.AppState.READY)
 
-    def test_local_status_or_print_failure_never_writes_processing_time(self) -> None:
-        for failure_stage in ("status", "print"):
+    def test_local_received_status_or_print_failure_never_writes_processing_time(self) -> None:
+        for failure_stage in ("received", "status", "print"):
             with self.subTest(failure_stage=failure_stage):
                 order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
-                order_vm = _FakeOrderViewModel(order=order)
+                order_vm = _FakeOrderViewModel(order=order, mark_ok=failure_stage != "received")
                 app = _build_app_with_order_vm(order_vm)
                 app._excel_service = _FakeExcelService(status_ok=failure_stage != "status")
 
@@ -329,6 +329,7 @@ class AppPrintFlowTest(unittest.TestCase):
 
         self.assertEqual(order_vm.mark_calls, 1)
         self.assertEqual(order_vm.rollback_calls, 1)
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.ERROR)
         self.assertIn("원복", app._scanner_view.status_message)
 
@@ -356,6 +357,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 0)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.READY)
         self.assertIs(app._order_view.last_order, order)
         self.assertIn("이미 수령완료", app._scanner_view.status_message)
@@ -372,11 +374,7 @@ class AppPrintFlowTest(unittest.TestCase):
         order_vm = _FakeOrderViewModel(order=order)
         app = _build_app_with_order_vm(order_vm)
         emitted_orders: list[Order] = []
-        status_writes: list[tuple[str, str]] = []
         app._order_listener = emitted_orders.append
-        app._excel_service = SimpleNamespace(
-            mark_order_status=lambda order_number, status: status_writes.append((order_number, status)) or True,
-        )
         app._state = app_main.AppState.PROCESSING
         app._scanner_view.scanning_enabled = False
 
@@ -398,7 +396,8 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.complete_calls, 0)
         self.assertEqual(order_vm.mark_calls, 0)
         self.assertEqual(order_vm.rollback_calls, 0)
-        self.assertEqual(status_writes, [])
+        self.assertEqual(app._excel_service.status_calls, [])
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
         commit_mock.assert_not_called()
@@ -435,6 +434,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 0)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertIn("주문번호를 찾을 수 없습니다", app._scanner_view.status_message)
 
     def test_already_received_click_result_marks_order_and_is_silent_by_default(self) -> None:
@@ -460,6 +460,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 1)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.READY)
         self.assertIn("이미 수령완료", app._scanner_view.status_message)
 
@@ -481,6 +482,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 0)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._scanner_view.status_message, "주문 상세 페이지를 열 수 없습니다.")
 
     def test_open_current_order_page_exception_reports_recoverable_error_without_stopping_loop(self) -> None:
@@ -507,6 +509,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 0)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._scanner_view.status_message, "주문 상세 페이지를 열 수 없습니다.")
 
     def test_click_failure_reports_generic_receipt_failure_status_message(self) -> None:
@@ -530,6 +533,7 @@ class AppPrintFlowTest(unittest.TestCase):
 
         self.assertEqual(app._state, app_main.AppState.ERROR)
         self.assertIn("수령 완료 처리 상태를 확인하지 못했습니다", app._scanner_view.status_message)
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         sound_mock.assert_called_once_with(order, increment_count=False)
 
     def test_mark_current_order_received_failure_stops_before_print_and_sound(self) -> None:
@@ -549,6 +553,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(order_vm.mark_calls, 1)
         print_mock.assert_not_called()
         sound_mock.assert_not_called()
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertIn("수령확인 저장 실패", app._scanner_view.status_message)
 
     def test_browser_failure_uses_user_friendly_status_message(self) -> None:
@@ -571,6 +576,42 @@ class AppPrintFlowTest(unittest.TestCase):
             app._scanner_view.status_message,
             "브라우저 요청을 확인하지 못했습니다. 다시 스캔해주세요.",
         )
+        self.assertEqual(app._excel_service.processing_time_calls, [])
+
+    def test_qr_validation_parse_and_browser_request_failures_never_write_processing_time(self) -> None:
+        cases = (
+            ("invalid_url", "not-a-url", None),
+            ("invalid_prefix", "https://example.com/qrcode_link.php?a=1", None),
+            ("browser_exception", "https://witchform.com/qrcode_link.php?a=1", RuntimeError("browser down")),
+        )
+        for failure_stage, qr_url, browser_exception in cases:
+            with self.subTest(failure_stage=failure_stage):
+                order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+                app = _build_app_with_order_vm(_FakeOrderViewModel(order=order))
+                if browser_exception is not None:
+                    app._browser_service = SimpleNamespace(
+                        resolve_qr_redirect=lambda _url: (_ for _ in ()).throw(browser_exception)
+                    )
+
+                app._process_qr(qr_url, allow_auth_retry=False)
+
+                self.assertEqual(app._excel_service.processing_time_calls, [])
+                self.assertEqual(app._state, app_main.AppState.ERROR)
+
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        app = _build_app_with_order_vm(_FakeOrderViewModel(order=order))
+        app._api_service = SimpleNamespace(
+            parse_qr_redirect=lambda *_args: QRParseResult(success=False, error_code="INVALID_REDIRECT", error_message="잘못된 QR")
+        )
+
+        app._process_resolved_qr(
+            "https://witchform.com/qrcode_link.php?a=1",
+            BrowserResolveResult(ok=True, status_code=302, location="/x"),
+            allow_auth_retry=False,
+        )
+
+        self.assertEqual(app._excel_service.processing_time_calls, [])
+        self.assertEqual(app._state, app_main.AppState.ERROR)
 
     def test_success_flow_keeps_working_without_order_window(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
