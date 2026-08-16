@@ -1,8 +1,11 @@
 """Dashboard control mapping tests."""
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
+
+from models.order_model import Order
 
 
 class DashboardControlContractTest(unittest.TestCase):
@@ -13,6 +16,56 @@ class DashboardControlContractTest(unittest.TestCase):
         except ModuleNotFoundError as exc:
             self.skipTest(f"flet not installed: {exc}")
         return ft, dashboard
+
+    def test_dashboard_page_uses_laptop_safe_default_window_size(self) -> None:
+        source = Path("views/dashboard_flet_view.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("page.window.width = 1800", source)
+        self.assertIn("page.window.height = 920", source)
+        self.assertIn("page.window.resizable = False", source)
+
+    def test_order_search_filters_only_exact_completed_statuses(self) -> None:
+        _ft, dashboard = self._import_dashboard()
+        orders = [
+            Order(order_number="ORDER-001", name="A", order_status="결제완료"),
+            Order(order_number="ORDER-002", name="B", order_status="거래종료"),
+            Order(order_number="ORDER-003", name="C", order_status="주문취소"),
+            Order(order_number="ORDER-004", name="D", order_status="자동주문취소"),
+            Order(order_number="ORDER-005", name="E", order_status=""),
+            Order(order_number="ORDER-006", name="F", order_status="unknown"),
+        ]
+
+        for filter_value, expected_order_numbers in (
+            ("전체", ("ORDER-001", "ORDER-002")),
+            ("결제완료", ("ORDER-001",)),
+            ("거래종료", ("ORDER-002",)),
+        ):
+            with self.subTest(filter_value=filter_value):
+                view_state = dashboard.build_order_search_view_state(
+                    "",
+                    filter_value,
+                    orders,
+                    [],
+                    None,
+                )
+                row_order_numbers = tuple(row.order_number for row in view_state.row_states)
+
+                self.assertEqual(row_order_numbers, expected_order_numbers)
+                self.assertEqual(view_state.dropdown_order_numbers, expected_order_numbers)
+                self.assertEqual(view_state.filter_count_text, f"표시 {len(expected_order_numbers)}건")
+
+        all_orders = dashboard.build_order_search_view_state("", "전체", orders, [], None)
+        self.assertEqual([row.order_status_text for row in all_orders.row_states], ["결제완료", "거래종료"])
+
+    def test_request_witchform_login_page_calls_runtime_once(self) -> None:
+        _ft, dashboard = self._import_dashboard()
+        calls: list[str] = []
+        runtime_manager = SimpleNamespace(
+            open_witchform_login_page=lambda: calls.append("open") or True,
+        )
+
+        self.assertTrue(dashboard.request_witchform_login_page(runtime_manager))
+        self.assertEqual(calls, ["open"])
 
     def test_build_receipt_preview_dialog_uses_high_visibility_type_headers(self) -> None:
         _ft, dashboard = self._import_dashboard()

@@ -78,6 +78,7 @@ STATUS_WARNING_TEXT = "#7A6500"
 STATUS_PINK = "#FFC0CB"
 STATUS_PINK_SOFT = "#FFE9EF"
 STATUS_PINK_TEXT = "#A34B68"
+VISIBLE_ORDER_STATUSES = ("결제완료", "거래종료")
 
 
 def _coerce_picker_files(result: object) -> list[ft.FilePickerFile]:
@@ -211,6 +212,7 @@ def build_order_search_signature(
                 order.seat,
                 tuple(order.goods or []),
                 order.received_at or "",
+                order.order_status or "",
             )
             for order in orders
         ),
@@ -583,6 +585,11 @@ def create_dashboard_runtime_manager(*, camera_index: int = 0) -> TicketRuntimeM
     )
 
 
+def request_witchform_login_page(runtime_manager: TicketRuntimeManager) -> bool:
+    """대시보드 버튼에서 로그인 페이지 열기 요청을 런타임으로 전달한다."""
+    return runtime_manager.open_witchform_login_page()
+
+
 @dataclass(frozen=True)
 class NextSpecialRuleViewState:
     trigger_type: str
@@ -627,6 +634,7 @@ class SearchResultRowState:
     goods_items: tuple[str, ...] = ()
     ticket_text: str = ""
     ticket_items: tuple[str, ...] = ()
+    order_status_text: str = ""
     received_text: str = ""
     row_bg: str = "#FFFFFF"
     goods_highlight: bool = False
@@ -797,6 +805,7 @@ def build_search_result_row_state(
         goods_items=tuple(general_goods),
         ticket_text="\n".join(ticket_goods) if ticket_goods else "-",
         ticket_items=tuple(ticket_goods),
+        order_status_text=(order.order_status or "").strip() or "-",
         received_text=order.received_at if order.received_at else "-",
         row_bg="#FFFFFF" if row_index % 2 == 0 else "#FAFAFA",
         goods_highlight=highlight_ticket_split and bool(general_goods),
@@ -816,15 +825,19 @@ def build_order_search_view_state(
     highlight_ticket_split: bool = False,
 ) -> OrderSearchViewState:
     """검색 결과 영역에 필요한 필터/피드백/행 상태를 계산한다."""
-    total = len(orders)
-    received = sum(1 for order in orders if order.is_received)
-    filter_count = format_filter_count_text(filter_value, total, received)
-
-    filtered_orders = list(orders)
-    if filter_value == "수령완료":
-        filtered_orders = [order for order in orders if order.is_received]
-    elif filter_value == "미수령":
-        filtered_orders = [order for order in orders if not order.is_received]
+    visible_orders = [
+        order
+        for order in orders
+        if (order.order_status or "").strip() in VISIBLE_ORDER_STATUSES
+    ]
+    filtered_orders = visible_orders
+    if filter_value in VISIBLE_ORDER_STATUSES:
+        filtered_orders = [
+            order
+            for order in visible_orders
+            if (order.order_status or "").strip() == filter_value
+        ]
+    filter_count = f"표시 {len(filtered_orders)}건"
 
     row_states = tuple(
         build_search_result_row_state(
@@ -1816,7 +1829,7 @@ def build_search_result_rows(
                         ),
                         3,
                     ),
-                    _build_data_cell(ft.Text(row_state.received_text, size=13), 2),
+                    _build_data_cell(ft.Text(row_state.order_status_text, size=13), 2),
                 ],
                 spacing=10,
                 vertical_alignment=ft.CrossAxisAlignment.START,
@@ -2206,7 +2219,7 @@ class DashboardFletView:
 
     def _build_page(self, page: ft.Page) -> None:
         page.title = "Ticket_AUTO Control Center"
-        page.window.width = 1440
+        page.window.width = 1800
         page.window.height = 920
         page.window.resizable = False
         page.padding = 0
@@ -2329,8 +2342,8 @@ class DashboardFletView:
             value="전체",
             options=[
                 ft.dropdown.Option("전체"),
-                ft.dropdown.Option("수령완료"),
-                ft.dropdown.Option("미수령"),
+                ft.dropdown.Option("결제완료"),
+                ft.dropdown.Option("거래종료"),
             ],
             width=120,
             height=42,
@@ -2356,7 +2369,7 @@ class DashboardFletView:
                     _build_header_cell("좌석번호", 2),
                     _build_header_cell("상품목록", 4),
                     _build_header_cell("티켓", 3),
-                    _build_header_cell("처리완료", 2),
+                    _build_header_cell("주문상태", 2),
                 ],
                 spacing=10,
             ),
@@ -2383,6 +2396,10 @@ class DashboardFletView:
         btn_relogin = ft.OutlinedButton(
             "재로그인",
             icon=ICONS.LOGIN_ROUNDED,
+        )
+        btn_open_witchform = ft.OutlinedButton(
+            "Witchform 열기",
+            icon=ICONS.OPEN_IN_NEW_ROUNDED,
         )
 
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED)
@@ -2437,6 +2454,15 @@ class DashboardFletView:
             page.snack_bar = build_dashboard_snack_bar(message, success=True)
             page.snack_bar.open = True
             safe_page_update(page, search_refresh_stop)
+
+        def _on_open_witchform(_e: ft.ControlEvent) -> None:
+            def _open() -> None:
+                opened = request_witchform_login_page(self._runtime_manager)
+                message = "로그인 페이지를 열었습니다." if opened else "티켓 확인 시작 후 로그인 페이지를 열 수 있습니다."
+                callback = _show_dashboard_success if opened else _show_dashboard_warning
+                call_page_from_thread(page, lambda: callback(message), search_refresh_stop)
+
+            threading.Thread(target=_open, daemon=True).start()
 
         def refresh_print_controls(*, search_blocked: bool = False) -> None:
             btn_buyer_print.disabled = compute_print_button_disabled(
@@ -2785,6 +2811,7 @@ class DashboardFletView:
 
         btn_start_stop.on_click = on_start
         btn_relogin.on_click = on_relogin
+        btn_open_witchform.on_click = _on_open_witchform
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
 
@@ -3179,7 +3206,7 @@ class DashboardFletView:
                 ft.Text("티켓 확인 제어", size=28, weight=ft.FontWeight.BOLD, color="#1D1D1D"),
                 ft.Container(height=8),
                 ft.Row(
-                    controls=[btn_start_stop, processed_count_reset_button],
+                    controls=[btn_start_stop, btn_open_witchform, processed_count_reset_button],
                     spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     wrap=True,

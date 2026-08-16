@@ -137,6 +137,15 @@ class Application:
         """런타임 중 카메라 디바이스를 변경한다."""
         self._scanner_view.change_camera(new_index)
 
+    def open_witchform_login_page(self) -> bool:
+        """현재 주문 페이지와 별도로 설정된 로그인 페이지를 연다."""
+        return bool(
+            self._browser_service.open_page(
+                self._browser_service.login_url,
+                preserve_current_page=True,
+            )
+        )
+
     def apply_scanner_focus_settings(self, focus_mode: str, manual_focus_value: float | None) -> str:
         """실행 중인 스캐너에 초점 설정을 즉시 반영한다."""
         normalized_value = None if manual_focus_value is None else float(manual_focus_value)
@@ -678,7 +687,12 @@ class Application:
             return
 
         if not offline_mode:
-            if not self._order_viewmodel.open_current_order_page():
+            try:
+                order_page_opened = self._order_viewmodel.open_current_order_page()
+            except Exception:
+                logger.warning("주문 상세 페이지 열기 중 예외 발생", exc_info=True)
+                order_page_opened = False
+            if not order_page_opened:
                 self._enter_error("주문 상세 페이지를 열 수 없습니다.")
                 return
 
@@ -693,7 +707,12 @@ class Application:
                 # 페이지 로딩 지연으로 인한 일시적 실패 가능성 — 1.5초 대기 후 1회 자동 재시도
                 self._enter_processing("수령 완료 처리 재시도 중...")
                 time.sleep(1.5)
-                if self._order_viewmodel.open_current_order_page():
+                try:
+                    retry_page_opened = self._order_viewmodel.open_current_order_page()
+                except Exception:
+                    logger.warning("수령 완료 재시도 페이지 열기 중 예외 발생", exc_info=True)
+                    retry_page_opened = False
+                if retry_page_opened:
                     try:
                         click_result = self._order_viewmodel.complete_receipt()
                     except Exception as exc:
@@ -747,13 +766,16 @@ class Application:
 
         self._play_scan_success_sound(order, increment_count=True, persist_count=False)
 
+        qr_auto_print_enabled = True
         try:
             # 설정 화면에서 변경된 최신 여백/템플릿 반영
             try:
                 self._receipt_settings = self._settings_store.load()
             except Exception:
                 pass
-            print_order_receipt(order, self._receipt_settings)
+            qr_auto_print_enabled = bool(getattr(self._receipt_settings, "qr_scan_auto_print_enabled", True))
+            if qr_auto_print_enabled:
+                print_order_receipt(order, self._receipt_settings)
         except Exception as exc:
             rollback_ok = self._order_viewmodel.rollback_current_order_received(previous_received)
             try:
@@ -770,7 +792,10 @@ class Application:
             return
 
         self._commit_scan_success_count()
-        self._enter_ready("수령 완료 및 영수증 출력 완료")
+        if qr_auto_print_enabled:
+            self._enter_ready("수령 완료 및 영수증 출력 완료")
+        else:
+            self._enter_ready("수령 완료 (QR 영수증 자동 출력 꺼짐)")
 
     def _recover_missing_order_number(
         self,

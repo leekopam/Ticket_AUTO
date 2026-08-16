@@ -263,6 +263,21 @@ class TicketRuntimeManager:
             return False
         return True
 
+    def open_witchform_login_page(self) -> bool:
+        """실행 중인 브라우저에서 로그인 페이지를 별도 탭으로 연다."""
+        with self._lock:
+            app = self._app
+            thread = self._thread
+
+        if not app or not thread or not thread.is_alive():
+            return False
+
+        try:
+            return bool(app.open_witchform_login_page())
+        except Exception:
+            logger.warning("로그인 페이지 열기 실패", exc_info=True)
+            return False
+
     def _run_app(self) -> None:
         app: Application | None
         with self._lock:
@@ -289,6 +304,8 @@ class TicketRuntimeManager:
     def _on_app_status(self, app_state: str, message: str) -> None:
         mapped = self._map_app_state(app_state)
         with self._lock:
+            if app_state == "ERROR" and self._thread and self._thread.is_alive():
+                mapped = "RUNNING"
             self._emit_locked(mapped, message)
 
     def _emit_locked(self, state: str, message: str) -> None:

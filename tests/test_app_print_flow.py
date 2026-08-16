@@ -62,6 +62,7 @@ class _FakeOrderViewModel:
         click_result_seq: list[ReceiptClickResult] | None = None,
         load_result: Order | None | object = _USE_DEFAULT_LOAD_RESULT,
         open_ok: bool = True,
+        open_exception: Exception | None = None,
         mark_ok: bool = True,
         rollback_ok: bool = True,
     ) -> None:
@@ -70,6 +71,7 @@ class _FakeOrderViewModel:
         self._click_result_seq: list[ReceiptClickResult] = list(click_result_seq or [])
         self.load_result = order if load_result is _USE_DEFAULT_LOAD_RESULT else load_result
         self.open_ok = open_ok
+        self.open_exception = open_exception
         self.mark_ok = mark_ok
         self.rollback_ok = rollback_ok
         self.load_calls = 0
@@ -88,6 +90,8 @@ class _FakeOrderViewModel:
 
     def open_current_order_page(self) -> bool:
         self.open_calls += 1
+        if self.open_exception is not None:
+            raise self.open_exception
         return self.open_ok
 
     def complete_receipt(self) -> ReceiptClickResult:
@@ -145,6 +149,17 @@ def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
 
 
 class AppPrintFlowTest(unittest.TestCase):
+    def test_open_witchform_login_page_uses_configured_url_without_replacing_order_page(self) -> None:
+        app = app_main.Application.__new__(app_main.Application)
+        calls: list[tuple[str, bool]] = []
+        app._browser_service = SimpleNamespace(
+            login_url="https://example.com/login",
+            open_page=lambda url, *, preserve_current_page: calls.append((url, preserve_current_page)) or True,
+        )
+
+        self.assertTrue(app.open_witchform_login_page())
+        self.assertEqual(calls, [("https://example.com/login", True)])
+
     def test_success_flow_marks_prints_and_plays_sound(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order)
@@ -168,6 +183,43 @@ class AppPrintFlowTest(unittest.TestCase):
         sound_mock.assert_called_once_with(order, increment_count=True, persist_count=False)
         commit_mock.assert_called_once_with()
         self.assertEqual(app._state, app_main.AppState.READY)
+
+    def test_qr_scan_auto_print_off_marks_order_but_skips_print_and_rollback(self) -> None:
+        order = Order(
+            order_number="ORDER-001",
+            name="홍길동",
+            phone="010",
+            seat="A-1",
+            goods=[],
+            order_status="거래중",
+        )
+        order_vm = _FakeOrderViewModel(order=order)
+        app = _build_app_with_order_vm(order_vm)
+        app._receipt_settings = SimpleNamespace(
+            qr_scan_success_sound_path="",
+            qr_scan_auto_print_enabled=False,
+        )
+        app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
+
+        with (
+            patch("main.print_order_receipt", side_effect=AssertionError("QR auto print should be skipped")) as print_mock,
+            patch.object(app, "_play_scan_success_sound") as sound_mock,
+            patch.object(app, "_commit_scan_success_count") as commit_mock,
+        ):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(order_vm.complete_calls, 1)
+        self.assertEqual(order_vm.mark_calls, 1)
+        self.assertEqual(order_vm.rollback_calls, 0)
+        print_mock.assert_not_called()
+        sound_mock.assert_called_once_with(order, increment_count=True, persist_count=False)
+        commit_mock.assert_called_once_with()
+        self.assertEqual(app._state, app_main.AppState.READY)
+        self.assertIn("자동 출력 꺼짐", app._scanner_view.status_message)
 
     def test_print_failure_rolls_back_mark(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
@@ -266,6 +318,32 @@ class AppPrintFlowTest(unittest.TestCase):
         app = _build_app_with_order_vm(order_vm)
 
         with patch("main.print_order_receipt") as print_mock, patch.object(app, "_play_scan_success_sound") as sound_mock:
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+        self.assertEqual(order_vm.open_calls, 1)
+        self.assertEqual(order_vm.complete_calls, 0)
+        self.assertEqual(order_vm.mark_calls, 0)
+        print_mock.assert_not_called()
+        sound_mock.assert_not_called()
+        self.assertEqual(app._scanner_view.status_message, "주문 상세 페이지를 열 수 없습니다.")
+
+    def test_open_current_order_page_exception_reports_recoverable_error_without_stopping_loop(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(
+            order=order,
+            open_exception=RuntimeError("작업 시간 초과: open_page"),
+        )
+        app = _build_app_with_order_vm(order_vm)
+
+        with (
+            patch("main.print_order_receipt") as print_mock,
+            patch.object(app, "_play_scan_success_sound") as sound_mock,
+        ):
             app._process_resolved_qr(
                 "https://witchform.com/qrcode_link.php?a=1",
                 BrowserResolveResult(ok=True, status_code=302, location="/x"),

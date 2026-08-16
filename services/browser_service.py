@@ -73,6 +73,8 @@ class PageOrderDiscoveryResult:
 class BrowserService:
     _RECEIPT_PRE_CONFIRM_SETTLE_MS = 120
     _RECEIPT_POST_CONFIRM_SETTLE_MS = 250
+    _LOGIN_PAGE_WAIT_UNTIL = "domcontentloaded"
+    _AUTH_STORAGE_CLEAR_SCRIPT = "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }"
 
     def __init__(
         self,
@@ -141,8 +143,26 @@ class BrowserService:
         if worker is not None:
             worker.join(timeout=15)
 
-    def open_page(self, url: str) -> None:
-        self._enqueue_task({"action": "open_page", "url": url})
+    @property
+    def login_url(self) -> str:
+        return self._login_url
+
+    def open_page(
+        self,
+        url: str,
+        timeout_sec: int = 25,
+        *,
+        preserve_current_page: bool = False,
+    ) -> bool:
+        task: dict[str, Any] = {"action": "open_page", "url": url}
+        if preserve_current_page:
+            task["preserve_current_page"] = True
+        return bool(
+            self._invoke_rpc(
+                task,
+                timeout_sec=timeout_sec,
+            )
+        )
 
     def click_receipt_button(self) -> ReceiptClickResult:
         return self._invoke_rpc({"action": "click_receipt"}, timeout_sec=30)
@@ -243,18 +263,46 @@ class BrowserService:
 
     def _worker_loop(self) -> None:
         context: BrowserContext | None = None
+        startup_started_at = time.perf_counter()
+        sync_playwright_ms = 0.0
+        launch_ms = 0.0
+        initial_login_ms = 0.0
+        clear_auth_ms = 0.0
         try:
             os.makedirs(self._user_data_dir, exist_ok=True)
 
+            sync_started_at = time.perf_counter()
             with sync_playwright() as p:
+                sync_playwright_ms = self._elapsed_ms(sync_started_at)
+                launch_started_at = time.perf_counter()
                 context = p.chromium.launch_persistent_context(
                     user_data_dir=self._user_data_dir,
                     headless=self._headless,
                 )
+                launch_ms = self._elapsed_ms(launch_started_at)
                 self._context = context
-                self._open_initial_witchform_page()
+
                 if self._require_login_each_run:
-                    self._handle_clear_auth_state_for_domain()
+                    clear_started_at = time.perf_counter()
+                    self._clear_witchform_cookies()
+                    clear_auth_ms += self._elapsed_ms(clear_started_at)
+
+                initial_login_started_at = time.perf_counter()
+                self._open_initial_witchform_page()
+                initial_login_ms = self._elapsed_ms(initial_login_started_at)
+
+                if self._require_login_each_run:
+                    storage_clear_started_at = time.perf_counter()
+                    self._clear_witchform_storage_on_auth_page()
+                    clear_auth_ms += self._elapsed_ms(storage_clear_started_at)
+
+                self._print_startup_timing(
+                    total_ms=self._elapsed_ms(startup_started_at),
+                    sync_playwright_ms=sync_playwright_ms,
+                    launch_ms=launch_ms,
+                    initial_login_ms=initial_login_ms,
+                    clear_auth_ms=clear_auth_ms,
+                )
                 self._ready_event.set()
 
                 while True:
@@ -292,7 +340,10 @@ class BrowserService:
                 finish(True, None)
                 return
             if action == "open_page":
-                self._handle_open_page(task["url"])
+                self._handle_open_page(
+                    task["url"],
+                    preserve_current_page=bool(task.get("preserve_current_page")),
+                )
                 finish(True, None)
                 return
             if action == "click_receipt":
@@ -348,17 +399,23 @@ class BrowserService:
                 return
             finish(None, str(exc))
 
-    def _handle_open_page(self, url: str) -> None:
+    def _handle_open_page(self, url: str, *, preserve_current_page: bool = False) -> None:
         if not self._context:
             raise RuntimeError("브라우저 컨텍스트가 준비되지 않았습니다.")
 
-        self._close_current_page()
-        self._current_page = self._context.new_page()
-        try:
-            self._current_page.goto(url, timeout=15000)
-        except Exception:
+        if not preserve_current_page:
             self._close_current_page()
+        opened_page = self._context.new_page()
+        try:
+            opened_page.goto(url, timeout=15000)
+        except Exception:
+            try:
+                opened_page.close()
+            except Exception:
+                pass
             raise
+        if not preserve_current_page:
+            self._current_page = opened_page
         print(f"PAGE_OPEN {url}")
 
     def _handle_click_receipt(self) -> ReceiptClickResult:
@@ -803,7 +860,7 @@ class BrowserService:
             break
 
         self._auth_page = reusable_page or self._context.new_page()
-        self._auth_page.goto(self._login_url, timeout=15000)
+        self._navigate_login_page(self._auth_page)
 
     def _open_initial_witchform_page(self) -> None:
         """윗치폼 로그인 페이지만 열고 시작 시 빈 탭을 제거합니다."""
@@ -817,7 +874,7 @@ class BrowserService:
             target_page = self._context.new_page()
 
         try:
-            target_page.goto(self._login_url, timeout=15000)
+            self._navigate_login_page(target_page)
         except Exception as exc:
             self._warn(f"INITIAL_LOGIN_GOTO_FAILED: {exc}")
         self._auth_page = target_page
@@ -835,11 +892,7 @@ class BrowserService:
         if not self._context:
             return False
 
-        for domain in (".witchform.com", "witchform.com"):
-            try:
-                self._context.clear_cookies(domain=domain)
-            except Exception as exc:
-                self._warn(f"CLEAR_COOKIES_FAILED domain={domain}: {exc}")
+        self._clear_witchform_cookies()
 
         if self._auth_page and not self._auth_page.is_closed():
             target_page = self._auth_page
@@ -852,13 +905,11 @@ class BrowserService:
             target_page = self._context.new_page()
 
         try:
-            target_page.goto(self._login_url, timeout=15000)
-            target_page.evaluate(
-                "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }"
-            )
+            self._navigate_login_page(target_page)
         except Exception as exc:
             self._warn(f"AUTH_STATE_LOGIN_PREP_FAILED: {exc}")
         self._auth_page = target_page
+        self._clear_witchform_storage_on_auth_page()
 
         for page in list(self._context.pages):
             if page.is_closed() or page == target_page:
@@ -869,6 +920,52 @@ class BrowserService:
                 self._warn(f"AUTH_STATE_EXTRA_PAGE_CLOSE_FAILED: {exc}")
 
         return True
+
+    def _navigate_login_page(self, page: Page) -> None:
+        page.goto(
+            self._login_url,
+            timeout=15000,
+            wait_until=self._LOGIN_PAGE_WAIT_UNTIL,
+        )
+
+    def _clear_witchform_cookies(self) -> None:
+        if not self._context:
+            return
+        for domain in (".witchform.com", "witchform.com"):
+            try:
+                self._context.clear_cookies(domain=domain)
+            except Exception as exc:
+                self._warn(f"CLEAR_COOKIES_FAILED domain={domain}: {exc}")
+
+    def _clear_witchform_storage_on_auth_page(self) -> None:
+        if not self._auth_page or self._auth_page.is_closed():
+            return
+        try:
+            self._auth_page.evaluate(self._AUTH_STORAGE_CLEAR_SCRIPT)
+        except Exception as exc:
+            self._warn(f"AUTH_STATE_STORAGE_CLEAR_FAILED: {exc}")
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> float:
+        return (time.perf_counter() - started_at) * 1000
+
+    @staticmethod
+    def _print_startup_timing(
+        *,
+        total_ms: float,
+        sync_playwright_ms: float,
+        launch_ms: float,
+        initial_login_ms: float,
+        clear_auth_ms: float,
+    ) -> None:
+        print(
+            "BROWSER_STARTUP_TIMING "
+            f"total_ms={total_ms:.1f} "
+            f"sync_playwright_ms={sync_playwright_ms:.1f} "
+            f"launch_ms={launch_ms:.1f} "
+            f"initial_login_ms={initial_login_ms:.1f} "
+            f"clear_auth_ms={clear_auth_ms:.1f}"
+        )
 
     def _handle_request_relogin(self) -> bool:
         """런타임 중에 안전하게 호출할 수 있는 재로그인 트리거(Public runtime-safe relogin trigger)입니다."""

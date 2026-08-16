@@ -7,11 +7,14 @@ import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from models.order_model import Order
 from services.browser_service import BrowserService, PageOrderDiscoveryResult, ReceiptClickResult
+from viewmodels.order_viewmodel import OrderViewModel
 
 
 class _FakePage:
@@ -256,6 +259,23 @@ class BrowserReceiptResultContractTest(unittest.TestCase):
         self.assertIs(service._current_page, next_page)
         self.assertEqual(next_page.goto_calls, [("https://example.com/orders/1", 15000)])
 
+    def test_handle_open_page_preserves_active_order_page_for_independent_login(self) -> None:
+        service = self._build_service()
+        order_page = _FakePage()
+        login_page = _FakePage()
+        service._current_page = order_page
+        service._context = _FakeContext(
+            _FakeRequest(response=_FakeResponse(status=200, url="https://example.com")),
+            new_pages=[login_page],
+        )
+
+        with redirect_stdout(io.StringIO()):
+            service._handle_open_page("https://example.com/login", preserve_current_page=True)
+
+        self.assertEqual(order_page.close_calls, 0)
+        self.assertIs(service._current_page, order_page)
+        self.assertEqual(login_page.goto_calls, [("https://example.com/login", 15000)])
+
     def test_handle_open_page_still_opens_new_page_when_previous_close_fails(self) -> None:
         service = self._build_service()
         previous_page = _FakePage(close_error=RuntimeError("close failed"))
@@ -439,17 +459,96 @@ class BrowserReceiptResultContractTest(unittest.TestCase):
 
         self.assertTrue(service._task_queue.empty())
 
-    def test_open_page_enqueues_task_when_service_is_running(self) -> None:
+    def test_open_page_uses_bounded_rpc_when_service_is_running(self) -> None:
         service = BrowserService.__new__(BrowserService)
         service._is_running = True
+        service._accepting_requests = True
         service._task_queue = queue.Queue()
+        service._lifecycle_lock = threading.Lock()
+        calls: list[tuple[dict[str, object], int]] = []
 
-        service.open_page("https://example.com")
+        def _fake_invoke_rpc(task: dict[str, object], timeout_sec: int) -> bool:
+            calls.append((dict(task), timeout_sec))
+            return True
 
+        service._invoke_rpc = _fake_invoke_rpc
+
+        result = service.open_page("https://example.com")
+
+        self.assertTrue(result)
         self.assertEqual(
-            service._task_queue.get_nowait(),
-            {"action": "open_page", "url": "https://example.com"},
+            calls,
+            [({"action": "open_page", "url": "https://example.com"}, 25)],
         )
+
+    def test_open_page_raises_worker_navigation_failure_to_caller(self) -> None:
+        service = self._build_service()
+        failing_page = _FakePage(goto_error=RuntimeError("goto failed"))
+        service._context = _FakeContext(
+            _FakeRequest(response=_FakeResponse(status=200, url="https://example.com")),
+            new_pages=[failing_page],
+        )
+        service._accepting_requests = True
+        service._task_queue = queue.Queue()
+        service._lifecycle_lock = threading.Lock()
+
+        def _worker_once() -> None:
+            task = service._task_queue.get(timeout=1)
+            service._dispatch_task(task)
+
+        worker_thread = threading.Thread(target=_worker_once, daemon=True)
+        worker_thread.start()
+
+        raised: RuntimeError | None = None
+        try:
+            service.open_page("https://example.com/orders/3")
+        except RuntimeError as exc:
+            raised = exc
+
+        worker_thread.join(timeout=1)
+        self.assertFalse(worker_thread.is_alive())
+        self.assertIsNotNone(raised)
+        self.assertIn("goto failed", str(raised))
+        self.assertEqual(failing_page.close_calls, 1)
+        self.assertIsNone(service._current_page)
+
+    def test_order_viewmodel_open_current_order_page_surfaces_browser_navigation_failure(self) -> None:
+        service = self._build_service()
+        failing_page = _FakePage(goto_error=RuntimeError("restricted page timeout"))
+        service._context = _FakeContext(
+            _FakeRequest(response=_FakeResponse(status=200, url="https://example.com")),
+            new_pages=[failing_page],
+        )
+        service._accepting_requests = True
+        service._task_queue = queue.Queue()
+        service._lifecycle_lock = threading.Lock()
+        order_viewmodel = OrderViewModel(SimpleNamespace(), service)
+        order_viewmodel._current_order = Order(
+            order_number="ORDER-001",
+            name="Test",
+            phone="010",
+            seat="A-1",
+            goods=[],
+            url="https://example.com/orders/restricted",
+        )
+
+        def _worker_once() -> None:
+            task = service._task_queue.get(timeout=1)
+            service._dispatch_task(task)
+
+        worker_thread = threading.Thread(target=_worker_once, daemon=True)
+        worker_thread.start()
+
+        raised: RuntimeError | None = None
+        try:
+            order_viewmodel.open_current_order_page()
+        except RuntimeError as exc:
+            raised = exc
+
+        worker_thread.join(timeout=1)
+        self.assertFalse(worker_thread.is_alive())
+        self.assertIsNotNone(raised)
+        self.assertIn("restricted page timeout", str(raised))
 
     def test_order_discovery_log_masks_buyer_contact(self) -> None:
         service = BrowserService.__new__(BrowserService)
