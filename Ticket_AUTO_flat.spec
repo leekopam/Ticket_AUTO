@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
+from build_support.playwright_browsers import collect_playwright_browser_datas
+
 datas = [('Resources\\templates', 'Resources\\templates'), ('Resources\\data', 'Resources\\data'), ('receipt_form.json', '.')]
 binaries = []
 hiddenimports = []
@@ -8,6 +10,7 @@ tmp_ret = collect_all('flet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('playwright')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+datas += collect_playwright_browser_datas()
 tmp_ret = collect_all('pyzbar')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('qrcode')

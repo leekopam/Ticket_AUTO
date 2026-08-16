@@ -220,6 +220,28 @@ class AppSettingsModalContractTest(unittest.TestCase):
             self.assertEqual(saved.scanner_focus_mode, "manual")
             self.assertEqual(saved.scanner_manual_focus_value, 8.5)
 
+    def test_receipt_sidebar_settings_panel_persists_qr_auto_print_switch(self) -> None:
+        try:
+            from services.receipt_settings_store import ReceiptSettingsStore
+            from views.settings_flet_view import build_receipt_sidebar_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        with TemporaryDirectory() as temp_dir:
+            store_path = str(Path(temp_dir) / "receipt_settings.json")
+            panel = build_receipt_sidebar_settings_panel(_StubPage(), store_path=store_path)
+
+            qr_auto_print_switch = self._find_control_by_label(panel, "QR 스캔 시 영수증 자동 출력")
+
+            self.assertIsNotNone(qr_auto_print_switch)
+            self.assertTrue(qr_auto_print_switch.value)
+
+            qr_auto_print_switch.value = False
+            qr_auto_print_switch.on_change(SimpleNamespace(control=qr_auto_print_switch))
+
+            saved = ReceiptSettingsStore(store_path).load()
+            self.assertFalse(saved.qr_scan_auto_print_enabled)
+
     def test_app_settings_panel_applies_scanner_focus_settings_to_runtime_callback(self) -> None:
         try:
             from views.settings_flet_view import build_app_settings_panel

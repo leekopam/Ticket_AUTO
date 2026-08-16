@@ -84,6 +84,31 @@ class TestScannerAsyncStart(unittest.TestCase):
 
         scanner.release()
 
+    def test_is_camera_ready_true_after_open_while_focus_is_still_running(self):
+        """카메라 open 직후에는 느린 초점 설정이 끝나기 전에도 ready가 된다."""
+        fake_cap = _FakeCapture()
+        focus_started = threading.Event()
+        release_focus = threading.Event()
+
+        def delayed_focus(_cap):
+            focus_started.set()
+            release_focus.wait(timeout=5)
+            return True
+
+        scanner = ScannerView()
+        try:
+            with (
+                patch.object(ScannerView, "_open_camera_with_fallback", return_value=(fake_cap, "DEFAULT")),
+                patch.object(scanner, "_configure_focus_for_capture", side_effect=delayed_focus),
+            ):
+                scanner.start()
+
+                self.assertTrue(focus_started.wait(timeout=1.0))
+                self.assertTrue(scanner.is_camera_ready())
+        finally:
+            release_focus.set()
+            scanner.release()
+
     def test_start_sets_reconnecting_status(self):
         """start() 호출 시 '카메라 재연결 중' 상태를 설정한다."""
         scanner = ScannerView()

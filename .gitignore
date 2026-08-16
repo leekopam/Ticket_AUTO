@@ -8,3 +8,15 @@ Resources/data/
 session.txt
 dist/
 build/
+
+# Generated private Graphify outputs
+graphify-out/
+
+# Local private workflow files (Machine_Spirit docs/evidence)
+docs/Machine_Spirit/
+Docs/Machine_Spirit/
+DOCS/Machine_Spirit/
+
+# Private AI worklogs and conversation archives (current-tree cleanup)
+docs/ai-worklog/
+docs/project-root/docs/ai-worklog/

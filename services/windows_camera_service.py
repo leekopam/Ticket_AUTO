@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import subprocess
+import threading
 import time
 from typing import Iterator
 
@@ -23,10 +24,13 @@ class WindowsCameraService:
     """Enumerate camera devices for the Windows desktop app."""
 
     _WMI_CACHE_TTL_SEC = 10.0
+    _OPENCV_PROBE_CACHE_TTL_SEC = 2.0
 
     def __init__(self) -> None:
         self._cached_wmi_names: list[str] | None = None
         self._cached_wmi_names_at = 0.0
+        self._opencv_probe_lock = threading.Lock()
+        self._cached_opencv_indices: dict[tuple[int, int | None], tuple[float, list[int]]] = {}
 
     def list_cameras(self, *, max_index: int = 9) -> list[CameraDevice]:
         """Return usable camera devices.
@@ -37,7 +41,7 @@ class WindowsCameraService:
         """
         wmi_names = self._get_cached_wmi_camera_names()
         target_count = len(wmi_names) if wmi_names else None
-        openable_indices = self._probe_opencv_indices(
+        openable_indices = self._get_cached_opencv_indices(
             max_index=max_index,
             target_count=target_count,
         )
@@ -63,6 +67,47 @@ class WindowsCameraService:
         self._cached_wmi_names = list(names)
         self._cached_wmi_names_at = now
         return list(names)
+
+    def _get_cached_opencv_indices(
+        self,
+        *,
+        max_index: int,
+        target_count: int | None,
+    ) -> list[int]:
+        cache_key = (max_index, target_count)
+        now = time.monotonic()
+        cached = self._cached_opencv_indices.get(cache_key)
+        if cached is not None:
+            cached_at, cached_indices = cached
+            if (now - cached_at) < self._OPENCV_PROBE_CACHE_TTL_SEC:
+                print(
+                    "CAMERA_LIST_PROBE_CACHE_HIT "
+                    f"max_index={max_index} target_count={target_count} count={len(cached_indices)}"
+                )
+                return list(cached_indices)
+
+        with self._opencv_probe_lock:
+            now = time.monotonic()
+            cached = self._cached_opencv_indices.get(cache_key)
+            if cached is not None:
+                cached_at, cached_indices = cached
+                if (now - cached_at) < self._OPENCV_PROBE_CACHE_TTL_SEC:
+                    print(
+                        "CAMERA_LIST_PROBE_CACHE_HIT "
+                        f"max_index={max_index} target_count={target_count} count={len(cached_indices)}"
+                    )
+                    return list(cached_indices)
+
+            probe_start = time.perf_counter()
+            indices = self._probe_opencv_indices(max_index=max_index, target_count=target_count)
+            probe_ms = (time.perf_counter() - probe_start) * 1000.0
+            self._cached_opencv_indices[cache_key] = (time.monotonic(), list(indices))
+            print(
+                "CAMERA_LIST_PROBE_TIMING "
+                f"max_index={max_index} target_count={target_count} "
+                f"count={len(indices)} probe_ms={probe_ms:.1f}"
+            )
+            return list(indices)
 
     @staticmethod
     def _probe_opencv_indices(

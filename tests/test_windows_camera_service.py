@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -88,6 +90,66 @@ class WindowsCameraServiceTest(unittest.TestCase):
             [
                 CameraDevice(index=2, name="카메라 2"),
                 CameraDevice(index=4, name="카메라 4"),
+            ],
+        )
+
+    def test_list_cameras_reuses_recent_opencv_probe_result(self) -> None:
+        service = WindowsCameraService()
+
+        with (
+            patch.object(service, "_get_wmi_camera_names", return_value=[]),
+            patch.object(service, "_probe_opencv_indices", return_value=[0]) as probe,
+        ):
+            first = service.list_cameras()
+            second = service.list_cameras()
+
+        self.assertEqual(first, [CameraDevice(index=0, name="카메라 0")])
+        self.assertEqual(second, [CameraDevice(index=0, name="카메라 0")])
+        probe.assert_called_once_with(max_index=9, target_count=None)
+
+    def test_list_cameras_suppresses_duplicate_inflight_opencv_probe(self) -> None:
+        service = WindowsCameraService()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        results: list[list[CameraDevice]] = []
+        errors: list[Exception] = []
+
+        def slow_probe(*, max_index: int = 9, target_count: int | None = None) -> list[int]:
+            probe_started.set()
+            release_probe.wait(timeout=5)
+            return [1]
+
+        def load_cameras() -> None:
+            try:
+                results.append(service.list_cameras())
+            except Exception as exc:  # pragma: no cover - assertion below reports it
+                errors.append(exc)
+
+        with (
+            patch.object(service, "_get_wmi_camera_names", return_value=[]),
+            patch.object(service, "_probe_opencv_indices", side_effect=slow_probe) as probe,
+        ):
+            first_thread = threading.Thread(target=load_cameras)
+            second_thread = threading.Thread(target=load_cameras)
+            first_thread.start()
+            self.assertTrue(probe_started.wait(timeout=1.0))
+            second_thread.start()
+            time.sleep(0.05)
+            inflight_call_count = probe.call_count
+            release_probe.set()
+            first_thread.join(timeout=2.0)
+            second_thread.join(timeout=2.0)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(inflight_call_count, 1)
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(
+            results,
+            [
+                [CameraDevice(index=1, name="카메라 1")],
+                [CameraDevice(index=1, name="카메라 1")],
             ],
         )
 

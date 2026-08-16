@@ -356,6 +356,7 @@ class ScannerView:
     """Flet 미리보기 포워딩 기능(Preview forwarding)이 있는 간단한 원본 프레임(Raw-frame) QR 스캔 루프를 실행합니다."""
 
     _JPEG_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 70]
+    _last_successful_camera_backend_by_index: dict[int, int | None] = {}
 
     def __init__(
         self,
@@ -376,6 +377,7 @@ class ScannerView:
         self._runtime_status_message = _STATUS_READY
 
         self._lock = threading.Lock()
+        self._capture_io_lock = threading.Lock()
         self._start_complete = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._qr_queue: queue.Queue[str] = queue.Queue(maxsize=10)
@@ -394,6 +396,8 @@ class ScannerView:
         self._consecutive_read_failures = 0
         self._camera_warmup_until = 0.0
         self._last_successful_frame_at = 0.0
+        self._camera_cap_ready_at = 0.0
+        self._camera_first_frame_timing_logged = True
         self._active_exposure_mode = "default"
         self._applied_exposure_mode = "default"
         self._focus_mode: FocusMode = "manual" if focus_mode == "manual" and manual_focus_value is not None else "auto"
@@ -413,6 +417,8 @@ class ScannerView:
         self._start_complete.clear()
         self._cap = None
         self._camera_backend_name = None
+        self._camera_cap_ready_at = 0.0
+        self._camera_first_frame_timing_logged = True
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
         self._is_running = True
         self._worker_thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -469,12 +475,13 @@ class ScannerView:
             focus_mode = self._focus_mode
             manual_focus_value = self._manual_focus_value
 
-        applied = apply_focus_mode(
-            cap,
-            capability,
-            mode=focus_mode,
-            manual_focus_value=manual_focus_value,
-        )
+        with self._capture_io_lock:
+            applied = apply_focus_mode(
+                cap,
+                capability,
+                mode=focus_mode,
+                manual_focus_value=manual_focus_value,
+            )
         return applied
 
     def set_focus_mode(self, mode: FocusMode) -> bool:
@@ -493,12 +500,13 @@ class ScannerView:
             with self._lock:
                 self._focus_capability = capability
 
-        applied = apply_focus_mode(
-            cap,
-            capability,
-            mode=normalized_mode,
-            manual_focus_value=manual_focus_value,
-        )
+        with self._capture_io_lock:
+            applied = apply_focus_mode(
+                cap,
+                capability,
+                mode=normalized_mode,
+                manual_focus_value=manual_focus_value,
+            )
         logger.info("초점 모드 변경: mode=%s, value=%s, applied=%s", normalized_mode, manual_focus_value, applied)
         return applied
 
@@ -518,12 +526,13 @@ class ScannerView:
             with self._lock:
                 self._focus_capability = capability
 
-        applied = apply_focus_mode(
-            cap,
-            capability,
-            mode="manual",
-            manual_focus_value=normalized_value,
-        )
+        with self._capture_io_lock:
+            applied = apply_focus_mode(
+                cap,
+                capability,
+                mode="manual",
+                manual_focus_value=normalized_value,
+            )
         logger.info("수동 초점 값 변경: value=%s, applied=%s", normalized_value, applied)
         return applied
 
@@ -581,7 +590,8 @@ class ScannerView:
                 continue
 
             try:
-                ret, frame = cap.read()
+                with self._capture_io_lock:
+                    ret, frame = cap.read()
             except cv2.error as exc:
                 print(f"CAMERA_READ_EXCEPTION error={exc}")
                 ret, frame = False, None
@@ -617,10 +627,26 @@ class ScannerView:
                     time.sleep(_CAMERA_READ_RETRY_SEC)
                 continue
 
+            frame_success_at = time.monotonic()
             with self._lock:
                 self._consecutive_read_failures = 0
                 self._camera_warmup_until = 0.0
-                self._last_successful_frame_at = time.monotonic()
+                self._last_successful_frame_at = frame_success_at
+                cap_ready_at = self._camera_cap_ready_at
+                backend_name = self._camera_backend_name or "UNKNOWN"
+                should_log_first_frame = (
+                    cap_ready_at > 0.0 and not self._camera_first_frame_timing_logged
+                )
+                if should_log_first_frame:
+                    self._camera_first_frame_timing_logged = True
+            if should_log_first_frame:
+                first_frame_ms = max(0.0, (frame_success_at - cap_ready_at) * 1000.0)
+                print(
+                    "CAMERA_FIRST_FRAME_TIMING "
+                    f"camera_index={self._camera_index} "
+                    f"backend={backend_name} "
+                    f"first_frame_ms={first_frame_ms:.1f}"
+                )
             self._clear_camera_status()
             preview_frame, decode_frame = split_capture_frame(frame)
             preview_frame = build_preview_frame(preview_frame)
@@ -668,6 +694,8 @@ class ScannerView:
             return
 
     def _attempt_camera_reopen(self, now: float, *, reason: str) -> bool:
+        reopen_start = time.perf_counter()
+        release_ms = 0.0
         with self._lock:
             if (now - self._last_camera_reopen_at) < _CAMERA_REOPEN_COOLDOWN_SEC:
                 return False
@@ -675,36 +703,67 @@ class ScannerView:
             old_cap = self._cap
             self._cap = None
             self._camera_backend_name = None
+            self._camera_cap_ready_at = 0.0
+            self._camera_first_frame_timing_logged = True
 
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
         if old_cap is not None:
+            release_start = time.perf_counter()
             try:
-                old_cap.release()
+                with self._capture_io_lock:
+                    old_cap.release()
             except Exception:
                 pass
             time.sleep(_CAMERA_REOPEN_RELEASE_SETTLE_SEC)
+            release_ms = (time.perf_counter() - release_start) * 1000.0
+
         verbose_open = reason != "read_failure"
+        open_start = time.perf_counter()
         try:
             new_cap, backend_name = self._open_camera_with_fallback(self._camera_index, verbose=verbose_open)
         except TypeError as exc:
             if "verbose" not in str(exc):
                 raise
             new_cap, backend_name = self._open_camera_with_fallback(self._camera_index)
+        open_ms = (time.perf_counter() - open_start) * 1000.0
         if new_cap is None:
+            total_ms = (time.perf_counter() - reopen_start) * 1000.0
+            print(
+                "CAMERA_REOPEN_TIMING "
+                f"reason={reason} outcome=fail camera_index={self._camera_index} "
+                f"backend=NONE release_ms={release_ms:.1f} open_ms={open_ms:.1f} "
+                f"cap_ready_ms=0.0 focus_ms=0.0 total_ms={total_ms:.1f}"
+            )
             self._log_camera_reopen_event(now, f"CAMERA_REOPEN_FAIL reason={reason}")
             return False
 
-        self._configure_focus_for_capture(new_cap)
-
+        cap_ready_perf = time.perf_counter()
+        cap_ready_at = time.monotonic()
+        cap_ready_ms = (cap_ready_perf - reopen_start) * 1000.0
         with self._lock:
             self._cap = new_cap
             self._camera_backend_name = backend_name
             self._consecutive_read_failures = 0
-            self._camera_warmup_until = time.monotonic() + _CAMERA_READ_WARMUP_SEC
+            self._camera_warmup_until = cap_ready_at + _CAMERA_READ_WARMUP_SEC
             self._last_successful_frame_at = 0.0
+            self._camera_cap_ready_at = cap_ready_at
+            self._camera_first_frame_timing_logged = False
 
         self._clear_camera_status()
-        self._log_camera_reopen_event(now, f"CAMERA_REOPEN_OK reason={reason}")
+        focus_start = time.perf_counter()
+        focus_applied = self._configure_focus_for_capture(new_cap)
+        focus_ms = (time.perf_counter() - focus_start) * 1000.0
+        total_ms = (time.perf_counter() - reopen_start) * 1000.0
+        selected_backend = backend_name or "UNKNOWN"
+        print(
+            "CAMERA_REOPEN_TIMING "
+            f"reason={reason} outcome=ok camera_index={self._camera_index} "
+            f"backend={selected_backend} release_ms={release_ms:.1f} "
+            f"open_ms={open_ms:.1f} cap_ready_ms={cap_ready_ms:.1f} "
+            f"focus_ms={focus_ms:.1f} total_ms={total_ms:.1f} "
+            f"focus_applied={bool(focus_applied)}"
+        )
+        self._log_camera_reopen_event(now, f"CAMERA_REOPEN_OK reason={reason} backend={selected_backend}")
         return True
 
     @classmethod
@@ -714,17 +773,41 @@ class ScannerView:
         *,
         verbose: bool = True,
     ) -> tuple[cv2.VideoCapture | None, str | None]:
-        cap = cls._open_camera(camera_index, verbose=verbose)
+        cap, backend_name = cls._open_camera(camera_index, verbose=verbose)
         if cap is None:
             return None, None
         if verbose:
-            print("CAMERA_BACKEND_SELECTED backend=DEFAULT")
-        return cap, "DEFAULT"
+            print(f"CAMERA_BACKEND_SELECTED camera_index={camera_index} backend={backend_name}")
+        return cap, backend_name
 
     @staticmethod
-    def _open_camera(camera_index: int, *, verbose: bool = True) -> cv2.VideoCapture | None:
-        # DirectShow 백엔드를 우선 사용하여 초기화 속도를 단축한다.
-        for backend in (cv2.CAP_DSHOW, None):
+    def _camera_backend_name(backend: int | None) -> str:
+        return "DSHOW" if backend is not None else "DEFAULT_FALLBACK"
+
+    @classmethod
+    def _camera_backend_attempt_order(cls, camera_index: int) -> tuple[int | None, ...]:
+        default_order: tuple[int | None, ...] = (cv2.CAP_DSHOW, None)
+        if camera_index not in cls._last_successful_camera_backend_by_index:
+            return default_order
+        cached_backend = cls._last_successful_camera_backend_by_index[camera_index]
+        return (cached_backend, *tuple(backend for backend in default_order if backend != cached_backend))
+
+    @classmethod
+    def _open_camera(
+        cls,
+        camera_index: int,
+        *,
+        verbose: bool = True,
+    ) -> tuple[cv2.VideoCapture | None, str | None]:
+        # DirectShow 백엔드를 우선 사용하되, 같은 카메라에서 직전 성공 백엔드가 있으면 먼저 재시도한다.
+        for backend in cls._camera_backend_attempt_order(camera_index):
+            backend_name = cls._camera_backend_name(backend)
+            constructor_error = False
+            is_opened_error = False
+            buffer_error = False
+            cap = None
+
+            constructor_start = time.perf_counter()
             try:
                 cap = (
                     cv2.VideoCapture(camera_index, backend)
@@ -732,19 +815,60 @@ class ScannerView:
                     else cv2.VideoCapture(camera_index)
                 )
             except Exception:
-                continue
-            if cap and cap.isOpened():
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if verbose and backend is not None:
-                    print(f"CAMERA_OPEN_OK backend=DSHOW")
-                elif verbose:
-                    print(f"CAMERA_OPEN_OK backend=DEFAULT_FALLBACK")
-                return cap
-            try:
-                cap.release()
-            except Exception:
-                pass
-        return None
+                constructor_error = True
+            constructor_ms = (time.perf_counter() - constructor_start) * 1000.0
+
+            opened = False
+            is_opened_ms = 0.0
+            if cap is not None:
+                is_opened_start = time.perf_counter()
+                try:
+                    opened = bool(cap.isOpened())
+                except Exception:
+                    opened = False
+                    is_opened_error = True
+                is_opened_ms = (time.perf_counter() - is_opened_start) * 1000.0
+
+            buffer_ms = 0.0
+            release_ms = 0.0
+            if cap is not None and opened:
+                buffer_start = time.perf_counter()
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    buffer_error = True
+                buffer_ms = (time.perf_counter() - buffer_start) * 1000.0
+                cls._last_successful_camera_backend_by_index[camera_index] = backend
+                if verbose:
+                    print(
+                        "CAMERA_OPEN_TIMING "
+                        f"camera_index={camera_index} backend={backend_name} opened=true "
+                        f"constructor_ms={constructor_ms:.1f} is_opened_ms={is_opened_ms:.1f} "
+                        f"buffer_ms={buffer_ms:.1f} release_ms=0.0 "
+                        f"constructor_error={constructor_error} is_opened_error={is_opened_error} "
+                        f"buffer_error={buffer_error}"
+                    )
+                    print(f"CAMERA_OPEN_OK camera_index={camera_index} backend={backend_name}")
+                return cap, backend_name
+
+            if cap is not None:
+                release_start = time.perf_counter()
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                release_ms = (time.perf_counter() - release_start) * 1000.0
+
+            if verbose:
+                print(
+                    "CAMERA_OPEN_TIMING "
+                    f"camera_index={camera_index} backend={backend_name} opened=false "
+                    f"constructor_ms={constructor_ms:.1f} is_opened_ms={is_opened_ms:.1f} "
+                    f"buffer_ms={buffer_ms:.1f} release_ms={release_ms:.1f} "
+                    f"constructor_error={constructor_error} is_opened_error={is_opened_error} "
+                    f"buffer_error={buffer_error}"
+                )
+        return None, None
 
     @classmethod
     def _decode_qr(cls, frame: np.ndarray) -> str | None:
@@ -981,11 +1105,14 @@ class ScannerView:
             old_cap = self._cap
             self._cap = None
             self._camera_backend_name = None
+            self._camera_cap_ready_at = 0.0
+            self._camera_first_frame_timing_logged = True
 
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
         if old_cap is not None:
             try:
-                old_cap.release()
+                with self._capture_io_lock:
+                    old_cap.release()
             except Exception:
                 pass
 
@@ -997,9 +1124,12 @@ class ScannerView:
 
         if self._cap:
             try:
-                self._cap.release()
+                with self._capture_io_lock:
+                    self._cap.release()
             except Exception:
                 pass
             self._cap = None
         self._camera_backend_name = None
+        self._camera_cap_ready_at = 0.0
+        self._camera_first_frame_timing_logged = True
         self._clear_camera_status()

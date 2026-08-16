@@ -95,6 +95,20 @@ class _RequestStopSignalsThenExplodesApplication(_FakeApplication):
         raise RuntimeError("stop boom after signal")
 
 
+class _RecoverableErrorApplication(_FakeApplication):
+    def run(self):
+        if self.listener:
+            self.listener("STARTING", "시작 중")
+            self.listener("READY", "준비됨")
+        self.running_event.set()
+        if self.listener:
+            self.listener("ERROR", "주문번호 조회 권한을 확인할 수 없습니다")
+        while not self.stop_event.is_set():
+            time.sleep(0.01)
+        if self.listener:
+            self.listener("STOPPED", "중지됨")
+
+
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -140,6 +154,25 @@ class RuntimeManagerTest(unittest.TestCase):
         self.assertTrue(_wait_until(lambda: manager.is_running))
         self.assertTrue(manager.relogin())
         self.assertTrue(_wait_until(lambda: "RECOVERING" in events))
+
+        self.assertTrue(manager.stop())
+
+    def test_recoverable_app_error_keeps_live_runtime_stop_capable(self) -> None:
+        app = _RecoverableErrorApplication()
+        manager = TicketRuntimeManager(app_factory=lambda: app)
+        events: list[tuple[str, str]] = []
+        manager.subscribe(lambda state, message, _ts: events.append((state, message)))
+
+        self.assertTrue(manager.start())
+        self.assertTrue(
+            _wait_until(
+                lambda: ("RUNNING", "주문번호 조회 권한을 확인할 수 없습니다") in events
+            )
+        )
+
+        self.assertTrue(manager.is_running)
+        self.assertEqual(manager.state, "RUNNING")
+        self.assertNotIn("ERROR", [state for state, _message in events])
 
         self.assertTrue(manager.stop())
 

@@ -1132,6 +1132,7 @@ def _build_receipt_ticket_settings_panel(
 
 def _build_receipt_sidebar_output_panel(
     *,
+    qr_auto_print_switch: ft.Control,
     product_receipt_switch: ft.Control,
 ) -> ft.Container:
     return ft.Container(
@@ -1142,6 +1143,25 @@ def _build_receipt_sidebar_output_panel(
         padding=20,
         content=ft.Column(
             controls=[
+                ft.Container(
+                    bgcolor=SETTINGS_CARD_BG,
+                    border_radius=16,
+                    border=ft.border.all(1, SETTINGS_CARD_BORDER),
+                    padding=16,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text("QR 스캔 시 영수증 자동 출력", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text(
+                                "끄면 QR 수령 처리는 완료하고 영수증 출력만 건너뜁니다.",
+                                size=12,
+                                color="#64748B",
+                            ),
+                            qr_auto_print_switch,
+                        ],
+                        spacing=10,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ),
                 ft.Container(
                     bgcolor=SETTINGS_CARD_BG,
                     border_radius=16,
@@ -3509,6 +3529,7 @@ def build_receipt_settings_panel(
             margin_bottom=max(0, _coerce_int(margin_bottom_field.value, 0)),
             printer_dpi=_current_dpi(),
             print_product_receipt=bool(getattr(settings_store.load(), "print_product_receipt", False)),
+            qr_scan_auto_print_enabled=bool(getattr(settings_store.load(), "qr_scan_auto_print_enabled", True)),
             ticket_product_names=_selected_ticket_product_names(),
             qr_scan_success_sound_path=_primary_scan_success_sound_path(
                 _rebalance_scan_success_rules(_get_scan_sound_rules(), mode="normalize")
@@ -5619,11 +5640,22 @@ def build_receipt_sidebar_settings_panel(
 ) -> ft.Control:
     settings_store = ReceiptSettingsStore(store_path)
     settings = settings_store.load()
+    qr_auto_print_switch = ft.Switch(
+        label="QR 스캔 시 영수증 자동 출력",
+        value=bool(getattr(settings, "qr_scan_auto_print_enabled", True)),
+        **_switch_theme_kwargs(),
+    )
     product_receipt_switch = ft.Switch(
         label="상품 영수증 추가 출력",
         value=bool(getattr(settings, "print_product_receipt", False)),
         **_switch_theme_kwargs(),
     )
+
+    def _on_qr_auto_print_switch(_: ft.ControlEvent) -> None:
+        latest = settings_store.load()
+        latest.qr_scan_auto_print_enabled = bool(qr_auto_print_switch.value)
+        settings_store.save(latest)
+        page.update()
 
     def _on_product_receipt_switch(_: ft.ControlEvent) -> None:
         latest = settings_store.load()
@@ -5631,9 +5663,11 @@ def build_receipt_sidebar_settings_panel(
         settings_store.save(latest)
         page.update()
 
+    qr_auto_print_switch.on_change = _on_qr_auto_print_switch
     product_receipt_switch.on_change = _on_product_receipt_switch
 
     return _build_receipt_sidebar_output_panel(
+        qr_auto_print_switch=qr_auto_print_switch,
         product_receipt_switch=product_receipt_switch,
     )
 
@@ -6380,7 +6414,7 @@ class SettingsFletView:
 
     def _build_page(self, page: ft.Page) -> None:
         page.title = "Receipt Settings"
-        page.window.width = 1480
+        page.window.width = 1800
         page.window.height = 940
         page.scroll = ft.ScrollMode.AUTO
         page.bgcolor = "#ECECEC"

@@ -79,6 +79,11 @@ class _FocusAwareCapture(_FakeCapture):
 
 
 class ScannerCameraBackendContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        cache = getattr(ScannerView, "_last_successful_camera_backend_by_index", None)
+        if cache is not None:
+            cache.clear()
+
     def test_draw_status_ascii_fallback_renders_visible_status_badge(self) -> None:
         scanner = ScannerView()
         frame = np.zeros((80, 180, 3), dtype=np.uint8)
@@ -153,13 +158,82 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
             cap, backend_name = ScannerView._open_camera_with_fallback(2)
 
         self.assertIs(cap, fake_cap)
-        self.assertEqual(backend_name, "DEFAULT")
+        self.assertEqual(backend_name, "DSHOW")
         # DirectShow 백엔드가 우선 시도된다
         video_capture_mock.assert_called_once_with(2, cv2.CAP_DSHOW)
         # _open_camera에서 CAP_PROP_BUFFERSIZE=1 설정 (첫 프레임 지연 감소)
         self.assertIn((cv2.CAP_PROP_BUFFERSIZE, 1), fake_cap.set_calls)
         # _configure_focus_for_capture는 이 레벨에서 호출되지 않으므로 set_calls는 1개여야 한다
         self.assertEqual(len(fake_cap.set_calls), 1)
+
+    def test_open_camera_uses_cached_successful_backend_first_for_same_index(self) -> None:
+        calls: list[tuple[int, object | None]] = []
+
+        def _video_capture(index: int, backend: object | None = None) -> _FakeCapture:
+            calls.append((index, backend))
+            return _FakeCapture(opened=(backend is None))
+
+        with patch("views.scanner_view.cv2.VideoCapture", side_effect=_video_capture):
+            first_cap, first_backend = ScannerView._open_camera_with_fallback(3, verbose=False)
+            first_calls = list(calls)
+            calls.clear()
+            second_cap, second_backend = ScannerView._open_camera_with_fallback(3, verbose=False)
+
+        self.assertIsNotNone(first_cap)
+        self.assertIsNotNone(second_cap)
+        self.assertEqual(first_backend, "DEFAULT_FALLBACK")
+        self.assertEqual(second_backend, "DEFAULT_FALLBACK")
+        self.assertEqual(first_calls, [(3, cv2.CAP_DSHOW), (3, None)])
+        self.assertEqual(calls, [(3, None)])
+
+    def test_open_camera_falls_back_when_cached_backend_becomes_stale(self) -> None:
+        calls: list[tuple[int, object | None]] = []
+        phase = "cache_default"
+
+        def _video_capture(index: int, backend: object | None = None) -> _FakeCapture:
+            calls.append((index, backend))
+            if phase == "cache_default":
+                opened = backend is None
+            else:
+                opened = backend == cv2.CAP_DSHOW
+            return _FakeCapture(opened=opened)
+
+        with patch("views.scanner_view.cv2.VideoCapture", side_effect=_video_capture):
+            ScannerView._open_camera_with_fallback(4, verbose=False)
+            phase = "default_stale"
+            calls.clear()
+            cap, backend_name = ScannerView._open_camera_with_fallback(4, verbose=False)
+            stale_calls = list(calls)
+            calls.clear()
+            next_cap, next_backend = ScannerView._open_camera_with_fallback(4, verbose=False)
+
+        self.assertIsNotNone(cap)
+        self.assertIsNotNone(next_cap)
+        self.assertEqual(backend_name, "DSHOW")
+        self.assertEqual(next_backend, "DSHOW")
+        self.assertEqual(stale_calls, [(4, None), (4, cv2.CAP_DSHOW)])
+        self.assertEqual(calls, [(4, cv2.CAP_DSHOW)])
+
+    def test_open_camera_emits_stage_timing_without_sensitive_identifiers(self) -> None:
+        fake_cap = _FakeCapture(frames=[np.zeros((4, 4, 3), dtype=np.uint8)])
+
+        with (
+            patch("views.scanner_view.cv2.VideoCapture", return_value=fake_cap),
+            patch("builtins.print") as print_mock,
+        ):
+            cap, backend_name = ScannerView._open_camera_with_fallback(5)
+
+        self.assertIs(cap, fake_cap)
+        self.assertEqual(backend_name, "DSHOW")
+        messages = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        timing_lines = [message for message in messages if message.startswith("CAMERA_OPEN_TIMING ")]
+        self.assertTrue(timing_lines, messages)
+        self.assertTrue(any("camera_index=5" in line for line in timing_lines))
+        self.assertTrue(any("backend=DSHOW" in line for line in timing_lines))
+        self.assertTrue(any("constructor_ms=" in line for line in timing_lines))
+        self.assertTrue(any("is_opened_ms=" in line for line in timing_lines))
+        self.assertTrue(any("buffer_ms=" in line for line in timing_lines))
+        self.assertFalse(any("://" in line or "password" in line.lower() for line in timing_lines))
 
     def test_open_camera_returns_none_when_device_cannot_open(self) -> None:
         fake_cap = _FakeCapture(opened=False)
@@ -215,6 +289,36 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         self.assertEqual(len(received_frames), 1)
         self.assertTrue(bad_cap.released)
         self.assertEqual(scanner._camera_backend_name, "DEFAULT")
+
+    def test_capture_loop_logs_first_successful_frame_timing_once(self) -> None:
+        fake_cap = _FakeCapture(
+            frames=[np.full((12, 12, 3), 120, dtype=np.uint8) for _ in range(2)]
+        )
+        received_frames: list[str] = []
+
+        def on_frame_ready(_: str) -> None:
+            received_frames.append("frame")
+            scanner._is_running = False
+
+        scanner = ScannerView(on_frame_ready=on_frame_ready)
+        scanner._cap = fake_cap
+        scanner._camera_backend_name = "DSHOW"
+        scanner._camera_cap_ready_at = time.monotonic() - 0.01
+        scanner._camera_first_frame_timing_logged = False
+        scanner._is_running = True
+
+        with (
+            patch("views.scanner_view.decode", return_value=[]),
+            patch("builtins.print") as print_mock,
+        ):
+            scanner._capture_loop()
+
+        self.assertEqual(received_frames, ["frame"])
+        messages = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        timing_lines = [message for message in messages if message.startswith("CAMERA_FIRST_FRAME_TIMING ")]
+        self.assertEqual(len(timing_lines), 1, messages)
+        self.assertIn("backend=DSHOW", timing_lines[0])
+        self.assertIn("first_frame_ms=", timing_lines[0])
 
     def test_capture_loop_skips_decode_when_auth_not_ready(self) -> None:
         fake_cap = _FakeCapture(frames=[np.full((12, 12, 3), 120, dtype=np.uint8)])
@@ -582,6 +686,30 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
                 self.assertIn((autofocus_prop, 1.0), new_cap.set_calls)
         else:
             self.assertIn((focus_prop, 6.0), new_cap.set_calls)
+
+    def test_attempt_camera_reopen_logs_cap_ready_and_focus_timing(self) -> None:
+        old_cap = _FakeCapture()
+        new_cap = _FakeCapture()
+        scanner = ScannerView()
+        scanner._cap = old_cap
+        scanner._last_camera_reopen_at = -999.0
+
+        with (
+            patch.object(scanner, "_open_camera_with_fallback", return_value=(new_cap, "DSHOW")),
+            patch("builtins.print") as print_mock,
+        ):
+            reopened = scanner._attempt_camera_reopen(10.0, reason="test")
+
+        self.assertTrue(reopened)
+        self.assertIs(scanner._cap, new_cap)
+        messages = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        timing_lines = [message for message in messages if message.startswith("CAMERA_REOPEN_TIMING ")]
+        self.assertEqual(len(timing_lines), 1, messages)
+        self.assertIn("reason=test", timing_lines[0])
+        self.assertIn("backend=DSHOW", timing_lines[0])
+        self.assertIn("open_ms=", timing_lines[0])
+        self.assertIn("cap_ready_ms=", timing_lines[0])
+        self.assertIn("focus_ms=", timing_lines[0])
 
     def test_attempt_camera_reopen_releases_old_capture_before_opening_new_one(self) -> None:
         old_cap = _FakeCapture()

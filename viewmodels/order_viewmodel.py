@@ -37,8 +37,7 @@ class OrderViewModel:
         """현재 주문 상세 페이지를 브라우저에 연다."""
         if not self._current_order or not self._current_order.url:
             return False
-        self._browser_service.open_page(self._current_order.url)
-        return True
+        return bool(self._browser_service.open_page(self._current_order.url))
 
     def complete_receipt(self) -> ReceiptClickResult:
         """현재 열린 주문 페이지에서 수령 완료를 시도한다."""

@@ -8,6 +8,21 @@ from project_paths import RESOURCE_PRODUCT_TEMPLATE_FILE
 
 
 class ReceiptSettingsModelTest(unittest.TestCase):
+    def test_qr_scan_auto_print_defaults_on_for_legacy_settings(self) -> None:
+        self.assertTrue(ReceiptSettings().qr_scan_auto_print_enabled)
+        self.assertTrue(ReceiptSettings.from_dict({}).qr_scan_auto_print_enabled)
+        self.assertTrue(
+            ReceiptSettings.from_dict({"printer_name": "영수증 프린터"}).qr_scan_auto_print_enabled
+        )
+
+    def test_qr_scan_auto_print_false_round_trips_through_dict(self) -> None:
+        settings = ReceiptSettings(qr_scan_auto_print_enabled=False)
+
+        restored = ReceiptSettings.from_dict(settings.to_dict())
+
+        self.assertFalse(settings.to_dict()["qr_scan_auto_print_enabled"])
+        self.assertFalse(restored.qr_scan_auto_print_enabled)
+
     def test_extended_paths_and_flags_round_trip_through_dict(self) -> None:
         settings = ReceiptSettings(
             qr_scan_success_sound_path="C:/sounds/scan.mp3",

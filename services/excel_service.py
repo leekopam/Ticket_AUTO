@@ -246,6 +246,7 @@ class ExcelService:
 
     def get_received_status_map(self) -> dict[str, str]:
         """현재 파일에서 수령확인이 기록된 주문번호 → 타임스탬프 맵을 반환한다."""
+        workbook = None
         try:
             workbook = load_workbook(self._file_path, read_only=True, data_only=True)
             ws = workbook.active
@@ -264,7 +265,8 @@ class ExcelService:
         except Exception:
             return {}
         finally:
-            workbook.close()
+            if workbook is not None:
+                workbook.close()
 
     def bulk_restore_received_status(self, received_map: dict[str, str]) -> int:
         """파일 교체 후 수령확인 상태를 일괄 복원한다. 반환값: 복원된 건수."""

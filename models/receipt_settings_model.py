@@ -100,6 +100,7 @@ class ReceiptSettings:
     margin_bottom: int = 0
     printer_dpi: int = 300
     print_product_receipt: bool = False
+    qr_scan_auto_print_enabled: bool = True
     ticket_product_names: list[str] = field(default_factory=list)
     qr_scan_success_sound_path: str = ""
     qr_scan_success_sound_rules: list[ScanSuccessSoundRule] = field(default_factory=list)
@@ -122,6 +123,7 @@ class ReceiptSettings:
             "margin_bottom": self.margin_bottom,
             "printer_dpi": self.printer_dpi,
             "print_product_receipt": self.print_product_receipt,
+            "qr_scan_auto_print_enabled": self.qr_scan_auto_print_enabled,
             "ticket_product_names": self.ticket_product_names,
             "qr_scan_success_sound_path": self.qr_scan_success_sound_path,
             "qr_scan_success_sound_rules": [rule.to_dict() for rule in self.qr_scan_success_sound_rules],
@@ -180,6 +182,7 @@ class ReceiptSettings:
             margin_bottom=max(0, int(data.get("margin_bottom", 0))),
             printer_dpi=printer_dpi,
             print_product_receipt=bool(data.get("print_product_receipt", False)),
+            qr_scan_auto_print_enabled=bool(data.get("qr_scan_auto_print_enabled", True)),
             ticket_product_names=list(data.get("ticket_product_names", [])),
             qr_scan_success_sound_path=str(data.get("qr_scan_success_sound_path", "")).strip(),
             qr_scan_success_sound_rules=sound_rules,
