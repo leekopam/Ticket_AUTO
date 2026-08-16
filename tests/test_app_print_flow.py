@@ -135,6 +135,16 @@ class _FakeExcelService:
         return self.processing_time_ok
 
 
+class _TrackingExcelService(ExcelService):
+    def __init__(self, file_path: str) -> None:
+        super().__init__(file_path)
+        self.processing_time_calls: list[tuple[str, str]] = []
+
+    def mark_order_processing_time(self, order_number: str, timestamp: str) -> bool:
+        self.processing_time_calls.append((order_number, timestamp))
+        return super().mark_order_processing_time(order_number, timestamp)
+
+
 def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
     app = app_main.Application.__new__(app_main.Application)
     app._state = app_main.AppState.READY
@@ -349,7 +359,7 @@ class AppPrintFlowTest(unittest.TestCase):
             workbook.save(file_path)
             workbook.close()
 
-            excel_service = ExcelService(str(file_path))
+            excel_service = _TrackingExcelService(str(file_path))
             order = excel_service.find_order("ORDER-001")
             assert order is not None
             self.assertEqual(order.order_status, "결제완료")
@@ -369,6 +379,7 @@ class AppPrintFlowTest(unittest.TestCase):
                 self.assertNotIn("처리시간", [cell.value for cell in loaded.active[1]])
             finally:
                 loaded.close()
+            self.assertEqual(excel_service.processing_time_calls, [])
 
     def test_received_order_skips_click_print_and_is_silent_by_default(self) -> None:
         order = Order(
