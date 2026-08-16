@@ -91,6 +91,8 @@ class BrowserService:
         self._current_page: Page | None = None
         self._auth_page: Page | None = None
         self._context: BrowserContext | None = None
+        self._browser_type: Any | None = None
+        self._context_recovery_failed = False
         self._worker_thread: threading.Thread | None = None
         self._is_running = False
         self._accepting_requests = False
@@ -115,6 +117,7 @@ class BrowserService:
             self._task_queue = queue.Queue()
             self._is_running = True
             self._accepting_requests = True
+            self._context_recovery_failed = False
             self._startup_error = None
             self._ready_event.clear()
             self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -274,11 +277,9 @@ class BrowserService:
             sync_started_at = time.perf_counter()
             with sync_playwright() as p:
                 sync_playwright_ms = self._elapsed_ms(sync_started_at)
+                self._browser_type = p.chromium
                 launch_started_at = time.perf_counter()
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=self._user_data_dir,
-                    headless=self._headless,
-                )
+                context = self._launch_persistent_context()
                 launch_ms = self._elapsed_ms(launch_started_at)
                 self._context = context
 
@@ -320,9 +321,9 @@ class BrowserService:
                 self._ready_event.set()
             print(f"Playwright 시작 오류: {exc}")
         finally:
-            if context is not None:
+            if self._context is not None:
                 try:
-                    context.close()
+                    self._context.close()
                 except Exception as exc:
                     self._warn(f"CONTEXT_CLOSE_FAILED: {exc}")
             self._finalize_worker_shutdown()
@@ -340,11 +341,11 @@ class BrowserService:
                 finish(True, None)
                 return
             if action == "open_page":
-                self._handle_open_page(
+                result = self._handle_open_page(
                     task["url"],
                     preserve_current_page=bool(task.get("preserve_current_page")),
                 )
-                finish(True, None)
+                finish(result, None)
                 return
             if action == "click_receipt":
                 result = self._handle_click_receipt()
@@ -399,7 +400,36 @@ class BrowserService:
                 return
             finish(None, str(exc))
 
-    def _handle_open_page(self, url: str, *, preserve_current_page: bool = False) -> None:
+    def _handle_open_page(
+        self,
+        url: str,
+        *,
+        preserve_current_page: bool = False,
+        retry_closed_context: bool = True,
+    ) -> bool:
+        if getattr(self, "_context_recovery_failed", False):
+            return False
+        if not self._context:
+            raise RuntimeError("브라우저 컨텍스트가 준비되지 않았습니다.")
+
+        try:
+            return self._open_page_with_current_context(url, preserve_current_page=preserve_current_page)
+        except Error as exc:
+            if not retry_closed_context or not self._is_closed_context_error(exc):
+                raise
+            try:
+                self._replace_closed_context()
+                return self._handle_open_page(
+                    url,
+                    preserve_current_page=preserve_current_page,
+                    retry_closed_context=False,
+                )
+            except Exception as recovery_exc:
+                self._context_recovery_failed = True
+                self._warn(f"CLOSED_CONTEXT_RECOVERY_FAILED: {recovery_exc}")
+                return False
+
+    def _open_page_with_current_context(self, url: str, *, preserve_current_page: bool) -> bool:
         if not self._context:
             raise RuntimeError("브라우저 컨텍스트가 준비되지 않았습니다.")
 
@@ -417,6 +447,31 @@ class BrowserService:
         if not preserve_current_page:
             self._current_page = opened_page
         print(f"PAGE_OPEN {url}")
+        return True
+
+    def _replace_closed_context(self) -> None:
+        stale_context = self._context
+        self._context = None
+        self._current_page = None
+        self._auth_page = None
+        if stale_context is not None:
+            try:
+                stale_context.close()
+            except Exception:
+                pass
+        self._context = self._launch_persistent_context()
+
+    def _launch_persistent_context(self) -> BrowserContext:
+        if self._browser_type is None:
+            raise RuntimeError("브라우저 실행기가 준비되지 않았습니다.")
+        return self._browser_type.launch_persistent_context(
+            user_data_dir=self._user_data_dir,
+            headless=self._headless,
+        )
+
+    @staticmethod
+    def _is_closed_context_error(exc: Error) -> bool:
+        return "context or browser has been closed" in str(exc).lower()
 
     def _handle_click_receipt(self) -> ReceiptClickResult:
         if not self._current_page or self._current_page.is_closed():
@@ -1099,6 +1154,8 @@ class BrowserService:
             self._is_running = False
             self._accepting_requests = False
             self._worker_thread = None
+            self._browser_type = None
+            self._context_recovery_failed = False
             self._context = None
             self._current_page = None
             self._auth_page = None

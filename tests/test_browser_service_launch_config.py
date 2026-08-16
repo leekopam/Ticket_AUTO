@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from playwright.sync_api import Error
+
 from services.browser_service import BrowserService
 
 
@@ -67,14 +69,21 @@ class _FakePage:
 
 
 class _FakePlaywrightContextManager:
-    def __init__(self, launch_calls: list[dict[str, object]], context: _FakeContext) -> None:
+    def __init__(
+        self,
+        launch_calls: list[dict[str, object]],
+        context: _FakeContext | list[_FakeContext | Exception],
+    ) -> None:
         self._launch_calls = launch_calls
-        self._context = context
+        self._contexts = iter(context if isinstance(context, list) else [context])
 
     def __enter__(self) -> SimpleNamespace:
         def _launch_persistent_context(**kwargs: object) -> _FakeContext:
             self._launch_calls.append(kwargs)
-            return self._context
+            next_context = next(self._contexts)
+            if isinstance(next_context, Exception):
+                raise next_context
+            return next_context
 
         return SimpleNamespace(
             chromium=SimpleNamespace(
@@ -202,6 +211,164 @@ class BrowserServiceLaunchConfigTest(unittest.TestCase):
         click_receipt_button.assert_not_called()
         self.assertEqual(order_page.click_calls, [])
         self.assertEqual(login_page.click_calls, [])
+
+    def test_open_page_replaces_closed_context_and_opens_configured_login_url(self) -> None:
+        service = BrowserService(
+            login_url="https://login.example.test/configured",
+            require_login_each_run=False,
+        )
+        closed_context = _FakeContext()
+        replacement_context = _FakeContext()
+        launch_calls: list[dict[str, object]] = []
+
+        with (
+            patch("services.browser_service.os.makedirs"),
+            patch(
+                "services.browser_service.sync_playwright",
+                return_value=_FakePlaywrightContextManager(launch_calls, [closed_context, replacement_context]),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            service.start()
+            closed_context.close()
+            with patch.object(
+                closed_context,
+                "new_page",
+                side_effect=Error("Target page, context or browser has been closed"),
+            ):
+                self.assertTrue(service.open_page(service.login_url, preserve_current_page=True))
+            self.assertIs(service._context, replacement_context)
+            self.assertEqual(len(launch_calls), 2)
+            self.assertEqual(
+                replacement_context.pages[-1].goto_calls,
+                [{"url": service.login_url, "timeout": 15000}],
+            )
+            service.stop()
+
+    def test_open_page_keeps_valid_context_and_current_page(self) -> None:
+        service = BrowserService(
+            login_url="https://login.example.test/configured",
+            require_login_each_run=False,
+        )
+        current_page = _FakePage()
+        context = _FakeContext(pages=[current_page])
+        launch_calls: list[dict[str, object]] = []
+
+        with (
+            patch("services.browser_service.os.makedirs"),
+            patch(
+                "services.browser_service.sync_playwright",
+                return_value=_FakePlaywrightContextManager(launch_calls, context),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            service.start()
+            service._current_page = current_page
+
+            self.assertTrue(service.open_page(service.login_url, preserve_current_page=True))
+            self.assertIs(service._context, context)
+            self.assertEqual(len(launch_calls), 1)
+            self.assertEqual(current_page.close_calls, 0)
+            self.assertEqual(
+                context.pages[-1].goto_calls,
+                [{"url": service.login_url, "timeout": 15000}],
+            )
+            service.stop()
+
+    def test_open_page_returns_false_when_closed_context_retry_fails(self) -> None:
+        service = BrowserService(require_login_each_run=False)
+        closed_context = _FakeContext()
+        replacement_context = _FakeContext()
+        launch_calls: list[dict[str, object]] = []
+
+        with (
+            patch("services.browser_service.os.makedirs"),
+            patch(
+                "services.browser_service.sync_playwright",
+                return_value=_FakePlaywrightContextManager(launch_calls, [closed_context, replacement_context]),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            service.start()
+            closed_context.close()
+            with (
+                patch.object(
+                    closed_context,
+                    "new_page",
+                    side_effect=Error("Target page, context or browser has been closed"),
+                ),
+                patch.object(replacement_context, "new_page", side_effect=Error("retry failed")),
+            ):
+                self.assertFalse(service.open_page(service.login_url, preserve_current_page=True))
+            self.assertEqual(len(launch_calls), 2)
+            service.stop()
+
+    def test_open_page_returns_false_when_closed_context_replacement_fails(self) -> None:
+        service = BrowserService(require_login_each_run=False)
+        closed_context = _FakeContext()
+        launch_calls: list[dict[str, object]] = []
+
+        with (
+            patch("services.browser_service.os.makedirs"),
+            patch(
+                "services.browser_service.sync_playwright",
+                return_value=_FakePlaywrightContextManager(
+                    launch_calls,
+                    [closed_context, Error("persistent profile is already in use")],
+                ),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            service.start()
+            closed_context.close()
+            with patch.object(
+                closed_context,
+                "new_page",
+                side_effect=Error("Target page, context or browser has been closed"),
+            ):
+                self.assertFalse(service.open_page(service.login_url, preserve_current_page=True))
+            self.assertEqual(len(launch_calls), 2)
+            service.stop()
+
+    def test_queued_open_requests_share_one_closed_context_replacement(self) -> None:
+        service = BrowserService(require_login_each_run=False)
+        closed_context = _FakeContext()
+        replacement_context = _FakeContext()
+        launch_calls: list[dict[str, object]] = []
+        results: list[bool] = []
+        start = threading.Barrier(3)
+
+        with (
+            patch("services.browser_service.os.makedirs"),
+            patch(
+                "services.browser_service.sync_playwright",
+                return_value=_FakePlaywrightContextManager(launch_calls, [closed_context, replacement_context]),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            service.start()
+            closed_context.close()
+
+            def _open() -> None:
+                start.wait(timeout=1)
+                results.append(service.open_page(service.login_url, preserve_current_page=True))
+
+            with patch.object(
+                closed_context,
+                "new_page",
+                side_effect=Error("Target page, context or browser has been closed"),
+            ):
+                threads = [threading.Thread(target=_open, daemon=True) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                start.wait(timeout=1)
+                for thread in threads:
+                    thread.join(timeout=2)
+
+            self.assertEqual(results, [True, True])
+            self.assertEqual(len(launch_calls), 2)
+            self.assertEqual(replacement_context.new_page_calls, 2)
+            service.stop()
 
     def test_worker_loop_force_login_clears_auth_before_single_startup_navigation(self) -> None:
         service = BrowserService(require_login_each_run=True)

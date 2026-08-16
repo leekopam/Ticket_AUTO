@@ -2,10 +2,105 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from models.order_model import Order
+from openpyxl import Workbook
+
+
+class _FakeDashboardPage:
+    def __init__(self) -> None:
+        self.window = SimpleNamespace()
+        self._services = SimpleNamespace(_services=[])
+        self.overlay: list[object] = []
+
+    def add(self, *_controls) -> None:
+        return None
+
+    def update(self) -> None:
+        return None
+
+    def set_clipboard(self, *_values) -> None:
+        return None
+
+
+class _FakeRuntimeManager:
+    _app_factory = None
+
+    def set_order_listener(self, *_listeners) -> None:
+        return None
+
+    def set_camera_frame_listener(self, *_listeners) -> None:
+        return None
+
+    def get_scanner_focus_capability(self):
+        return SimpleNamespace(is_supported=False, message="")
+
+    def apply_scanner_focus_settings(self, *_values) -> None:
+        return None
+
+    def change_camera(self, *_values) -> None:
+        return None
+
+    def start(self) -> None:
+        return None
+
+    def stop(self, **_kwargs) -> None:
+        return None
+
+    def relogin(self) -> None:
+        return None
+
+
+class _FakeSettingsStore:
+    def __init__(self, *_paths) -> None:
+        self.settings = SimpleNamespace(
+            ticket_product_names=[],
+            camera_index=0,
+            scanner_focus_mode="auto",
+            scanner_manual_focus_value=None,
+        )
+
+    def load(self):
+        return self.settings
+
+    def save(self, settings) -> None:
+        self.settings = settings
+
+
+class _FakeScanSuccessCountStore:
+    def load_success_count(self) -> int:
+        return 0
+
+    def save_success_count(self, *_values) -> None:
+        return None
+
+
+class _FakeScanSuccessSoundService:
+    def __init__(self, **_kwargs) -> None:
+        return None
+
+    def describe_special_rule_progresses(self, *_args, **_kwargs) -> list[object]:
+        return []
+
+
+class _FakeCameraService:
+    def __init__(self, **_kwargs) -> None:
+        return None
+
+    def list_cameras(self) -> list[object]:
+        return []
+
+
+class _RecordingFilePicker:
+    def __init__(self) -> None:
+        self.on_result = None
+
+    def pick_files(self, **_kwargs) -> None:
+        return None
 
 
 class DashboardControlContractTest(unittest.TestCase):
@@ -24,38 +119,68 @@ class DashboardControlContractTest(unittest.TestCase):
         self.assertIn("page.window.height = 920", source)
         self.assertIn("page.window.resizable = False", source)
 
-    def test_order_search_filters_only_exact_completed_statuses(self) -> None:
+    def test_data_file_picker_import_callback_refreshes_visible_status_rows(self) -> None:
         _ft, dashboard = self._import_dashboard()
-        orders = [
-            Order(order_number="ORDER-001", name="A", order_status="결제완료"),
-            Order(order_number="ORDER-002", name="B", order_status="거래종료"),
-            Order(order_number="ORDER-003", name="C", order_status="주문취소"),
-            Order(order_number="ORDER-004", name="D", order_status="자동주문취소"),
-            Order(order_number="ORDER-005", name="E", order_status=""),
-            Order(order_number="ORDER-006", name="F", order_status="unknown"),
-        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "selected.xlsx"
+            managed_path = Path(temp_dir) / "managed.xlsx"
+            for path in (source_path, managed_path):
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.append(["주문번호", "주문자명", "주문상태", "진행상태"])
+                worksheet.append(["ORDER-001", "A", "거래종료", "결제완료"])
+                worksheet.append(["ORDER-002", "B", "", "결제완료"])
+                worksheet.append(["ORDER-003", "C", "주문취소", "결제완료"])
+                worksheet.append(["ORDER-004", "D", "자동주문취소", "결제완료"])
+                worksheet.append(["ORDER-005", "E", "", ""])
+                worksheet.append(["ORDER-006", "F", "unknown", ""])
+                workbook.save(path)
+                workbook.close()
 
-        for filter_value, expected_order_numbers in (
-            ("전체", ("ORDER-001", "ORDER-002")),
-            ("결제완료", ("ORDER-001",)),
-            ("거래종료", ("ORDER-002",)),
-        ):
-            with self.subTest(filter_value=filter_value):
-                view_state = dashboard.build_order_search_view_state(
-                    "",
-                    filter_value,
-                    orders,
-                    [],
-                    None,
-                )
-                row_order_numbers = tuple(row.order_number for row in view_state.row_states)
+            copied_paths: list[str] = []
+            captured: dict[str, object] = {}
+            apply_search_state = dashboard.apply_order_search_dashboard_state
 
-                self.assertEqual(row_order_numbers, expected_order_numbers)
-                self.assertEqual(view_state.dropdown_order_numbers, expected_order_numbers)
-                self.assertEqual(view_state.filter_count_text, f"표시 {len(expected_order_numbers)}건")
+            def copy_to_managed_location(source: str) -> Path:
+                copied_paths.append(source)
+                shutil.copy2(source, managed_path)
+                return managed_path
 
-        all_orders = dashboard.build_order_search_view_state("", "전체", orders, [], None)
-        self.assertEqual([row.order_status_text for row in all_orders.row_states], ["결제완료", "거래종료"])
+            def capture_search_state(view_state, **kwargs) -> None:
+                captured["view_state"] = view_state
+                apply_search_state(view_state, **kwargs)
+                captured["table_rows"] = tuple(kwargs["search_result_list"].controls)
+
+            with patch.multiple(
+                dashboard,
+                ensure_managed_data_file=lambda: managed_path,
+                copy_data_file_to_managed_location=copy_to_managed_location,
+                ReceiptSettingsStore=_FakeSettingsStore,
+                ScanSuccessSoundStateStore=_FakeScanSuccessCountStore,
+                ScanSuccessSoundService=_FakeScanSuccessSoundService,
+                WindowsCameraService=_FakeCameraService,
+                bootstrap_dashboard_page=lambda **_kwargs: None,
+                apply_order_search_dashboard_state=capture_search_state,
+            ), patch.object(dashboard.ft, "FilePicker", _RecordingFilePicker):
+                page = _FakeDashboardPage()
+                dashboard.DashboardFletView(_FakeRuntimeManager())._build_page(page)
+                captured.clear()
+
+                picker = page._services._services[0]
+                picker.on_result(SimpleNamespace(files=[SimpleNamespace(path=str(source_path))]))
+
+            view_state = captured["view_state"]
+            table_rows = captured["table_rows"]
+
+        self.assertEqual(copied_paths, [str(source_path)])
+        self.assertEqual(view_state.dropdown_order_numbers, ("ORDER-001", "ORDER-002"))
+        self.assertEqual([row.order_status_text for row in view_state.row_states], ["거래종료", "결제완료"])
+        self.assertEqual(view_state.filter_count_text, "표시 2건")
+        self.assertEqual(len(table_rows), 2)
+        self.assertEqual(
+            [row.content.controls[6].content.value for row in table_rows],
+            ["거래종료", "결제완료"],
+        )
 
     def test_request_witchform_login_page_calls_runtime_once(self) -> None:
         _ft, dashboard = self._import_dashboard()

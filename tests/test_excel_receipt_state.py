@@ -7,7 +7,13 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from services.excel_service import ExcelService, ORDER_STATUS_HEADER, RECEIPT_HEADER
+from services.excel_service import (
+    ExcelService,
+    ORDER_STATUS_HEADER,
+    PROCESSING_TIME_HEADER,
+    RECEIPT_HEADER,
+    SOURCE_PROGRESS_STATUS_HEADER,
+)
 
 
 def _create_workbook(path: Path, *, header_order_label: str = "주문번호") -> None:
@@ -133,6 +139,69 @@ class ExcelReceiptStateTest(unittest.TestCase):
             self.assertIsNotNone(order)
             assert order is not None
             self.assertEqual(order.received_at, "2026-02-23 12:00:00")
+
+    def test_order_status_prefers_app_value_then_falls_back_to_source_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["주문번호", "주문자명", ORDER_STATUS_HEADER, SOURCE_PROGRESS_STATUS_HEADER])
+            worksheet.append(["ORDER-001", "A", "거래종료", "결제완료"])
+            worksheet.append(["ORDER-002", "B", "", "결제완료"])
+            worksheet.append(["ORDER-003", "C", "", ""])
+            workbook.save(file_path)
+            workbook.close()
+
+            service = ExcelService(str(file_path))
+            orders = service.search_orders()
+
+            self.assertEqual([order.order_status for order in orders], ["거래종료", "결제완료", ""])
+            self.assertEqual(service.find_order("ORDER-002").order_status, "결제완료")
+            self.assertEqual(service.find_orders_by_customer(name="B")[0].order_status, "결제완료")
+
+            from views import dashboard_flet_view as dashboard
+
+            view_state = dashboard.build_order_search_view_state("", "전체", orders, [], None)
+            self.assertEqual([row.order_number for row in view_state.row_states], ["ORDER-001", "ORDER-002"])
+            self.assertEqual([row.order_status_text for row in view_state.row_states], ["거래종료", "결제완료"])
+            self.assertEqual(dashboard.build_search_result_row_state(orders[2], [], 0).order_status_text, "-")
+
+    def test_processing_time_header_is_single_final_column_and_preserves_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["주문번호", PROCESSING_TIME_HEADER, "주문자명", PROCESSING_TIME_HEADER, "비고"])
+            worksheet.append(["ORDER-001", "", "A", "2026-02-23 09:00:00", "first"])
+            worksheet.append(["ORDER-002", "2026-02-23 10:00:00", "B", "", "second"])
+            workbook.save(file_path)
+            workbook.close()
+
+            self.assertTrue(ExcelService(str(file_path)).ensure_processing_time_column())
+
+            loaded = load_workbook(file_path, data_only=True)
+            worksheet = loaded.active
+            self.assertEqual([cell.value for cell in worksheet[1]], ["주문번호", "주문자명", "비고", PROCESSING_TIME_HEADER])
+            self.assertEqual(list(worksheet.iter_rows(min_row=2, values_only=True)), [
+                ("ORDER-001", "A", "first", "2026-02-23 09:00:00"),
+                ("ORDER-002", "B", "second", "2026-02-23 10:00:00"),
+            ])
+            loaded.close()
+
+    def test_processing_time_header_is_added_last_when_absent_and_updated_by_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            _create_workbook(file_path)
+            service = ExcelService(str(file_path))
+
+            self.assertTrue(service.ensure_processing_time_column())
+            self.assertTrue(service.mark_order_processing_time("ORDER-001", "2026-02-23 11:22:33"))
+
+            loaded = load_workbook(file_path, data_only=True)
+            worksheet = loaded.active
+            self.assertEqual(worksheet.cell(row=1, column=worksheet.max_column).value, PROCESSING_TIME_HEADER)
+            self.assertEqual(worksheet.cell(row=2, column=worksheet.max_column).value, "2026-02-23 11:22:33")
+            loaded.close()
 
 
 if __name__ == "__main__":

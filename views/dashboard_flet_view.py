@@ -2251,6 +2251,7 @@ class DashboardFletView:
         excel_service.ensure_seat_column()
         excel_service.ensure_receipt_column()
         excel_service.ensure_order_status_column()
+        excel_service.ensure_processing_time_column()
         settings_store = ReceiptSettingsStore(str(resolve_project_path(".runtime/receipt_settings.json")))
         scan_success_count_store = ScanSuccessSoundStateStore()
         scan_success_sound_service = ScanSuccessSoundService(state_store=scan_success_count_store)
@@ -2636,6 +2637,7 @@ class DashboardFletView:
                 excel_service.ensure_seat_column()
                 excel_service.ensure_receipt_column()
                 excel_service.ensure_order_status_column()
+                excel_service.ensure_processing_time_column()
 
                 # 이전 파일의 처리완료 상태를 새 파일에 복원
                 restored_count = excel_service.bulk_restore_received_status(received_snapshot)

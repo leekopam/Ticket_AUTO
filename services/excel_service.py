@@ -16,6 +16,8 @@ PRODUCT_HEADER_RE = re.compile(r"^\[상품(\d+)\]")
 RECEIPT_HEADER = "수령확인"
 SEAT_HEADER = "좌석번호"
 ORDER_STATUS_HEADER = "주문상태"
+SOURCE_PROGRESS_STATUS_HEADER = "진행상태"
+PROCESSING_TIME_HEADER = "처리시간"
 _WRITE_RETRY_COUNT = 3
 _WRITE_RETRY_DELAY_SEC = 0.2
 
@@ -47,6 +49,7 @@ class ExcelService:
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
             status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
+            progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
             goods_cols = self._parse_goods_cols(headers)
 
             for row in ws.iter_rows(min_row=2, values_only=True):
@@ -70,7 +73,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=goods_list,
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
-                    order_status=str(self._cell(row, status_col)).strip() if status_col else "",
+                    order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 ))
                 if len(results) >= max_results:
                     break
@@ -95,6 +98,7 @@ class ExcelService:
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
             status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
+            progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
 
             goods_cols = self._parse_goods_cols(headers)
 
@@ -110,7 +114,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=self._build_goods_list(row, goods_cols),
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
-                    order_status=str(self._cell(row, status_col)).strip() if status_col else "",
+                    order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 )
 
             return None
@@ -139,6 +143,8 @@ class ExcelService:
             recv_phone_col = self._find_col(headers, ("수령자연락처",))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
+            progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
             goods_cols = self._parse_goods_cols(headers)
 
             matches: list[Order] = []
@@ -168,6 +174,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=self._build_goods_list(row, goods_cols),
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 ))
 
             return matches
@@ -213,6 +220,25 @@ class ExcelService:
     def ensure_order_status_column(self) -> None:
         """data.xlsx에 주문상태 컬럼이 없으면 자동 추가한다."""
         self._ensure_column(ORDER_STATUS_HEADER)
+
+    def ensure_processing_time_column(self) -> bool:
+        """처리시간 헤더를 하나만 유지하고 마지막 열로 정규화한다."""
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = workbook.active
+                if self._ensure_final_processing_time_column(ws):
+                    workbook.save(self._file_path)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        return False
 
     def mark_order_status(self, order_number: str, status: str) -> bool:
         """주문의 주문상태 값을 엑셀에 저장한다."""
@@ -321,6 +347,34 @@ class ExcelService:
         """Restore previous receipt value when print step fails."""
         return self._update_order_received(order_number, previous_value)
 
+    def mark_order_processing_time(self, order_number: str, timestamp_str: str) -> bool:
+        """최종 성공한 주문의 처리시간을 마지막 열에 기록한다."""
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = workbook.active
+                self._ensure_final_processing_time_column(ws)
+                headers = self._read_headers(ws)
+                order_col = self._find_col(headers, ("주문번호",))
+                processing_time_col = self._find_col(headers, (PROCESSING_TIME_HEADER,))
+                if not order_col or not processing_time_col:
+                    return False
+                target_row = self._find_row_by_order(ws, order_col, order_number)
+                if not target_row:
+                    return False
+                ws.cell(row=target_row, column=processing_time_col, value=(timestamp_str or "").strip())
+                workbook.save(self._file_path)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        return False
+
     def _update_order_received(self, order_number: str, value: str) -> bool:
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
@@ -378,6 +432,40 @@ class ExcelService:
                 label = goods_name or f"상품{product_index}"
                 goods_list.append(f"{label} x{quantity}")
         return goods_list
+
+    @staticmethod
+    def _resolve_order_status(row: tuple, order_status_col: int | None, progress_status_col: int | None) -> str:
+        order_status = str(ExcelService._cell(row, order_status_col)).strip()
+        return order_status or str(ExcelService._cell(row, progress_status_col)).strip()
+
+    @staticmethod
+    def _ensure_final_processing_time_column(ws) -> bool:
+        processing_time_cols = [
+            column
+            for column, cell in enumerate(ws[1], start=1)
+            if str(cell.value or "").strip() == PROCESSING_TIME_HEADER
+        ]
+        if processing_time_cols == [ws.max_column]:
+            return False
+
+        processing_time_values = {
+            row: next(
+                (
+                    ws.cell(row=row, column=column).value
+                    for column in processing_time_cols
+                    if str(ws.cell(row=row, column=column).value or "").strip()
+                ),
+                "",
+            )
+            for row in range(2, ws.max_row + 1)
+        }
+        for column in reversed(processing_time_cols):
+            ws.delete_cols(column)
+        processing_time_col = ws.max_column + 1
+        ws.cell(row=1, column=processing_time_col, value=PROCESSING_TIME_HEADER)
+        for row, value in processing_time_values.items():
+            ws.cell(row=row, column=processing_time_col, value=value)
+        return True
 
     @staticmethod
     def _read_headers(ws) -> dict[str, int]:

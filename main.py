@@ -81,6 +81,7 @@ class Application:
         self._excel_service.ensure_seat_column()
         self._excel_service.ensure_receipt_column()
         self._excel_service.ensure_order_status_column()
+        self._excel_service.ensure_processing_time_column()
         self._browser_service = BrowserService(require_login_each_run=True)
         self._api_service = ApiService()
 
@@ -764,9 +765,17 @@ class Application:
         # QR 스캔 성공 후 주문상태를 거래종료로 기록
         previous_status = order.order_status
         try:
-            self._excel_service.mark_order_status(order.order_number, "거래종료")
+            status_saved = self._excel_service.mark_order_status(order.order_number, "거래종료")
         except Exception as exc:
             logger.warning("주문상태 저장 실패 order=%s error=%s", order.order_number, exc)
+            status_saved = False
+        if status_saved is False:
+            rollback_ok = self._order_viewmodel.rollback_current_order_received(previous_received)
+            if rollback_ok:
+                self._enter_error("주문상태 저장 실패로 수령확인을 원복했습니다.")
+            else:
+                self._enter_error(f"주문상태 저장 및 수령확인 원복 실패 (수동 조치 필요, 주문번호={order.order_number})")
+            return
 
         self._play_scan_success_sound(order, increment_count=True, persist_count=False)
 
@@ -793,6 +802,16 @@ class Application:
                     "영수증 출력 실패 및 수령확인 원복 실패 "
                     f"(수동 조치 필요, 주문번호={order.order_number}): {exc}"
                 )
+            return
+
+        try:
+            processing_time_writer = getattr(self._excel_service, "mark_order_processing_time", None)
+            processing_time_saved = offline_mode or not callable(processing_time_writer) or processing_time_writer(order.order_number, received_at)
+        except Exception as exc:
+            logger.warning("처리시간 저장 실패 order=%s error=%s", order.order_number, exc)
+            processing_time_saved = False
+        if not processing_time_saved:
+            self._enter_error("처리시간 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요.")
             return
 
         self._commit_scan_success_count()

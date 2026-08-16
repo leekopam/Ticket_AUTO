@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -113,12 +114,29 @@ class _FakeOrderViewModel:
         return self.rollback_ok
 
 
+class _FakeExcelService:
+    def __init__(self, *, status_ok: bool = True, processing_time_ok: bool = True) -> None:
+        self.status_ok = status_ok
+        self.processing_time_ok = processing_time_ok
+        self.status_calls: list[tuple[str, str]] = []
+        self.processing_time_calls: list[tuple[str, str]] = []
+
+    def mark_order_status(self, order_number: str, status: str) -> bool:
+        self.status_calls.append((order_number, status))
+        return self.status_ok
+
+    def mark_order_processing_time(self, order_number: str, timestamp: str) -> bool:
+        self.processing_time_calls.append((order_number, timestamp))
+        return self.processing_time_ok
+
+
 def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
     app = app_main.Application.__new__(app_main.Application)
     app._state = app_main.AppState.READY
     app._scanner_view = _FakeScannerView()
     app._order_view = _FakeOrderView()
     app._order_viewmodel = order_vm
+    app._excel_service = _FakeExcelService()
     app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="")
     app._api_service = SimpleNamespace(
         parse_qr_redirect=lambda *_args, **_kwargs: QRParseResult(
@@ -221,6 +239,82 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(app._state, app_main.AppState.READY)
         self.assertIn("자동 출력 꺼짐", app._scanner_view.status_message)
 
+    def test_online_success_writes_processing_time_once_with_fake_clock(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order)
+        app = _build_app_with_order_vm(order_vm)
+        app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="", qr_scan_auto_print_enabled=False)
+        app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
+
+        with patch("main.datetime", SimpleNamespace(now=lambda: datetime(2026, 8, 17, 12, 34, 56))):
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(app._excel_service.processing_time_calls, [("ORDER-001", "2026-08-17 12:34:56")])
+        self.assertEqual(app._state, app_main.AppState.READY)
+
+    def test_local_status_or_print_failure_never_writes_processing_time(self) -> None:
+        for failure_stage in ("status", "print"):
+            with self.subTest(failure_stage=failure_stage):
+                order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+                order_vm = _FakeOrderViewModel(order=order)
+                app = _build_app_with_order_vm(order_vm)
+                app._excel_service = _FakeExcelService(status_ok=failure_stage != "status")
+
+                with patch(
+                    "main.print_order_receipt",
+                    side_effect=RuntimeError("printer down") if failure_stage == "print" else None,
+                ):
+                    app._process_resolved_qr(
+                        "https://witchform.com/qrcode_link.php?a=1",
+                        BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                        allow_auth_retry=False,
+                    )
+
+                self.assertEqual(app._excel_service.processing_time_calls, [])
+                self.assertEqual(app._state, app_main.AppState.ERROR)
+
+    def test_processing_time_write_failure_does_not_report_full_success(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order)
+        app = _build_app_with_order_vm(order_vm)
+        app._excel_service = _FakeExcelService(processing_time_ok=False)
+        app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="", qr_scan_auto_print_enabled=False)
+        app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
+
+        with patch.object(app, "_commit_scan_success_count") as commit_mock:
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        self.assertEqual(len(app._excel_service.processing_time_calls), 1)
+        commit_mock.assert_not_called()
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+        self.assertIn("처리시간 저장 실패", app._scanner_view.status_message)
+
+    def test_processing_time_write_exception_does_not_report_full_success(self) -> None:
+        order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
+        app = _build_app_with_order_vm(_FakeOrderViewModel(order=order))
+        app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="", qr_scan_auto_print_enabled=False)
+        app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
+        app._excel_service.mark_order_processing_time = lambda *_args: (_ for _ in ()).throw(OSError("locked"))
+
+        with patch.object(app, "_commit_scan_success_count") as commit_mock:
+            app._process_resolved_qr(
+                "https://witchform.com/qrcode_link.php?a=1",
+                BrowserResolveResult(ok=True, status_code=302, location="/x"),
+                allow_auth_retry=False,
+            )
+
+        commit_mock.assert_not_called()
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+        self.assertIn("처리시간 저장 실패", app._scanner_view.status_message)
+
     def test_print_failure_rolls_back_mark(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order, rollback_ok=True)
@@ -281,7 +375,7 @@ class AppPrintFlowTest(unittest.TestCase):
         status_writes: list[tuple[str, str]] = []
         app._order_listener = emitted_orders.append
         app._excel_service = SimpleNamespace(
-            mark_order_status=lambda order_number, status: status_writes.append((order_number, status)),
+            mark_order_status=lambda order_number, status: status_writes.append((order_number, status)) or True,
         )
         app._state = app_main.AppState.PROCESSING
         app._scanner_view.scanning_enabled = False
@@ -740,9 +834,7 @@ class ReceiptClickRetryTest(unittest.TestCase):
 
     def _make_app(self, order_vm: _FakeOrderViewModel):
         app = _build_app_with_order_vm(order_vm)
-        app._excel_service = SimpleNamespace(
-            mark_order_status=lambda *_a, **_kw: None,
-        )
+        app._excel_service = _FakeExcelService()
         return app
 
     def test_click_fail_then_retry_succeeds_completes_normally(self) -> None:
@@ -801,7 +893,8 @@ class ReceiptClickRetryTest(unittest.TestCase):
 
         status_calls: list[tuple[str, str]] = []
         app._excel_service = SimpleNamespace(
-            mark_order_status=lambda on, st: status_calls.append((on, st)),
+            mark_order_status=lambda on, st: status_calls.append((on, st)) or True,
+            mark_order_processing_time=lambda *_args: True,
         )
 
         with patch("main.print_order_receipt", side_effect=RuntimeError("프린터 오류")):
@@ -902,7 +995,7 @@ class OnlineModeGuaranteeTest(unittest.TestCase):
 
     def _make_app(self, order_vm: _FakeOrderViewModel):
         app = _build_app_with_order_vm(order_vm)
-        app._excel_service = SimpleNamespace(mark_order_status=lambda *_a, **_kw: None)
+        app._excel_service = _FakeExcelService()
         return app
 
     def test_click_failure_never_reaches_main_mark_and_count(self) -> None:
