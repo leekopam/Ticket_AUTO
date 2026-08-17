@@ -33,6 +33,7 @@ class BuildScriptContractTest(unittest.TestCase):
 
         source = wrapper.read_text(encoding="utf-8-sig").lower()
         self.assertIn("powershell", source)
+        self.assertIn('set "pythonpath="', source)
         self.assertIn("scripts\\build_windows.ps1", source)
 
 
