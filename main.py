@@ -807,6 +807,16 @@ class Application:
                 )
             return
 
+        try:
+            processing_time_writer = getattr(self._excel_service, "mark_order_processing_time", None)
+            processing_time_saved = offline_mode or not callable(processing_time_writer) or processing_time_writer(order.order_number, received_at)
+        except Exception as exc:
+            logger.warning("처리시간 저장 실패 order=%s error=%s", order.order_number, exc)
+            processing_time_saved = False
+        if not processing_time_saved:
+            self._enter_error("처리시간 저장 실패: 엑셀 파일 권한/잠금을 확인해주세요.")
+            return
+
         self._commit_scan_success_count()
         if qr_auto_print_enabled:
             self._enter_ready("수령 완료 및 영수증 출력 완료")
