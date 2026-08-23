@@ -825,16 +825,11 @@ def build_order_search_view_state(
     highlight_ticket_split: bool = False,
 ) -> OrderSearchViewState:
     """검색 결과 영역에 필요한 필터/피드백/행 상태를 계산한다."""
-    visible_orders = [
-        order
-        for order in orders
-        if (order.order_status or "").strip() in VISIBLE_ORDER_STATUSES
-    ]
-    filtered_orders = visible_orders
+    filtered_orders = list(orders)
     if filter_value in VISIBLE_ORDER_STATUSES:
         filtered_orders = [
             order
-            for order in visible_orders
+            for order in orders
             if (order.order_status or "").strip() == filter_value
         ]
     filter_count = f"표시 {len(filtered_orders)}건"
@@ -2626,6 +2621,15 @@ class DashboardFletView:
             source_path = getattr(files[0], "path", None)
             if not source_path:
                 _show_dashboard_warning("선택한 data 파일 경로를 읽을 수 없습니다.")
+                return
+
+            try:
+                if not ExcelService(str(source_path)).has_order_column():
+                    _show_dashboard_warning("가져올 파일에 '주문번호' 헤더가 없어 적용하지 않았습니다.")
+                    return
+            except Exception as exc:
+                logger.error("가져올 data 파일 검사 실패: %s", exc, exc_info=True)
+                _show_dashboard_warning(f"가져올 data 파일을 읽을 수 없습니다: {exc}")
                 return
 
             try:

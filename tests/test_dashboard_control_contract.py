@@ -119,7 +119,7 @@ class DashboardControlContractTest(unittest.TestCase):
         self.assertIn("page.window.height = 920", source)
         self.assertIn("page.window.resizable = False", source)
 
-    def test_data_file_picker_import_callback_refreshes_visible_status_rows(self) -> None:
+    def test_data_file_picker_import_callback_shows_all_rows_for_all_filter(self) -> None:
         _ft, dashboard = self._import_dashboard()
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "selected.xlsx"
@@ -173,13 +173,19 @@ class DashboardControlContractTest(unittest.TestCase):
             table_rows = captured["table_rows"]
 
         self.assertEqual(copied_paths, [str(source_path)])
-        self.assertEqual(view_state.dropdown_order_numbers, ("ORDER-001", "ORDER-002"))
-        self.assertEqual([row.order_status_text for row in view_state.row_states], ["", "2026-02-23 10:00:00"])
-        self.assertEqual(view_state.filter_count_text, "표시 2건")
-        self.assertEqual(len(table_rows), 2)
+        self.assertEqual(
+            view_state.dropdown_order_numbers,
+            ("ORDER-001", "ORDER-002", "ORDER-003", "ORDER-004", "ORDER-005", "ORDER-006"),
+        )
+        self.assertEqual(
+            [row.order_status_text for row in view_state.row_states],
+            ["", "2026-02-23 10:00:00", "", "", "", ""],
+        )
+        self.assertEqual(view_state.filter_count_text, "표시 6건")
+        self.assertEqual(len(table_rows), 6)
         self.assertEqual(
             [row.content.controls[6].content.value for row in table_rows],
-            ["", "2026-02-23 10:00:00"],
+            ["", "2026-02-23 10:00:00", "", "", "", ""],
         )
 
     def test_request_witchform_login_page_calls_runtime_once(self) -> None:

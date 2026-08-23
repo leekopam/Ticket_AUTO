@@ -82,6 +82,14 @@ class ExcelService:
         finally:
             workbook.close()
 
+    def has_order_column(self) -> bool:
+        """가져올 파일이 주문 검색에 필요한 주문번호 헤더를 갖췄는지 확인한다."""
+        workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+        try:
+            return bool(self._find_col(self._read_headers(workbook.active), ("주문번호",)))
+        finally:
+            workbook.close()
+
     def find_order(self, order_number: str) -> Order | None:
         """Find order by order_number."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)

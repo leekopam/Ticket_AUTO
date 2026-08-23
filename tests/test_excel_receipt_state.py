@@ -162,9 +162,22 @@ class ExcelReceiptStateTest(unittest.TestCase):
             from views import dashboard_flet_view as dashboard
 
             view_state = dashboard.build_order_search_view_state("", "전체", orders, [], None)
-            self.assertEqual([row.order_number for row in view_state.row_states], ["ORDER-001", "ORDER-002"])
-            self.assertEqual([row.order_status_text for row in view_state.row_states], ["", ""])
+            self.assertEqual(
+                [row.order_number for row in view_state.row_states],
+                ["ORDER-001", "ORDER-002", "ORDER-003"],
+            )
+            self.assertEqual([row.order_status_text for row in view_state.row_states], ["", "", ""])
             self.assertEqual(dashboard.build_search_result_row_state(orders[2], [], 0).order_status_text, "")
+
+    def test_has_order_column_rejects_import_file_without_order_number_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "invalid-data.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["이름", "연락처"])
+            workbook.save(file_path)
+            workbook.close()
+
+            self.assertFalse(ExcelService(str(file_path)).has_order_column())
 
     def test_search_status_cell_uses_received_at_without_legacy_processing_time_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
