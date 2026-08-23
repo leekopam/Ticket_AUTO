@@ -215,7 +215,7 @@ class AppPrintFlowTest(unittest.TestCase):
         print_mock.assert_called_once()
         sound_mock.assert_called_once_with(order, increment_count=True, persist_count=False)
         commit_mock.assert_called_once_with()
-        self.assertEqual(app._excel_service.processing_time_calls, [("ORDER-001", order.received_at)])
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.READY)
 
     def test_qr_scan_auto_print_off_marks_order_but_skips_print_and_rollback(self) -> None:
@@ -255,7 +255,7 @@ class AppPrintFlowTest(unittest.TestCase):
         self.assertEqual(app._state, app_main.AppState.READY)
         self.assertIn("자동 출력 꺼짐", app._scanner_view.status_message)
 
-    def test_online_success_writes_processing_time_once_with_fake_clock(self) -> None:
+    def test_online_success_records_received_at_without_processing_time_write(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order)
         app = _build_app_with_order_vm(order_vm)
@@ -269,7 +269,8 @@ class AppPrintFlowTest(unittest.TestCase):
                 allow_auth_retry=False,
             )
 
-        self.assertEqual(app._excel_service.processing_time_calls, [("ORDER-001", "2026-08-17 12:34:56")])
+        self.assertEqual(order.received_at, "2026-08-17 12:34:56")
+        self.assertEqual(app._excel_service.processing_time_calls, [])
         self.assertEqual(app._state, app_main.AppState.READY)
 
     def test_local_received_status_or_print_failure_never_writes_processing_time(self) -> None:
@@ -293,7 +294,7 @@ class AppPrintFlowTest(unittest.TestCase):
                 self.assertEqual(app._excel_service.processing_time_calls, [])
                 self.assertEqual(app._state, app_main.AppState.ERROR)
 
-    def test_processing_time_write_failure_does_not_report_full_success(self) -> None:
+    def test_online_success_ignores_legacy_processing_time_writer_failure(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         order_vm = _FakeOrderViewModel(order=order)
         app = _build_app_with_order_vm(order_vm)
@@ -308,17 +309,16 @@ class AppPrintFlowTest(unittest.TestCase):
                 allow_auth_retry=False,
             )
 
-        self.assertEqual(len(app._excel_service.processing_time_calls), 1)
-        commit_mock.assert_not_called()
-        self.assertEqual(app._state, app_main.AppState.ERROR)
-        self.assertIn("처리시간 저장 실패", app._scanner_view.status_message)
+        self.assertEqual(app._excel_service.processing_time_calls, [])
+        commit_mock.assert_called_once_with()
+        self.assertEqual(app._state, app_main.AppState.READY)
 
-    def test_processing_time_write_exception_does_not_report_full_success(self) -> None:
+    def test_online_success_does_not_invoke_legacy_processing_time_writer(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])
         app = _build_app_with_order_vm(_FakeOrderViewModel(order=order))
         app._receipt_settings = SimpleNamespace(qr_scan_success_sound_path="", qr_scan_auto_print_enabled=False)
         app._settings_store = SimpleNamespace(load=lambda: app._receipt_settings)
-        app._excel_service.mark_order_processing_time = lambda *_args: (_ for _ in ()).throw(OSError("locked"))
+        app._excel_service.mark_order_processing_time = lambda *_args: (_ for _ in ()).throw(AssertionError("legacy writer invoked"))
 
         with patch.object(app, "_commit_scan_success_count") as commit_mock:
             app._process_resolved_qr(
@@ -327,9 +327,8 @@ class AppPrintFlowTest(unittest.TestCase):
                 allow_auth_retry=False,
             )
 
-        commit_mock.assert_not_called()
-        self.assertEqual(app._state, app_main.AppState.ERROR)
-        self.assertIn("처리시간 저장 실패", app._scanner_view.status_message)
+        commit_mock.assert_called_once_with()
+        self.assertEqual(app._state, app_main.AppState.READY)
 
     def test_print_failure_rolls_back_mark(self) -> None:
         order = Order(order_number="ORDER-001", name="홍길동", phone="010", seat="A-1", goods=[])

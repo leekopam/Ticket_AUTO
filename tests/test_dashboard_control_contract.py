@@ -127,13 +127,13 @@ class DashboardControlContractTest(unittest.TestCase):
             for path in (source_path, managed_path):
                 workbook = Workbook()
                 worksheet = workbook.active
-                worksheet.append(["주문번호", "주문자명", "주문상태", "진행상태"])
-                worksheet.append(["ORDER-001", "A", "거래종료", "결제완료"])
-                worksheet.append(["ORDER-002", "B", "", "결제완료"])
-                worksheet.append(["ORDER-003", "C", "주문취소", "결제완료"])
-                worksheet.append(["ORDER-004", "D", "자동주문취소", "결제완료"])
-                worksheet.append(["ORDER-005", "E", "", ""])
-                worksheet.append(["ORDER-006", "F", "unknown", ""])
+                worksheet.append(["주문번호", "주문자명", "주문상태", "진행상태", "수령확인", "처리시간"])
+                worksheet.append(["ORDER-001", "A", "거래종료", "결제완료", "", "2026-02-23 09:00:00"])
+                worksheet.append(["ORDER-002", "B", "", "결제완료", "2026-02-23 10:00:00", ""])
+                worksheet.append(["ORDER-003", "C", "주문취소", "결제완료", "", ""])
+                worksheet.append(["ORDER-004", "D", "자동주문취소", "결제완료", "", ""])
+                worksheet.append(["ORDER-005", "E", "", "", "", ""])
+                worksheet.append(["ORDER-006", "F", "unknown", "", "", ""])
                 workbook.save(path)
                 workbook.close()
 
@@ -174,12 +174,12 @@ class DashboardControlContractTest(unittest.TestCase):
 
         self.assertEqual(copied_paths, [str(source_path)])
         self.assertEqual(view_state.dropdown_order_numbers, ("ORDER-001", "ORDER-002"))
-        self.assertEqual([row.order_status_text for row in view_state.row_states], ["거래종료", "결제완료"])
+        self.assertEqual([row.order_status_text for row in view_state.row_states], ["", "2026-02-23 10:00:00"])
         self.assertEqual(view_state.filter_count_text, "표시 2건")
         self.assertEqual(len(table_rows), 2)
         self.assertEqual(
             [row.content.controls[6].content.value for row in table_rows],
-            ["거래종료", "결제완료"],
+            ["", "2026-02-23 10:00:00"],
         )
 
     def test_request_witchform_login_page_calls_runtime_once(self) -> None:
