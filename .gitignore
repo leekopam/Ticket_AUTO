@@ -1,6 +1,7 @@
 .runtime/
 .tmp/
 .venv/
+.worktrees/
 __pycache__/
 *.pyc
 data.xlsx
