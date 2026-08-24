@@ -15,7 +15,6 @@ class ScriptsLayoutContractTest(unittest.TestCase):
             ROOT / "scripts" / "setup" / "setup_windows.bat",
             ROOT / "scripts" / "qa" / "verify_release.ps1",
             ROOT / "scripts" / "qa" / "smoke_packaged_exe.py",
-            ROOT / "scripts" / "diagnostics" / "inspect_excel_rows.py",
             ROOT / "build_support" / "specs" / "Ticket_AUTO.spec",
             ROOT / "build_support" / "specs" / "Ticket_AUTO_flat.spec",
         ]
@@ -31,6 +30,7 @@ class ScriptsLayoutContractTest(unittest.TestCase):
             ROOT / "scripts" / "build_windows.ps1",
             ROOT / "scripts" / "verify_release.ps1",
             ROOT / "scripts" / "smoke_packaged_exe.py",
+            ROOT / "scripts" / "diagnostics" / "inspect_excel_rows.py",
         ]
         for path in legacy_paths:
             self.assertFalse(path.exists(), f"이전 스크립트 경로가 남아 있습니다: {path}")

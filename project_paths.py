@@ -41,7 +41,6 @@ RESOURCE_TEMPLATES_DIR = Path("Resources") / "templates"
 RESOURCE_RECEIPT_TEMPLATE_FILE = RESOURCE_TEMPLATES_DIR / "receipt_layout.json"
 RESOURCE_PRODUCT_TEMPLATE_FILE = RESOURCE_TEMPLATES_DIR / "product_receipt_layout.json"
 RESOURCE_APP_ICON_FILE = Path("Resources") / "app.ico"
-RESOURCE_LEGACY_TPL_FILE = RESOURCE_TEMPLATES_DIR / "receipt_default.tpl"
 LEGACY_TEMPLATES_DIR = Path("templates")
 LEGACY_SOUND_DIR = Path("sound")
 

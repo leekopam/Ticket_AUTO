@@ -4,7 +4,7 @@
 .worktrees/
 __pycache__/
 *.pyc
-data.xlsx
+/*.xlsx
 Resources/data/
 session.txt
 debug.log

@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}\\main.py",
-      "python": "C:\\Users\\flzhv\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"
     }

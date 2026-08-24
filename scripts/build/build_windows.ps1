@@ -97,7 +97,6 @@ $exePath = Join-Path $distRoot "$distName.exe"
 Assert-FileExists $exePath "Build output executable was not created."
 Assert-FileExists (Join-Path $distRoot "Resources\templates\receipt_layout.json") "Receipt template was not bundled."
 Assert-FileExists (Join-Path $distRoot "Resources\data\data.xlsx") "Data workbook was not bundled."
-Assert-FileExists (Join-Path $distRoot "receipt_form.json") "Receipt form file was not bundled."
 
 $browserRoot = Join-Path $distRoot "playwright\driver\package\.local-browsers"
 Assert-DirectoryExists $browserRoot "Bundled Playwright browser directory was not created."

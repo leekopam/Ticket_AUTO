@@ -85,6 +85,11 @@ class PlaywrightPackagingContractTest(unittest.TestCase):
                 source,
                 f"{spec_file} must resolve app resources from the repository root.",
             )
+            self.assertNotIn(
+                "receipt_form.json",
+                source,
+                f"{spec_file} must not bundle the obsolete receipt form sample.",
+            )
 
 
 if __name__ == "__main__":

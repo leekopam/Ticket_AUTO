@@ -22,10 +22,10 @@ class BuildScriptContractTest(unittest.TestCase):
             "playwright\\driver\\package\\.local-browsers",
             "Resources\\templates\\receipt_layout.json",
             "Resources\\data\\data.xlsx",
-            "receipt_form.json",
         ]
         for fragment in required_fragments:
             self.assertIn(fragment, source)
+        self.assertNotIn("receipt_form.json", source)
 
     def test_grouped_batch_wrapper_invokes_windows_build_script(self) -> None:
         wrapper = ROOT / "scripts" / "build" / "build_windows.bat"

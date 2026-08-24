@@ -12,7 +12,6 @@ from build_support.playwright_browsers import collect_playwright_browser_datas
 datas = [
     (str(PROJECT_ROOT / 'Resources' / 'templates'), 'Resources\\templates'),
     (str(PROJECT_ROOT / 'Resources' / 'data'), 'Resources\\data'),
-    (str(PROJECT_ROOT / 'receipt_form.json'), '.'),
 ]
 binaries = []
 hiddenimports = []
