@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.qa.smoke_packaged_exe import run_executable_smoke
 
@@ -42,6 +43,26 @@ class PackagedExecutableSmokeTest(unittest.TestCase):
             self.assertTrue(success)
             self.assertIn("remained alive", message)
             self.assertTrue(log_path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 패키징 프로세스 정리 검사")
+    def test_cleans_detached_processes_from_packaged_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            helper = root / "stay_alive.py"
+            helper.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+            with patch(
+                "scripts.qa.smoke_packaged_exe._terminate_windows_processes_below"
+            ) as cleanup:
+                success, _ = run_executable_smoke(
+                    [sys.executable, str(helper)],
+                    startup_seconds=0.2,
+                    log_path=root / "smoke.log",
+                    cleanup_root=root,
+                )
+
+            self.assertTrue(success)
+            cleanup.assert_called_once_with(root)
 
     def test_rejects_missing_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
