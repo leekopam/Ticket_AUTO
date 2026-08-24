@@ -7,8 +7,10 @@ __pycache__/
 data.xlsx
 Resources/data/
 session.txt
+debug.log
 dist/
 build/
+artifacts/
 
 # Generated private Graphify outputs
 graphify-out/

@@ -57,10 +57,29 @@ pip install -r requirements.txt
 ## 빌드 (exe 생성)
 
 ```bat
-pyinstaller Ticket_AUTO.spec
+build_windows.bat
 ```
 
-빌드 결과물은 `dist/Ticket_AUTO/` 에 생성됩니다.
+기본 빌드는 전체 pytest를 통과한 뒤 `dist/Ticket_AUTO_flat/`에 EXE를 생성합니다.
+
+## 자동 검증
+
+개발 중 빠른 회귀 검증:
+
+```powershell
+.\scripts\verify_release.ps1 -Fast
+```
+
+배포 전 전체 검증(실제 Playwright, 빌드, 패키징 EXE 기동 검사):
+
+```powershell
+.\scripts\verify_release.ps1 -Release
+```
+
+실행 결과는 `artifacts/test-results/<실행시각>/`에 저장되며 Git에는 포함되지 않습니다.
+실패 시 해당 폴더의 `summary.md`와 단계별 로그를 확인하고, 원인 수정 및 회귀 테스트 추가 후 다시 실행합니다.
+
+실제 QR, 카메라, 프린터, Witchform 로그인은 `docs/qa/QR_CHECKLIST.md`에 따라 배포 전에 수동 확인합니다.
 
 ---
 
