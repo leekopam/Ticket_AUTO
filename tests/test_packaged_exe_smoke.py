@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.smoke_packaged_exe import run_executable_smoke
+from scripts.qa.smoke_packaged_exe import run_executable_smoke
 
 
 class PackagedExecutableSmokeTest(unittest.TestCase):

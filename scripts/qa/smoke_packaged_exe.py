@@ -1,3 +1,5 @@
+"""패키징된 실행 파일의 조기 종료 여부를 검사한다."""
+
 from __future__ import annotations
 
 import argparse

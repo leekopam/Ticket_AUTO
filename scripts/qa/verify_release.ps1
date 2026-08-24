@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory, ParameterSetName = "Release")]
     [switch]$Release,
 
-    [string]$SpecPath = "Ticket_AUTO_flat.spec",
+    [string]$SpecPath = "build_support\specs\Ticket_AUTO_flat.spec",
     [double]$ExeStartupSeconds = 10
 )
 
@@ -38,7 +38,7 @@ function Invoke-LoggedNativeCommand {
 }
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..")).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..\..")).Path
 Set-Location $repoRoot
 
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
@@ -72,7 +72,7 @@ try {
 
     if ($Release) {
         $buildLog = Join-Path $resultsRoot "build.log"
-        $buildScript = Join-Path $scriptRoot "build_windows.ps1"
+        $buildScript = Join-Path $repoRoot "scripts\build\build_windows.ps1"
         Invoke-LoggedNativeCommand "powershell" @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $buildScript,
             "-SpecPath", $SpecPath, "-SkipTests"

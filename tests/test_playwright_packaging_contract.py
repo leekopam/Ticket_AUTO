@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class PlaywrightPackagingContractTest(unittest.TestCase):
     def test_pyinstaller_specs_bundle_chromium_revision_into_frozen_playwright_path(self) -> None:
         """Frozen builds must place the matching Chromium cache where Playwright looks for it."""
@@ -64,8 +67,9 @@ class PlaywrightPackagingContractTest(unittest.TestCase):
             ],
         )
 
-        for spec_file in ("Ticket_AUTO.spec", "Ticket_AUTO_flat.spec"):
-            source = Path(spec_file).read_text(encoding="utf-8-sig")
+        for spec_name in ("Ticket_AUTO.spec", "Ticket_AUTO_flat.spec"):
+            spec_file = ROOT / "build_support" / "specs" / spec_name
+            source = spec_file.read_text(encoding="utf-8-sig")
             self.assertIn(
                 "from build_support.playwright_browsers import collect_playwright_browser_datas",
                 source,
@@ -75,6 +79,11 @@ class PlaywrightPackagingContractTest(unittest.TestCase):
                 "datas += collect_playwright_browser_datas()",
                 source,
                 f"{spec_file} must bundle the matching browser cache into the frozen app.",
+            )
+            self.assertIn(
+                "PROJECT_ROOT = Path(SPECPATH).resolve().parents[1]",
+                source,
+                f"{spec_file} must resolve app resources from the repository root.",
             )
 
 

@@ -1,4 +1,7 @@
 @echo off
+setlocal
+cd /d "%~dp0..\.."
+
 echo [1/5] 가상환경 생성...
 python -m venv .venv
 

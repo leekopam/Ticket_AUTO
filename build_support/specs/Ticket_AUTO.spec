@@ -1,9 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
+
+PROJECT_ROOT = Path(SPECPATH).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from build_support.playwright_browsers import collect_playwright_browser_datas
 
-datas = [('Resources\\templates', 'Resources\\templates'), ('Resources\\data', 'Resources\\data'), ('receipt_form.json', '.')]
+datas = [
+    (str(PROJECT_ROOT / 'Resources' / 'templates'), 'Resources\\templates'),
+    (str(PROJECT_ROOT / 'Resources' / 'data'), 'Resources\\data'),
+    (str(PROJECT_ROOT / 'receipt_form.json'), '.'),
+]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')
@@ -20,8 +30,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=['.'],
+    [str(PROJECT_ROOT / 'main.py')],
+    pathex=[str(PROJECT_ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

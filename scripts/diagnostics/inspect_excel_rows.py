@@ -1,4 +1,10 @@
-import openpyxl, json
+"""두 Excel 파일의 앞부분을 JSON으로 비교하는 일회성 진단 도구."""
+
+import json
+
+import openpyxl
+
+
 wb1 = openpyxl.load_workbook("data.xlsx", data_only=True)
 ws1 = wb1.active
 data = {"data_rows": []}

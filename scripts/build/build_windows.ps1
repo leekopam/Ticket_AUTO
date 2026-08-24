@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$SpecPath = "Ticket_AUTO_flat.spec",
+    [string]$SpecPath = "build_support\specs\Ticket_AUTO_flat.spec",
     [switch]$SkipTests,
     [switch]$SkipDependencyInstall
 )
@@ -49,7 +49,7 @@ function Assert-DirectoryExists {
 }
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..")).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..\..")).Path
 Set-Location $repoRoot
 
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
