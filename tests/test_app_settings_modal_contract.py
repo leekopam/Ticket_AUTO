@@ -272,6 +272,104 @@ class AppSettingsModalContractTest(unittest.TestCase):
         self.assertEqual(callback_calls, [("manual", 8.5)])
         self.assertNotIn("런타임 초점 즉시 적용 완료", self._collect_strings(panel))
 
+    def test_app_settings_panel_disables_manual_focus_for_unsupported_camera(self) -> None:
+        try:
+            from services.receipt_settings_store import ReceiptSettingsStore
+            from views.settings_flet_view import build_app_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        callback_calls: list[tuple[str, float | None]] = []
+        with TemporaryDirectory() as temp_dir:
+            store_path = str(Path(temp_dir) / "receipt_settings.json")
+            panel = build_app_settings_panel(
+                _StubPage(),
+                store_path=store_path,
+                focus_capability_getter=lambda: SimpleNamespace(manual_focus_supported=False),
+                on_apply_scanner_focus_settings=lambda mode, value: callback_calls.append((mode, value)),
+            )
+
+            focus_mode_dropdown = self._find_control_by_label(panel, "초점 모드")
+            manual_focus_value_field = self._find_control_by_label(panel, "수동 초점 값")
+
+            self.assertIsNotNone(focus_mode_dropdown)
+            self.assertIsNotNone(manual_focus_value_field)
+            self.assertEqual([option.key for option in focus_mode_dropdown.options], ["auto"])
+            self.assertTrue(manual_focus_value_field.disabled)
+            self.assertIn(
+                "현재 카메라는 수동 초점을 지원하지 않습니다. 자동 초점 또는 카메라 고급 설정을 사용하세요.",
+                self._collect_strings(panel),
+            )
+            self.assertEqual(ReceiptSettingsStore(store_path).load().scanner_focus_mode, "auto")
+            self.assertEqual(callback_calls, [])
+
+    def test_app_settings_panel_marks_focus_support_as_unverified_when_runtime_is_idle(self) -> None:
+        try:
+            from views.settings_flet_view import build_app_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        panel = build_app_settings_panel(
+            _StubPage(),
+            focus_capability_getter=lambda: None,
+        )
+
+        self.assertIn(
+            "카메라 실행 후 수동 초점 지원 여부를 확인합니다.",
+            self._collect_strings(panel),
+        )
+
+    def test_app_settings_panel_restores_auto_when_manual_apply_is_rejected(self) -> None:
+        try:
+            from services.receipt_settings_store import ReceiptSettingsStore
+            from views.settings_flet_view import build_app_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        capability_state = [SimpleNamespace(manual_focus_supported=None)]
+
+        def _apply_focus(_mode: str, _value: float | None) -> str:
+            capability_state[0] = SimpleNamespace(manual_focus_supported=False)
+            return "현재 카메라는 수동 초점을 지원하지 않습니다."
+
+        with TemporaryDirectory() as temp_dir:
+            store_path = str(Path(temp_dir) / "receipt_settings.json")
+            panel = build_app_settings_panel(
+                _StubPage(),
+                store_path=store_path,
+                focus_capability_getter=lambda: capability_state[0],
+                on_apply_scanner_focus_settings=_apply_focus,
+            )
+            focus_mode_dropdown = self._find_control_by_label(panel, "초점 모드")
+            manual_focus_value_field = self._find_control_by_label(panel, "수동 초점 값")
+            manual_focus_value_field.value = "8.5"
+            focus_mode_dropdown.value = "manual"
+
+            focus_mode_dropdown.on_change(SimpleNamespace(control=focus_mode_dropdown))
+
+            saved = ReceiptSettingsStore(store_path).load()
+            self.assertEqual(saved.scanner_focus_mode, "auto")
+            self.assertIsNone(saved.scanner_manual_focus_value)
+            self.assertEqual(focus_mode_dropdown.value, "auto")
+
+    def test_app_settings_panel_opens_native_camera_settings(self) -> None:
+        try:
+            from views.settings_flet_view import build_app_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        open_calls: list[bool] = []
+        panel = build_app_settings_panel(
+            _StubPage(),
+            on_open_camera_settings=lambda: open_calls.append(True) or True,
+        )
+
+        button = self._find_clickable_control_by_text(panel, "카메라 고급 설정")
+        self.assertIsNotNone(button)
+        button.on_click(SimpleNamespace(control=button))
+
+        self.assertEqual(open_calls, [True])
+
     def test_app_settings_panel_notifies_ticket_product_changes_immediately(self) -> None:
         try:
             import flet as ft

@@ -7,9 +7,107 @@ import json
 import subprocess
 import threading
 import time
-from typing import Iterator
+from typing import Iterator, Literal
 
 import cv2
+
+
+FocusMode = Literal["auto", "manual"]
+
+
+@dataclass(frozen=True)
+class FocusCapability:
+    """카메라가 공개한 초점 제어 상태입니다.
+
+    ``None``은 OpenCV 속성은 존재하지만 실제 장치 지원 여부를 아직
+    설정 결과로 확인하지 못했다는 의미입니다.
+    """
+
+    autofocus_supported: bool | None
+    manual_focus_supported: bool | None
+    focus_min: float | None = None
+    focus_max: float | None = None
+    focus_step: float | None = None
+
+
+def _coerce_capture_set_result(result: object) -> bool:
+    return True if result is None else bool(result)
+
+
+def _capture_is_available(cap: cv2.VideoCapture | object) -> bool:
+    if cap is None or not hasattr(cap, "set"):
+        return False
+    is_opened = getattr(cap, "isOpened", None)
+    if not callable(is_opened):
+        return True
+    try:
+        return bool(is_opened())
+    except Exception:
+        return False
+
+
+def detect_focus_capability(cap: cv2.VideoCapture | object) -> FocusCapability:
+    """장치 설정을 변경하지 않고 확인 가능한 초점 기능을 반환합니다."""
+    if not _capture_is_available(cap):
+        return FocusCapability(autofocus_supported=False, manual_focus_supported=False)
+
+    autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+    focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+    return FocusCapability(
+        autofocus_supported=None if autofocus_prop is not None else False,
+        manual_focus_supported=None if focus_prop is not None else False,
+    )
+
+
+def apply_focus_mode(
+    cap: cv2.VideoCapture | object,
+    capability: FocusCapability,
+    *,
+    mode: FocusMode,
+    manual_focus_value: float | None = None,
+) -> bool:
+    """초점 모드를 적용하고 OpenCV 장치 응답을 성공 여부로 반환합니다."""
+    if not _capture_is_available(cap):
+        return False
+
+    autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+    focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+
+    if mode == "auto":
+        if capability.autofocus_supported is False or autofocus_prop is None:
+            return False
+        try:
+            return _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+        except Exception:
+            return False
+
+    if capability.manual_focus_supported is False or manual_focus_value is None or focus_prop is None:
+        if capability.autofocus_supported is not False and autofocus_prop is not None:
+            try:
+                _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+            except Exception:
+                pass
+        return False
+
+    if capability.autofocus_supported is not False and autofocus_prop is not None:
+        try:
+            cap.set(autofocus_prop, 0.0)
+        except Exception:
+            pass
+
+    try:
+        applied = _coerce_capture_set_result(cap.set(focus_prop, float(manual_focus_value)))
+    except Exception:
+        applied = False
+    if applied:
+        return True
+
+    if capability.autofocus_supported is not False and autofocus_prop is not None:
+        try:
+            _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+        except Exception:
+            pass
+    return False
 
 
 @dataclass(frozen=True)
@@ -56,6 +154,17 @@ class WindowsCameraService:
             CameraDevice(index=index, name=f"카메라 {index}")
             for index in openable_indices
         ]
+
+    @staticmethod
+    def open_camera_settings(cap: cv2.VideoCapture | object) -> bool:
+        """DirectShow 카메라의 Windows/제조사 속성 창을 엽니다."""
+        settings_prop = getattr(cv2, "CAP_PROP_SETTINGS", None)
+        if settings_prop is None or not _capture_is_available(cap):
+            return False
+        try:
+            return _coerce_capture_set_result(cap.set(settings_prop, 1.0))
+        except Exception:
+            return False
 
     def _get_cached_wmi_camera_names(self) -> list[str]:
         now = time.monotonic()

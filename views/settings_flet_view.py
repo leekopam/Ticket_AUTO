@@ -850,6 +850,7 @@ def _build_app_settings_ticket_panel(
     focus_mode_dropdown: ft.Control,
     manual_focus_value_field: ft.Control,
     focus_capability_badge: ft.Control | None = None,
+    camera_settings_button: ft.Control | None = None,
     focus_section_title: str = "카메라 초점 설정",
     focus_description: str = "수동 초점 설정은 다음 앱 시작 후 적용됩니다.",
     settings_status_text: ft.Text,
@@ -908,6 +909,7 @@ def _build_app_settings_ticket_panel(
                 *([focus_capability_badge] if focus_capability_badge is not None else []),
                 focus_mode_dropdown,
                 manual_focus_value_field,
+                *([camera_settings_button] if camera_settings_button is not None else []),
             ],
             spacing=10,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -5679,6 +5681,8 @@ def build_app_settings_panel(
     debug_store_path: str = ".runtime/ticket_debug_settings.json",
     audio_service: WindowsAudioService | None = None,
     on_apply_scanner_focus_settings: Callable[[str, float | None], str | None] | None = None,
+    focus_capability_getter: Callable[[], object | None] | None = None,
+    on_open_camera_settings: Callable[[], bool] | None = None,
     on_ticket_products_changed: Callable[[list[str]], None] | None = None,
     on_scan_sound_rules_changed: Callable[[], None] | None = None,
     show_section_tabs: bool = True,
@@ -5733,6 +5737,31 @@ def build_app_settings_panel(
         value="" if settings.scanner_manual_focus_value is None else str(settings.scanner_manual_focus_value),
         hint_text="예: 8.0",
         border_radius=10,
+    )
+    if focus_capability_badge is None:
+        focus_capability_badge = ft.Container(
+            visible=False,
+            bgcolor="#EFF6FF",
+            border=ft.border.all(1, "#BFDBFE"),
+            border_radius=16,
+            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ICONS.INFO_OUTLINE_ROUNDED, size=18, color="#1D4ED8"),
+                    ft.Text("", size=12, color="#1D4ED8", expand=True),
+                ],
+                spacing=8,
+            ),
+        )
+    camera_settings_button = ft.OutlinedButton(
+        "카메라 고급 설정",
+        icon=ICONS.TUNE_ROUNDED,
+        disabled=on_open_camera_settings is None,
+        tooltip=(
+            "Windows 또는 제조사가 제공하는 카메라 속성 창 열기"
+            if on_open_camera_settings is not None
+            else "카메라 실행 후 사용할 수 있습니다."
+        ),
     )
     ticket_checkbox_list = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO)
     ticket_checkboxes: list[ft.Checkbox] = []
@@ -6056,8 +6085,67 @@ def build_app_settings_panel(
         _save_modal_settings(message)
         _refresh_scan_sound_rule_controls(preserve_weight_input=preserve_weight_input)
 
+    focus_capability_state: dict[str, bool | None] = {"manual_supported": None}
+
+    def _set_focus_capability_notice(text: str, *, visible: bool) -> None:
+        focus_capability_badge.visible = visible
+        content = getattr(focus_capability_badge, "content", None)
+        controls = getattr(content, "controls", None)
+        if not isinstance(controls, list):
+            return
+        for control in reversed(controls):
+            if isinstance(control, ft.Text):
+                control.value = text
+                return
+
+    def _refresh_focus_capability_state() -> None:
+        capability = None
+        if focus_capability_getter is not None:
+            try:
+                capability = focus_capability_getter()
+            except Exception:
+                logger.warning("카메라 초점 기능 UI 조회 실패", exc_info=True)
+        manual_supported = (
+            None
+            if capability is None
+            else getattr(capability, "manual_focus_supported", None)
+        )
+        focus_capability_state["manual_supported"] = manual_supported
+
+        if manual_supported is False:
+            focus_mode_dropdown.options = [ft.dropdown.Option(key="auto", text="자동 초점")]
+            focus_mode_dropdown.value = "auto"
+            manual_focus_value_field.value = ""
+            _set_focus_capability_notice(
+                "현재 카메라는 수동 초점을 지원하지 않습니다. 자동 초점 또는 카메라 고급 설정을 사용하세요.",
+                visible=True,
+            )
+        else:
+            focus_mode_dropdown.options = [
+                ft.dropdown.Option(key="auto", text="자동 초점"),
+                ft.dropdown.Option(key="manual", text="수동 초점"),
+            ]
+            if manual_supported is True:
+                _set_focus_capability_notice("", visible=False)
+            elif focus_capability_getter is not None and capability is None:
+                _set_focus_capability_notice(
+                    "카메라 실행 후 수동 초점 지원 여부를 확인합니다.",
+                    visible=True,
+                )
+            elif focus_capability_getter is not None:
+                _set_focus_capability_notice(
+                    "수동 초점 지원 여부는 처음 설정을 적용할 때 확인됩니다.",
+                    visible=True,
+                )
+            else:
+                _set_focus_capability_notice("", visible=False)
+        _sync_focus_field_state()
+
     def _sync_focus_field_state() -> None:
-        manual_focus_value_field.disabled = (focus_mode_dropdown.value or "auto") != "manual"
+        manual_focus_value_field.disabled = (
+            (focus_mode_dropdown.value or "auto") != "manual"
+            or focus_capability_state["manual_supported"] is False
+        )
 
     def _parse_manual_focus_value() -> float | None:
         raw = (manual_focus_value_field.value or "").strip()
@@ -6066,6 +6154,7 @@ def build_app_settings_panel(
         return float(raw)
 
     def _save_modal_settings(message: str) -> ReceiptSettings:
+        _refresh_focus_capability_state()
         latest = _load_latest_settings()
         latest.ticket_product_names = _selected_ticket_names()
         latest.qr_scan_success_sound_rules = _rebalance_scan_success_rules(_get_scan_sound_rules(), mode="normalize")
@@ -6149,7 +6238,15 @@ def build_app_settings_panel(
         )
         if runtime_message:
             settings_status_text.value = runtime_message
-            page.update()
+        _refresh_focus_capability_state()
+        if (
+            latest.scanner_focus_mode == "manual"
+            and focus_capability_state["manual_supported"] is False
+        ):
+            latest.scanner_focus_mode = "auto"
+            latest.scanner_manual_focus_value = None
+            settings_store.save(latest)
+        page.update()
 
     def _load_ticket_checkboxes() -> None:
         ticket_checkboxes.clear()
@@ -6171,7 +6268,7 @@ def build_app_settings_panel(
         ]
 
     _load_ticket_checkboxes()
-    _sync_focus_field_state()
+    _refresh_focus_capability_state()
     _refresh_scan_sound_rule_controls(push_update=False)
     _refresh_debug_settings_summary(push_update=False)
 
@@ -6313,6 +6410,23 @@ def build_app_settings_panel(
             settings_status_text.value = "초점 값은 숫자로 입력하세요."
             page.update()
 
+    def on_open_native_camera_settings(_: ft.ControlEvent) -> None:
+        if on_open_camera_settings is None:
+            settings_status_text.value = "카메라 실행 후 고급 설정을 사용할 수 있습니다."
+            page.update()
+            return
+        try:
+            opened = bool(on_open_camera_settings())
+        except Exception:
+            logger.warning("카메라 고급 설정 열기 실패", exc_info=True)
+            opened = False
+        settings_status_text.value = (
+            "카메라 고급 설정 창을 열었습니다."
+            if opened
+            else "카메라 고급 설정을 열지 못했습니다. 카메라가 실행 중인지 확인하세요."
+        )
+        page.update()
+
     def _on_sound_picker_result(event) -> None:
         _handle_sound_files(_coerce_picker_files(event))
 
@@ -6335,6 +6449,7 @@ def build_app_settings_panel(
     focus_mode_dropdown.on_change = on_focus_mode_change
     manual_focus_value_field.on_blur = on_manual_focus_value_blur
     manual_focus_value_field.on_submit = on_manual_focus_value_submit
+    camera_settings_button.on_click = on_open_native_camera_settings
     debug_count_scan_success_switch.on_change = on_debug_count_scan_success_change
     debug_duplicate_sound_switch.on_change = on_debug_duplicate_sound_change
     debug_offline_scan_switch.on_change = on_debug_offline_scan_change
@@ -6351,6 +6466,7 @@ def build_app_settings_panel(
         focus_mode_dropdown=focus_mode_dropdown,
         manual_focus_value_field=manual_focus_value_field,
         focus_capability_badge=focus_capability_badge,
+        camera_settings_button=camera_settings_button,
         focus_section_title=focus_section_title,
         focus_description=focus_description,
         settings_status_text=settings_status_text,

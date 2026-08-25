@@ -156,8 +156,26 @@ class TicketRuntimeManager:
         try:
             return getter()
         except Exception:
-            logger.warning("移대찓??珥덉젏 capability 議고쉶 ?ㅽ뙣", exc_info=True)
+            logger.warning("카메라 초점 기능 조회 실패", exc_info=True)
             return None
+
+    def open_scanner_camera_settings(self) -> bool:
+        """실행 중인 스캔 카메라의 Windows/제조사 설정 창을 엽니다."""
+        with self._lock:
+            app = self._app
+            thread = self._thread
+
+        if not app or not thread or not thread.is_alive():
+            return False
+
+        opener = getattr(app, "open_scanner_camera_settings", None)
+        if not callable(opener):
+            return False
+        try:
+            return bool(opener())
+        except Exception:
+            logger.warning("카메라 고급 설정 창 열기 실패", exc_info=True)
+            return False
 
     def subscribe(self, callback: RuntimeCallback) -> None:
         with self._lock:

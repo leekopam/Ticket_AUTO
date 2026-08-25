@@ -16,6 +16,7 @@ class _FakeApplication:
         self.stop_calls = 0
         self.relogin_calls = 0
         self.focus_apply_calls: list[tuple[str, float | None]] = []
+        self.camera_settings_open_calls = 0
 
     def set_status_listener(self, listener):
         self.listener = listener
@@ -43,6 +44,10 @@ class _FakeApplication:
     def apply_scanner_focus_settings(self, focus_mode: str, manual_focus_value: float | None) -> str:
         self.focus_apply_calls.append((focus_mode, manual_focus_value))
         return "카메라 초점 설정 저장 완료 (현재 런타임에 바로 적용됨)"
+
+    def open_scanner_camera_settings(self) -> bool:
+        self.camera_settings_open_calls += 1
+        return True
 
 
 class _FakeFactory:
@@ -397,6 +402,22 @@ class RuntimeManagerTest(unittest.TestCase):
     def test_get_scanner_focus_capability_returns_none_when_idle(self) -> None:
         manager = TicketRuntimeManager(app_factory=_FakeFactory())
         self.assertIsNone(manager.get_scanner_focus_capability())
+
+    def test_open_scanner_camera_settings_forwards_to_running_app(self) -> None:
+        app = _FakeApplication()
+        manager = TicketRuntimeManager(app_factory=lambda: app)
+        self.assertTrue(manager.start())
+        self.assertTrue(_wait_until(lambda: manager.is_running))
+
+        self.assertTrue(manager.open_scanner_camera_settings())
+
+        self.assertEqual(app.camera_settings_open_calls, 1)
+        self.assertTrue(manager.stop())
+
+    def test_open_scanner_camera_settings_returns_false_when_idle(self) -> None:
+        manager = TicketRuntimeManager(app_factory=_FakeFactory())
+
+        self.assertFalse(manager.open_scanner_camera_settings())
 
 
 if __name__ == "__main__":

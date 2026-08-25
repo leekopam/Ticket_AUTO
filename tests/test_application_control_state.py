@@ -115,12 +115,8 @@ class ApplicationControlStateTest(unittest.TestCase):
             def get_focus_capability(self):
                 return SimpleNamespace(manual_focus_supported=True)
 
-            def set_manual_focus_value(self, value):
-                focus_calls.append(("manual_value", value))
-                return True
-
-            def set_focus_mode(self, mode):
-                focus_calls.append(("focus_mode", mode))
+            def apply_focus_settings(self, mode, value):
+                focus_calls.append((mode, value))
                 return True
 
         app._scanner_view = _FakeScanner()
@@ -132,8 +128,7 @@ class ApplicationControlStateTest(unittest.TestCase):
         message = app.apply_scanner_focus_settings("manual", 8.5)
 
         self.assertEqual(message, "카메라 초점 설정 저장 완료 (현재 런타임에 바로 적용됨)")
-        # 모드 먼저 설정 후 수동 초점 값 적용
-        self.assertEqual(focus_calls, [("focus_mode", "manual"), ("manual_value", 8.5)])
+        self.assertEqual(focus_calls, [("manual", 8.5)])
         self.assertEqual(app._receipt_settings.scanner_focus_mode, "manual")
         self.assertEqual(app._receipt_settings.scanner_manual_focus_value, 8.5)
 
@@ -162,8 +157,8 @@ class ApplicationControlStateTest(unittest.TestCase):
             def get_focus_capability(self):
                 return SimpleNamespace(manual_focus_supported=True)
 
-            def set_focus_mode(self, mode):
-                focus_calls.append(("focus_mode", mode))
+            def apply_focus_settings(self, mode, value):
+                focus_calls.append((mode, value))
                 return True
 
         app._scanner_view = _FakeScanner()
@@ -175,7 +170,7 @@ class ApplicationControlStateTest(unittest.TestCase):
         message = app.apply_scanner_focus_settings("manual", None)
 
         self.assertEqual(message, "수동 초점 값이 없어 자동 초점으로 유지됩니다.")
-        self.assertEqual(focus_calls, [("focus_mode", "auto")])
+        self.assertEqual(focus_calls, [("auto", None)])
         self.assertEqual(app._receipt_settings.scanner_focus_mode, "auto")
         self.assertIsNone(app._receipt_settings.scanner_manual_focus_value)
 
@@ -190,8 +185,8 @@ class ApplicationControlStateTest(unittest.TestCase):
             def get_focus_capability(self):
                 return SimpleNamespace(manual_focus_supported=False)
 
-            def set_focus_mode(self, mode):
-                focus_calls.append(("focus_mode", mode))
+            def apply_focus_settings(self, mode, value):
+                focus_calls.append((mode, value))
                 return True
 
         app._scanner_view = _FakeScanner()
@@ -203,7 +198,7 @@ class ApplicationControlStateTest(unittest.TestCase):
         message = app.apply_scanner_focus_settings("manual", 8.5)
 
         self.assertEqual(message, "현재 카메라가 수동 초점을 지원하지 않아 자동 초점으로 유지됩니다.")
-        self.assertEqual(focus_calls, [("focus_mode", "auto")])
+        self.assertEqual(focus_calls, [("auto", None)])
         self.assertEqual(app._receipt_settings.scanner_focus_mode, "auto")
         self.assertIsNone(app._receipt_settings.scanner_manual_focus_value)
 
@@ -219,6 +214,18 @@ class ApplicationControlStateTest(unittest.TestCase):
         app._scanner_view = None
 
         self.assertIsNone(app.get_scanner_focus_capability())
+
+    def test_open_scanner_camera_settings_proxies_to_scanner(self) -> None:
+        app = self._build_app()
+        app._scanner_view = SimpleNamespace(open_camera_settings=lambda: True)
+
+        self.assertTrue(app.open_scanner_camera_settings())
+
+    def test_open_scanner_camera_settings_returns_false_without_scanner(self) -> None:
+        app = self._build_app()
+        app._scanner_view = None
+
+        self.assertFalse(app.open_scanner_camera_settings())
 
 
 if __name__ == "__main__":

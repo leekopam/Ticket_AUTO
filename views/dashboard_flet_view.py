@@ -2839,88 +2839,29 @@ class DashboardFletView:
             value=str(saved_camera_index),
             options=[ft.dropdown.Option(key=str(saved_camera_index), text=f"카메라 {saved_camera_index}")],
         )
-        saved_focus_settings = saved_dashboard_settings
         camera_focus_panel_state = {"value": False}
         camera_focus_handle_state = {"hovered": False}
-        camera_focus_capability_state = {"manual_supported": None}
         camera_list_requested_state = {"value": False}
         ticket_settings_sidebar_panel_ref: dict[str, ft.Control | None] = {"value": None}
         receipt_settings_sidebar_panel_ref: dict[str, ft.Control | None] = {"value": None}
-        focus_mode_dropdown = ft.Dropdown(
-            label="초점 모드",
-            value=saved_focus_settings.scanner_focus_mode,
-            options=[
-                ft.dropdown.Option(key="auto", text="자동 초점"),
-                ft.dropdown.Option(key="manual", text="수동 초점"),
-            ],
-            border_radius=10,
-        )
-        manual_focus_value_field = ft.TextField(
-            label="수동 초점 값",
-            value=(
-                ""
-                if saved_focus_settings.scanner_manual_focus_value is None
-                else str(saved_focus_settings.scanner_manual_focus_value)
-            ),
-            hint_text="예: 8.0",
-            border_radius=10,
-        )
-        apply_camera_focus_input_tone(camera_dropdown, focus_mode_dropdown, manual_focus_value_field)
+        apply_camera_focus_input_tone(camera_dropdown)
         camera_focus_capability_badge = build_camera_focus_capability_badge(
             text="현재 카메라는 수동 초점을 지원하지 않아 자동 초점만 사용할 수 있습니다.",
             visible=False,
         )
-        def _sync_dashboard_focus_field_state() -> None:
-            manual_focus_value_field.disabled = (
-                (focus_mode_dropdown.value or "auto") != "manual"
-                or camera_focus_capability_state["manual_supported"] is False
-            )
 
         def _refresh_camera_focus_capability_badge() -> None:
             capability = self._runtime_manager.get_scanner_focus_capability()
             manual_supported = None
             if capability is not None:
-                manual_supported = bool(getattr(capability, "manual_focus_supported", False))
-            camera_focus_capability_state["manual_supported"] = manual_supported
+                manual_supported = getattr(capability, "manual_focus_supported", None)
             camera_focus_capability_badge.visible = manual_supported is False
-            if manual_supported is False and (focus_mode_dropdown.value or "auto") == "manual":
-                focus_mode_dropdown.value = "auto"
-                current_settings = settings_store.load()
+            current_settings = settings_store.load()
+            if manual_supported is False and current_settings.scanner_focus_mode == "manual":
                 current_settings.scanner_focus_mode = "auto"
                 current_settings.scanner_manual_focus_value = None
                 settings_store.save(current_settings)
                 self._runtime_manager.apply_scanner_focus_settings("auto", None)
-            _sync_dashboard_focus_field_state()
-
-        def _parse_dashboard_manual_focus_value() -> float | None:
-            raw = (manual_focus_value_field.value or "").strip()
-            if not raw:
-                return None
-            return float(raw)
-
-        def _save_dashboard_focus_settings() -> None:
-            current_settings = settings_store.load()
-            parsed_manual_focus_value = _parse_dashboard_manual_focus_value()
-            requested_manual_focus = (focus_mode_dropdown.value or "auto") == "manual"
-            manual_supported = camera_focus_capability_state["manual_supported"]
-            current_settings.scanner_focus_mode = (
-                "manual"
-                if requested_manual_focus
-                and parsed_manual_focus_value is not None
-                and manual_supported is not False
-                else "auto"
-            )
-            current_settings.scanner_manual_focus_value = (
-                parsed_manual_focus_value
-                if current_settings.scanner_focus_mode == "manual"
-                else None
-            )
-            settings_store.save(current_settings)
-            self._runtime_manager.apply_scanner_focus_settings(
-                current_settings.scanner_focus_mode,
-                current_settings.scanner_manual_focus_value,
-            )
-            safe_page_update(page, search_refresh_stop)
 
         def _apply_camera_focus_side_handle_style() -> None:
             is_settings_tab = current_tab["value"] in {"ticket", "receipt"}
@@ -3039,19 +2980,6 @@ class DashboardFletView:
             _apply_camera_focus_side_handle_style()
             safe_page_update(camera_focus_side_handle, search_refresh_stop)
 
-        def _on_focus_mode_change(_e: ft.ControlEvent) -> None:
-            _sync_dashboard_focus_field_state()
-            try:
-                _save_dashboard_focus_settings()
-            except ValueError:
-                safe_page_update(page, search_refresh_stop)
-
-        def _on_manual_focus_value_blur(_e: ft.ControlEvent) -> None:
-            try:
-                _save_dashboard_focus_settings()
-            except ValueError:
-                safe_page_update(page, search_refresh_stop)
-
         def _on_camera_dropdown_change(_e: ft.ControlEvent) -> None:
             new_index = int(camera_dropdown.value or "0")
             current_settings = settings_store.load()
@@ -3060,8 +2988,6 @@ class DashboardFletView:
             self._runtime_manager.change_camera(new_index)
 
         camera_dropdown.on_change = _on_camera_dropdown_change
-        focus_mode_dropdown.on_change = _on_focus_mode_change
-        manual_focus_value_field.on_blur = _on_manual_focus_value_blur
 
         btn_refresh_cameras = ft.IconButton(
             icon=ICONS.REFRESH_ROUNDED,
@@ -3102,7 +3028,6 @@ class DashboardFletView:
             threading.Thread(target=_load_cameras_async, daemon=True).start()
 
         btn_refresh_cameras.on_click = _on_refresh_cameras
-        _sync_dashboard_focus_field_state()
 
         camera_selector_row = ft.Row(
             controls=[
@@ -3148,6 +3073,8 @@ class DashboardFletView:
                         page,
                         store_path=str(resolve_project_path(".runtime/receipt_settings.json")),
                         on_apply_scanner_focus_settings=self._runtime_manager.apply_scanner_focus_settings,
+                        focus_capability_getter=self._runtime_manager.get_scanner_focus_capability,
+                        on_open_camera_settings=self._runtime_manager.open_scanner_camera_settings,
                         on_ticket_products_changed=_on_ticket_product_names_changed,
                         on_scan_sound_rules_changed=lambda: (
                             _refresh_scan_success_progress_summary(),

@@ -42,6 +42,9 @@ class _FakeRuntimeManager:
     def apply_scanner_focus_settings(self, *_values) -> None:
         return None
 
+    def open_scanner_camera_settings(self) -> bool:
+        return True
+
     def change_camera(self, *_values) -> None:
         return None
 

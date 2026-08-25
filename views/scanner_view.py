@@ -7,7 +7,6 @@ import queue
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -15,6 +14,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from pyzbar.pyzbar import decode
+
+from services.windows_camera_service import (
+    FocusCapability,
+    FocusMode,
+    WindowsCameraService,
+    apply_focus_mode,
+    detect_focus_capability,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -43,92 +50,6 @@ _STATUS_TEXT_PADDING_X = 12
 _STATUS_TEXT_PADDING_Y = 10
 RecoveryAction = Literal["none", "focus_pulse", "manual_focus_step"]
 CameraStatusListener = Callable[[str | None], None]
-FocusMode = Literal["auto", "manual"]
-
-
-@dataclass(frozen=True)
-class FocusCapability:
-    autofocus_supported: bool
-    manual_focus_supported: bool
-    focus_min: float | None = None
-    focus_max: float | None = None
-    focus_step: float | None = None
-
-
-def _coerce_capture_set_result(result: object) -> bool:
-    return True if result is None else bool(result)
-
-
-def _probe_capture_property_support(
-    cap: cv2.VideoCapture | object,
-    *,
-    prop: int | None,
-    value: float,
-) -> bool:
-    if prop is None or cap is None or not hasattr(cap, "set"):
-        return False
-    try:
-        return _coerce_capture_set_result(cap.set(prop, float(value)))
-    except Exception:
-        return False
-
-
-def detect_focus_capability(cap: cv2.VideoCapture | object) -> FocusCapability:
-    autofocus_supported = getattr(cv2, "CAP_PROP_AUTOFOCUS", None) is not None and hasattr(cap, "set")
-    manual_focus_supported = getattr(cv2, "CAP_PROP_FOCUS", None) is not None and hasattr(cap, "set")
-    return FocusCapability(
-        autofocus_supported=autofocus_supported,
-        manual_focus_supported=manual_focus_supported,
-    )
-
-
-def apply_focus_mode(
-    cap: cv2.VideoCapture | object,
-    capability: FocusCapability,
-    *,
-    mode: FocusMode,
-    manual_focus_value: float | None = None,
-) -> bool:
-    if cap is None or not hasattr(cap, "set"):
-        return False
-
-    autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
-    focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
-
-    if mode == "auto":
-        if not capability.autofocus_supported or autofocus_prop is None:
-            return False
-        try:
-            return _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
-        except Exception:
-            return False
-
-    if not capability.manual_focus_supported or manual_focus_value is None or focus_prop is None:
-        if capability.autofocus_supported and autofocus_prop is not None:
-            try:
-                _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
-            except Exception:
-                pass
-        return False
-
-    if capability.autofocus_supported and autofocus_prop is not None:
-        try:
-            cap.set(autofocus_prop, 0.0)
-        except Exception:
-            pass
-
-    try:
-        applied = _coerce_capture_set_result(cap.set(focus_prop, float(manual_focus_value)))
-    except Exception:
-        applied = False
-    if applied:
-        return True
-    if capability.autofocus_supported and autofocus_prop is not None:
-        try:
-            _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
-        except Exception:
-            pass
-    return False
 
 
 def advance_phone_screen_recovery_state(
@@ -438,9 +359,6 @@ class ScannerView:
     def set_auth_ready(self, ready: bool) -> None:
         with self._lock:
             self._is_auth_ready = ready
-            cap = self._cap if ready else None
-        if cap is not None:
-            self._configure_focus_for_capture(cap, reprobe=False)
 
     def is_auth_ready(self) -> bool:
         with self._lock:
@@ -452,10 +370,35 @@ class ScannerView:
             cached = self._focus_capability
         if cap is None:
             return cached or FocusCapability(autofocus_supported=False, manual_focus_supported=False)
+        if cached is not None:
+            return cached
         capability = detect_focus_capability(cap)
         with self._lock:
             self._focus_capability = capability
         return capability
+
+    @staticmethod
+    def _capability_after_focus_attempt(
+        capability: FocusCapability,
+        *,
+        mode: FocusMode,
+        applied: bool,
+    ) -> FocusCapability:
+        if mode == "manual":
+            return FocusCapability(
+                autofocus_supported=capability.autofocus_supported,
+                manual_focus_supported=applied,
+                focus_min=capability.focus_min,
+                focus_max=capability.focus_max,
+                focus_step=capability.focus_step,
+            )
+        return FocusCapability(
+            autofocus_supported=applied,
+            manual_focus_supported=capability.manual_focus_supported,
+            focus_min=capability.focus_min,
+            focus_max=capability.focus_max,
+            focus_step=capability.focus_step,
+        )
 
     def _configure_focus_for_capture(
         self,
@@ -482,59 +425,77 @@ class ScannerView:
                 mode=focus_mode,
                 manual_focus_value=manual_focus_value,
             )
+        learned_capability = self._capability_after_focus_attempt(
+            capability,
+            mode=focus_mode,
+            applied=applied,
+        )
+        with self._lock:
+            self._focus_capability = learned_capability
+            if focus_mode == "manual" and not applied:
+                self._focus_mode = "auto"
+                self._manual_focus_value = None
         return applied
 
-    def set_focus_mode(self, mode: FocusMode) -> bool:
-        normalized_mode: FocusMode = "manual" if mode == "manual" else "auto"
+    def apply_focus_settings(self, mode: FocusMode, manual_focus_value: float | None) -> bool:
+        """초점 모드와 값을 한 번의 장치 IO 작업으로 적용합니다."""
+        normalized_value = None if manual_focus_value is None else float(manual_focus_value)
+        normalized_mode: FocusMode = "manual" if mode == "manual" and normalized_value is not None else "auto"
         with self._lock:
             self._focus_mode = normalized_mode
+            self._manual_focus_value = normalized_value if normalized_mode == "manual" else None
             cap = self._cap
             capability = self._focus_capability
-            manual_focus_value = self._manual_focus_value
 
         if cap is None:
-            return normalized_mode == "auto" or manual_focus_value is not None
-
+            return True
         if capability is None:
             capability = detect_focus_capability(cap)
-            with self._lock:
-                self._focus_capability = capability
 
         with self._capture_io_lock:
             applied = apply_focus_mode(
                 cap,
                 capability,
                 mode=normalized_mode,
-                manual_focus_value=manual_focus_value,
+                manual_focus_value=normalized_value,
             )
-        logger.info("초점 모드 변경: mode=%s, value=%s, applied=%s", normalized_mode, manual_focus_value, applied)
+        learned_capability = self._capability_after_focus_attempt(
+            capability,
+            mode=normalized_mode,
+            applied=applied,
+        )
+        with self._lock:
+            self._focus_capability = learned_capability
+            if normalized_mode == "manual" and not applied:
+                self._focus_mode = "auto"
+                self._manual_focus_value = None
+        logger.info("초점 설정 변경: mode=%s, value=%s, applied=%s", normalized_mode, normalized_value, applied)
         return applied
+
+    def set_focus_mode(self, mode: FocusMode) -> bool:
+        normalized_mode: FocusMode = "manual" if mode == "manual" else "auto"
+        with self._lock:
+            manual_focus_value = self._manual_focus_value
+        return self.apply_focus_settings(normalized_mode, manual_focus_value)
 
     def set_manual_focus_value(self, value: float | None) -> bool:
         normalized_value = None if value is None else float(value)
         with self._lock:
             self._manual_focus_value = normalized_value
-            cap = self._cap
             focus_mode = self._focus_mode
-            capability = self._focus_capability
 
-        if cap is None or focus_mode != "manual":
+        if focus_mode != "manual":
             return True
+        return self.apply_focus_settings("manual", normalized_value)
 
-        if capability is None:
-            capability = detect_focus_capability(cap)
-            with self._lock:
-                self._focus_capability = capability
-
+    def open_camera_settings(self) -> bool:
+        """현재 스캔 카메라가 제공하는 Windows/제조사 설정 창을 엽니다."""
+        with self._lock:
+            cap = self._cap
+        if cap is None:
+            return False
         with self._capture_io_lock:
-            applied = apply_focus_mode(
-                cap,
-                capability,
-                mode="manual",
-                manual_focus_value=normalized_value,
-            )
-        logger.info("수동 초점 값 변경: value=%s, applied=%s", normalized_value, applied)
-        return applied
+            return WindowsCameraService.open_camera_settings(cap)
 
     def set_status_font(self, font_path: str | None, font_size: int | None = None) -> None:
         with self._lock:
@@ -555,9 +516,6 @@ class ScannerView:
                 self._runtime_status_message = _STATUS_READY
             elif not enabled and self._runtime_status_message == _STATUS_READY:
                 self._runtime_status_message = _STATUS_PROCESSING
-            cap = self._cap if enabled else None
-        if cap is not None:
-            self._configure_focus_for_capture(cap, reprobe=False)
 
     def set_status_message(self, message: str) -> None:
         with self._lock:
@@ -743,6 +701,7 @@ class ScannerView:
         with self._lock:
             self._cap = new_cap
             self._camera_backend_name = backend_name
+            self._focus_capability = None
             self._consecutive_read_failures = 0
             self._camera_warmup_until = cap_ready_at + _CAMERA_READ_WARMUP_SEC
             self._last_successful_frame_at = 0.0
@@ -1105,6 +1064,7 @@ class ScannerView:
             old_cap = self._cap
             self._cap = None
             self._camera_backend_name = None
+            self._focus_capability = None
             self._camera_cap_ready_at = 0.0
             self._camera_first_frame_timing_logged = True
 
@@ -1130,6 +1090,7 @@ class ScannerView:
                 pass
             self._cap = None
         self._camera_backend_name = None
+        self._focus_capability = None
         self._camera_cap_ready_at = 0.0
         self._camera_first_frame_timing_logged = True
         self._clear_camera_status()

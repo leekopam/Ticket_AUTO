@@ -9,14 +9,28 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from services.windows_camera_service import CameraDevice, WindowsCameraService
+from services.windows_camera_service import (
+    CameraDevice,
+    FocusCapability,
+    WindowsCameraService,
+    apply_focus_mode,
+    detect_focus_capability,
+)
 
 
 class _FakeCapture:
-    def __init__(self, *, opened: bool = True, frame: object | None = None):
+    def __init__(
+        self,
+        *,
+        opened: bool = True,
+        frame: object | None = None,
+        property_results: dict[int, bool] | None = None,
+    ):
         self._opened = opened
         self._frame = frame if frame is not None else np.zeros((4, 4, 3), dtype=np.uint8)
         self.released = False
+        self.property_results = dict(property_results or {})
+        self.set_calls: list[tuple[int, float]] = []
 
     def isOpened(self) -> bool:
         return self._opened
@@ -27,8 +41,58 @@ class _FakeCapture:
     def release(self) -> None:
         self.released = True
 
+    def set(self, prop: int, value: float) -> bool:
+        self.set_calls.append((prop, value))
+        return self.property_results.get(prop, False)
+
 
 class WindowsCameraServiceTest(unittest.TestCase):
+    def test_detect_focus_capability_keeps_unverified_properties_unknown(self) -> None:
+        capture = _FakeCapture()
+
+        capability = detect_focus_capability(capture)
+
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        self.assertIs(capability.autofocus_supported, None if autofocus_prop is not None else False)
+        self.assertIs(capability.manual_focus_supported, None if focus_prop is not None else False)
+        self.assertEqual(capture.set_calls, [])
+
+    def test_apply_focus_mode_allows_unverified_manual_property(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        property_results = {
+            prop: True
+            for prop in (autofocus_prop, focus_prop)
+            if prop is not None
+        }
+        capture = _FakeCapture(property_results=property_results)
+        capability = FocusCapability(
+            autofocus_supported=None if autofocus_prop is not None else False,
+            manual_focus_supported=None if focus_prop is not None else False,
+        )
+
+        applied = apply_focus_mode(capture, capability, mode="manual", manual_focus_value=7.0)
+
+        if focus_prop is None:
+            self.assertFalse(applied)
+        else:
+            self.assertTrue(applied)
+            self.assertIn((focus_prop, 7.0), capture.set_calls)
+
+    def test_open_camera_settings_uses_opencv_settings_property(self) -> None:
+        settings_prop = getattr(cv2, "CAP_PROP_SETTINGS", None)
+        property_results = {settings_prop: True} if settings_prop is not None else {}
+        capture = _FakeCapture(property_results=property_results)
+
+        opened = WindowsCameraService.open_camera_settings(capture)
+
+        if settings_prop is None:
+            self.assertFalse(opened)
+        else:
+            self.assertTrue(opened)
+            self.assertEqual(capture.set_calls, [(settings_prop, 1.0)])
+
     def test_get_powershell_camera_names_parses_unique_names(self) -> None:
         with patch(
             "services.windows_camera_service.subprocess.run",

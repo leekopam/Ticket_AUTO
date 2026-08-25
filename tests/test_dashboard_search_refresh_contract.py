@@ -94,6 +94,16 @@ class DashboardSearchRefreshContractTest(unittest.TestCase):
             self.source,
         )
 
+    def test_dashboard_passes_focus_capability_and_native_settings_callbacks(self) -> None:
+        self.assertIn(
+            "focus_capability_getter=self._runtime_manager.get_scanner_focus_capability",
+            self.source,
+        )
+        self.assertIn(
+            "on_open_camera_settings=self._runtime_manager.open_scanner_camera_settings",
+            self.source,
+        )
+
     def test_dashboard_passes_ticket_product_refresh_callback_to_app_settings_panel(self) -> None:
         self.assertIn(
             "on_ticket_products_changed=_on_ticket_product_names_changed",

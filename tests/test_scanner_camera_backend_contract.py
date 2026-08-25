@@ -486,18 +486,14 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
             self.assertFalse(applied)
             self.assertIn((autofocus_prop, 1.0), fake_cap.set_calls)
 
-    def test_set_auth_ready_re_enables_webcam_autofocus_when_camera_exists(self) -> None:
+    def test_set_auth_ready_does_not_reapply_focus_when_camera_exists(self) -> None:
         fake_cap = _FakeCapture()
         scanner = ScannerView()
         scanner._cap = fake_cap
 
         scanner.set_auth_ready(True)
 
-        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
-        if autofocus_prop is None:
-            self.assertEqual(fake_cap.set_calls, [])
-        else:
-            self.assertEqual(fake_cap.set_calls, [(autofocus_prop, 1.0)])
+        self.assertEqual(fake_cap.set_calls, [])
 
     def test_detect_focus_capability_does_not_force_manual_focus_probe(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
@@ -511,14 +507,14 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
 
         capability = detect_focus_capability(fake_cap)
 
-        self.assertEqual(capability.autofocus_supported, autofocus_prop is not None)
-        self.assertEqual(capability.manual_focus_supported, focus_prop is not None)
+        self.assertIs(capability.autofocus_supported, None if autofocus_prop is not None else False)
+        self.assertIs(capability.manual_focus_supported, None if focus_prop is not None else False)
         if autofocus_prop is not None:
             self.assertFalse(any(prop == autofocus_prop for prop, _ in fake_cap.set_calls))
         if focus_prop is not None:
             self.assertFalse(any(prop == focus_prop for prop, _ in fake_cap.set_calls))
 
-    def test_set_auth_ready_reapplies_manual_focus_when_manual_mode_is_active(self) -> None:
+    def test_set_auth_ready_does_not_reapply_manual_focus_when_manual_mode_is_active(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
         focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
         prop_results = {
@@ -539,14 +535,7 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
 
         scanner.set_auth_ready(True)
 
-        if focus_prop is None:
-            if autofocus_prop is not None:
-                self.assertIn((autofocus_prop, 1.0), fake_cap.set_calls)
-        else:
-            if autofocus_prop is not None:
-                self.assertNotIn((autofocus_prop, 1.0), fake_cap.set_calls)
-                self.assertIn((autofocus_prop, 0.0), fake_cap.set_calls)
-            self.assertIn((focus_prop, 5.0), fake_cap.set_calls)
+        self.assertEqual(fake_cap.set_calls, [])
 
     def test_apply_focus_mode_manual_disables_autofocus_before_setting_focus(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
@@ -619,7 +608,10 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         scanner.set_manual_focus_value(9.0)
         applied = scanner.set_focus_mode("manual")
 
-        self.assertEqual(scanner._focus_capability.autofocus_supported, autofocus_prop is not None)
+        self.assertIs(
+            scanner._focus_capability.autofocus_supported,
+            None if autofocus_prop is not None else False,
+        )
         self.assertEqual(scanner._focus_capability.manual_focus_supported, focus_prop is not None)
         if focus_prop is None:
             if autofocus_prop is not None:
@@ -629,6 +621,54 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
             self.assertTrue(applied)
             self.assertEqual(scanner._focus_mode, "manual")
             self.assertEqual(scanner._manual_focus_value, 9.0)
+
+    def test_apply_focus_settings_sets_manual_focus_once_and_learns_capability(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        prop_results = {
+            prop: True
+            for prop in (autofocus_prop, focus_prop)
+            if prop is not None
+        }
+        fake_cap = _FocusAwareCapture(prop_results)
+        scanner = ScannerView()
+        scanner._cap = fake_cap
+
+        applied = scanner.apply_focus_settings("manual", 12.0)
+
+        if focus_prop is None:
+            self.assertFalse(applied)
+            self.assertEqual(scanner._focus_mode, "auto")
+        else:
+            self.assertTrue(applied)
+            self.assertEqual(scanner._focus_mode, "manual")
+            self.assertEqual(scanner._manual_focus_value, 12.0)
+            self.assertIs(scanner._focus_capability.manual_focus_supported, True)
+            self.assertEqual(
+                [call for call in fake_cap.set_calls if call == (focus_prop, 12.0)],
+                [(focus_prop, 12.0)],
+            )
+
+    def test_apply_focus_settings_manual_failure_falls_back_to_auto(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        prop_results = {
+            prop: prop == autofocus_prop
+            for prop in (autofocus_prop, focus_prop)
+            if prop is not None
+        }
+        fake_cap = _FocusAwareCapture(prop_results)
+        scanner = ScannerView()
+        scanner._cap = fake_cap
+
+        applied = scanner.apply_focus_settings("manual", 12.0)
+
+        self.assertFalse(applied)
+        self.assertEqual(scanner._focus_mode, "auto")
+        self.assertIsNone(scanner._manual_focus_value)
+        self.assertIs(scanner._focus_capability.manual_focus_supported, False)
+        if autofocus_prop is not None:
+            self.assertIn((autofocus_prop, 1.0), fake_cap.set_calls)
 
     def test_configure_focus_for_capture_applies_current_mode_and_caches_capability(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
@@ -645,7 +685,10 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
 
         applied = scanner._configure_focus_for_capture(fake_cap)
 
-        self.assertEqual(scanner._focus_capability.autofocus_supported, autofocus_prop is not None)
+        self.assertIs(
+            scanner._focus_capability.autofocus_supported,
+            None if autofocus_prop is not None else False,
+        )
         self.assertEqual(scanner._focus_capability.manual_focus_supported, focus_prop is not None)
         if focus_prop is None:
             if autofocus_prop is not None:
@@ -756,7 +799,7 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         if autofocus_prop is not None:
             self.assertIn((autofocus_prop, 1.0), new_cap.set_calls)
 
-    def test_set_scanning_enabled_re_enables_webcam_autofocus_when_camera_exists(self) -> None:
+    def test_set_scanning_enabled_does_not_reapply_focus_when_camera_exists(self) -> None:
         fake_cap = _FakeCapture()
         scanner = ScannerView()
         scanner._cap = fake_cap
@@ -764,13 +807,9 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
 
         scanner.set_scanning_enabled(True)
 
-        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
-        if autofocus_prop is None:
-            self.assertEqual(fake_cap.set_calls, [])
-        else:
-            self.assertEqual(fake_cap.set_calls, [(autofocus_prop, 1.0)])
+        self.assertEqual(fake_cap.set_calls, [])
 
-    def test_set_scanning_enabled_reapplies_manual_focus_when_manual_mode_is_active(self) -> None:
+    def test_set_scanning_enabled_does_not_reapply_manual_focus_when_manual_mode_is_active(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
         focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
         prop_results = {
@@ -792,14 +831,7 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
 
         scanner.set_scanning_enabled(True)
 
-        if focus_prop is None:
-            if autofocus_prop is not None:
-                self.assertIn((autofocus_prop, 1.0), fake_cap.set_calls)
-        else:
-            if autofocus_prop is not None:
-                self.assertNotIn((autofocus_prop, 1.0), fake_cap.set_calls)
-                self.assertIn((autofocus_prop, 0.0), fake_cap.set_calls)
-            self.assertIn((focus_prop, 11.0), fake_cap.set_calls)
+        self.assertEqual(fake_cap.set_calls, [])
 
 
 if __name__ == "__main__":
