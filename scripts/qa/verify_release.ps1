@@ -3,6 +3,9 @@ param(
     [Parameter(ParameterSetName = "Fast")]
     [switch]$Fast,
 
+    [Parameter(Mandatory, ParameterSetName = "E2E")]
+    [switch]$E2E,
+
     [Parameter(Mandatory, ParameterSetName = "Release")]
     [switch]$Release,
 
@@ -49,7 +52,8 @@ if ($ExeStartupSeconds -le 0) {
     throw "ExeStartupSeconds must be greater than zero."
 }
 
-$runMode = if ($Release) { "Release" } else { "Fast" }
+$runMode = if ($Release) { "Release" } elseif ($E2E) { "E2E" } else { "Fast" }
+$testPath = if ($E2E) { "tests\e2e" } else { "tests" }
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
 $resultsRoot = Join-Path $repoRoot "artifacts\test-results\$timestamp"
 New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
@@ -65,7 +69,7 @@ try {
     $pytestLog = Join-Path $resultsRoot "pytest.log"
     $pytestXml = Join-Path $resultsRoot "pytest.xml"
     Invoke-LoggedNativeCommand $venvPython @(
-        "-m", "pytest", "tests", "-q", "--tb=short", "-p", "no:cacheprovider",
+        "-m", "pytest", $testPath, "-q", "--tb=short", "-p", "no:cacheprovider",
         "--junitxml=$pytestXml"
     ) $pytestLog
     $completedSteps.Add("pytest")

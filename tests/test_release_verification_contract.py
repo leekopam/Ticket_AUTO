@@ -15,7 +15,9 @@ class ReleaseVerificationContractTest(unittest.TestCase):
         source = script.read_text(encoding="utf-8-sig")
         required_fragments = [
             "[switch]$Fast",
+            "[switch]$E2E",
             "[switch]$Release",
+            "tests\\e2e",
             "artifacts\\test-results",
             "--junitxml",
             "TICKET_AUTO_RUN_PLAYWRIGHT_SMOKE",
