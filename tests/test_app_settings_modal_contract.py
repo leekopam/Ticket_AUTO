@@ -270,7 +270,7 @@ class AppSettingsModalContractTest(unittest.TestCase):
         focus_mode_dropdown.on_change(SimpleNamespace(control=focus_mode_dropdown))
 
         self.assertEqual(callback_calls, [("manual", 8.5)])
-        self.assertNotIn("런타임 초점 즉시 적용 완료", self._collect_strings(panel))
+        self.assertIn("런타임 초점 즉시 적용 완료", self._collect_strings(panel))
 
     def test_app_settings_panel_disables_manual_focus_for_unsupported_camera(self) -> None:
         try:
@@ -369,6 +369,34 @@ class AppSettingsModalContractTest(unittest.TestCase):
         button.on_click(SimpleNamespace(control=button))
 
         self.assertEqual(open_calls, [True])
+
+    def test_app_settings_panel_rejects_non_finite_manual_focus_value(self) -> None:
+        try:
+            from services.receipt_settings_store import ReceiptSettingsStore
+            from views.settings_flet_view import build_app_settings_panel
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"flet not installed: {exc}")
+
+        callback_calls: list[tuple[str, float | None]] = []
+        with TemporaryDirectory() as temp_dir:
+            store_path = str(Path(temp_dir) / "receipt_settings.json")
+            panel = build_app_settings_panel(
+                _StubPage(),
+                store_path=store_path,
+                on_apply_scanner_focus_settings=lambda mode, value: callback_calls.append((mode, value)),
+            )
+            focus_mode_dropdown = self._find_control_by_label(panel, "초점 모드")
+            manual_focus_value_field = self._find_control_by_label(panel, "수동 초점 값")
+            manual_focus_value_field.value = "nan"
+            focus_mode_dropdown.value = "manual"
+
+            focus_mode_dropdown.on_change(SimpleNamespace(control=focus_mode_dropdown))
+
+            saved = ReceiptSettingsStore(store_path).load()
+            self.assertEqual(saved.scanner_focus_mode, "auto")
+            self.assertIsNone(saved.scanner_manual_focus_value)
+            self.assertEqual(callback_calls, [])
+            self.assertIn("초점 값은 유한한 숫자로 입력하세요.", self._collect_strings(panel))
 
     def test_app_settings_panel_notifies_ticket_product_changes_immediately(self) -> None:
         try:

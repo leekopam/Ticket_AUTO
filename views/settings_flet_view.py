@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import shutil
 import subprocess
 import sys
@@ -910,6 +911,7 @@ def _build_app_settings_ticket_panel(
                 focus_mode_dropdown,
                 manual_focus_value_field,
                 *([camera_settings_button] if camera_settings_button is not None else []),
+                settings_status_text,
             ],
             spacing=10,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -6151,7 +6153,10 @@ def build_app_settings_panel(
         raw = (manual_focus_value_field.value or "").strip()
         if not raw:
             return None
-        return float(raw)
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("manual focus value must be finite")
+        return value
 
     def _save_modal_settings(message: str) -> ReceiptSettings:
         _refresh_focus_capability_state()
@@ -6393,21 +6398,21 @@ def build_app_settings_panel(
         try:
             _save_and_apply_focus_settings()
         except ValueError:
-            settings_status_text.value = "초점 값은 숫자로 입력하세요."
+            settings_status_text.value = "초점 값은 유한한 숫자로 입력하세요."
             page.update()
 
     def on_manual_focus_value_blur(_: ft.ControlEvent) -> None:
         try:
             _save_and_apply_focus_settings()
         except ValueError:
-            settings_status_text.value = "초점 값은 숫자로 입력하세요."
+            settings_status_text.value = "초점 값은 유한한 숫자로 입력하세요."
             page.update()
 
     def on_manual_focus_value_submit(_: ft.ControlEvent) -> None:
         try:
             _save_and_apply_focus_settings()
         except ValueError:
-            settings_status_text.value = "초점 값은 숫자로 입력하세요."
+            settings_status_text.value = "초점 값은 유한한 숫자로 입력하세요."
             page.update()
 
     def on_open_native_camera_settings(_: ft.ControlEvent) -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -146,6 +147,8 @@ class ReceiptSettings:
         try:
             scanner_manual_focus_value = None if manual_focus_raw in ("", None) else float(manual_focus_raw)
         except (TypeError, ValueError):
+            scanner_manual_focus_value = None
+        if scanner_manual_focus_value is not None and not math.isfinite(scanner_manual_focus_value):
             scanner_manual_focus_value = None
         if scanner_focus_mode == "manual" and scanner_manual_focus_value is None:
             scanner_focus_mode = "auto"

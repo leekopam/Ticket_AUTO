@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -151,8 +152,18 @@ class Application:
 
     def apply_scanner_focus_settings(self, focus_mode: str, manual_focus_value: float | None) -> str:
         """실행 중인 스캐너에 초점 설정을 즉시 반영한다."""
-        normalized_value = None if manual_focus_value is None else float(manual_focus_value)
         requested_manual = focus_mode == "manual"
+        try:
+            normalized_value = None if manual_focus_value is None else float(manual_focus_value)
+        except (TypeError, ValueError):
+            normalized_value = None
+        invalid_manual_value = (
+            requested_manual
+            and normalized_value is not None
+            and not math.isfinite(normalized_value)
+        )
+        if invalid_manual_value:
+            normalized_value = None
         normalized_mode = "manual" if requested_manual and normalized_value is not None else "auto"
 
         scanner = getattr(self, "_scanner_view", None)
@@ -173,10 +184,16 @@ class Application:
         camera_ready = bool(is_camera_ready()) if callable(is_camera_ready) else False
 
         apply_focus_settings = getattr(scanner, "apply_focus_settings", None)
-        applied = (
-            bool(apply_focus_settings(normalized_mode, normalized_value))
+        apply_result = (
+            apply_focus_settings(normalized_mode, normalized_value)
             if callable(apply_focus_settings)
             else False
+        )
+        applied = bool(apply_result)
+        apply_status = getattr(
+            apply_result,
+            "status",
+            "applied" if applied else "failed",
         )
 
         updated_capability = capability_getter() if callable(capability_getter) else capability
@@ -185,16 +202,20 @@ class Application:
             if updated_capability is None
             else getattr(updated_capability, "manual_focus_supported", None)
         )
-        if requested_manual and normalized_mode == "manual" and not applied:
+        if requested_manual and normalized_mode == "manual" and apply_status == "unsupported":
             self._receipt_settings.scanner_focus_mode = "auto"
             self._receipt_settings.scanner_manual_focus_value = None
 
         if requested_manual and manual_supported is False:
             return "현재 카메라가 수동 초점을 지원하지 않아 자동 초점으로 유지됩니다."
+        if invalid_manual_value:
+            return "수동 초점 값이 올바르지 않아 자동 초점으로 유지됩니다."
         if requested_manual and normalized_value is None:
             return "수동 초점 값이 없어 자동 초점으로 유지됩니다."
         if requested_manual and updated_manual_supported is False:
             return "현재 카메라가 수동 초점을 지원하지 않아 자동 초점으로 유지됩니다."
+        if requested_manual and apply_status == "failed":
+            return "수동 초점을 적용하지 못했습니다. 다시 시도하거나 카메라 고급 설정을 확인하세요."
         if camera_ready and applied:
             return "카메라 초점 설정 저장 완료 (현재 런타임에 바로 적용됨)"
         if not camera_ready:

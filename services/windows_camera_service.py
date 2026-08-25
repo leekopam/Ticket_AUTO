@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import math
 import subprocess
 import threading
 import time
@@ -13,6 +14,21 @@ import cv2
 
 
 FocusMode = Literal["auto", "manual"]
+FocusApplyStatus = Literal["applied", "failed", "unsupported"]
+
+
+@dataclass(frozen=True)
+class FocusApplyResult:
+    """카메라 초점 적용 결과와 재시도 가능 여부입니다."""
+
+    status: FocusApplyStatus
+
+    @property
+    def applied(self) -> bool:
+        return self.status == "applied"
+
+    def __bool__(self) -> bool:
+        return self.applied
 
 
 @dataclass(frozen=True)
@@ -65,49 +81,68 @@ def apply_focus_mode(
     *,
     mode: FocusMode,
     manual_focus_value: float | None = None,
-) -> bool:
-    """초점 모드를 적용하고 OpenCV 장치 응답을 성공 여부로 반환합니다."""
+) -> FocusApplyResult:
+    """초점 모드를 적용하고 성공·실패·미지원 상태를 반환합니다."""
     if not _capture_is_available(cap):
-        return False
+        return FocusApplyResult(status="failed")
 
     autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
     focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
 
     if mode == "auto":
         if capability.autofocus_supported is False or autofocus_prop is None:
-            return False
+            return FocusApplyResult(status="unsupported")
         try:
-            return _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+            applied = _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
         except Exception:
-            return False
+            applied = False
+        return FocusApplyResult(status="applied" if applied else "failed")
 
-    if capability.manual_focus_supported is False or manual_focus_value is None or focus_prop is None:
+    if capability.manual_focus_supported is False or focus_prop is None:
         if capability.autofocus_supported is not False and autofocus_prop is not None:
             try:
                 _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
             except Exception:
                 pass
-        return False
+        return FocusApplyResult(status="unsupported")
+
+    try:
+        normalized_manual_focus = None if manual_focus_value is None else float(manual_focus_value)
+    except (TypeError, ValueError):
+        normalized_manual_focus = None
+    if normalized_manual_focus is None or not math.isfinite(normalized_manual_focus):
+        if capability.autofocus_supported is not False and autofocus_prop is not None:
+            try:
+                _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+            except Exception:
+                pass
+        return FocusApplyResult(status="failed")
 
     if capability.autofocus_supported is not False and autofocus_prop is not None:
         try:
-            cap.set(autofocus_prop, 0.0)
+            autofocus_disabled = _coerce_capture_set_result(cap.set(autofocus_prop, 0.0))
         except Exception:
-            pass
+            autofocus_disabled = False
+        if not autofocus_disabled:
+            try:
+                _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
+            except Exception:
+                pass
+            return FocusApplyResult(status="failed")
 
     try:
-        applied = _coerce_capture_set_result(cap.set(focus_prop, float(manual_focus_value)))
+        applied = _coerce_capture_set_result(cap.set(focus_prop, normalized_manual_focus))
     except Exception:
         applied = False
     if applied:
-        return True
+        return FocusApplyResult(status="applied")
 
     if capability.autofocus_supported is not False and autofocus_prop is not None:
         try:
             _coerce_capture_set_result(cap.set(autofocus_prop, 1.0))
         except Exception:
             pass
-    return False
+    return FocusApplyResult(status="failed")
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 import main as app_main
+from services.windows_camera_service import FocusApplyResult
 
 
 class ApplicationControlStateTest(unittest.TestCase):
@@ -198,6 +199,54 @@ class ApplicationControlStateTest(unittest.TestCase):
         message = app.apply_scanner_focus_settings("manual", 8.5)
 
         self.assertEqual(message, "현재 카메라가 수동 초점을 지원하지 않아 자동 초점으로 유지됩니다.")
+        self.assertEqual(focus_calls, [("auto", None)])
+        self.assertEqual(app._receipt_settings.scanner_focus_mode, "auto")
+        self.assertIsNone(app._receipt_settings.scanner_manual_focus_value)
+
+    def test_apply_scanner_focus_settings_preserves_manual_choice_after_transient_failure(self) -> None:
+        app = self._build_app()
+
+        class _FakeScanner:
+            def is_camera_ready(self) -> bool:
+                return True
+
+            def get_focus_capability(self):
+                return SimpleNamespace(manual_focus_supported=None)
+
+            def apply_focus_settings(self, _mode, _value):
+                return FocusApplyResult(status="failed")
+
+        app._scanner_view = _FakeScanner()
+        app._receipt_settings = SimpleNamespace(
+            scanner_focus_mode="auto",
+            scanner_manual_focus_value=None,
+        )
+
+        message = app.apply_scanner_focus_settings("manual", 8.5)
+
+        self.assertEqual(
+            message,
+            "수동 초점을 적용하지 못했습니다. 다시 시도하거나 카메라 고급 설정을 확인하세요.",
+        )
+        self.assertEqual(app._receipt_settings.scanner_focus_mode, "manual")
+        self.assertEqual(app._receipt_settings.scanner_manual_focus_value, 8.5)
+
+    def test_apply_scanner_focus_settings_rejects_non_finite_manual_value(self) -> None:
+        app = self._build_app()
+        focus_calls: list[tuple[str, object]] = []
+        app._scanner_view = SimpleNamespace(
+            is_camera_ready=lambda: True,
+            get_focus_capability=lambda: SimpleNamespace(manual_focus_supported=True),
+            apply_focus_settings=lambda mode, value: focus_calls.append((mode, value)) or True,
+        )
+        app._receipt_settings = SimpleNamespace(
+            scanner_focus_mode="manual",
+            scanner_manual_focus_value=8.5,
+        )
+
+        message = app.apply_scanner_focus_settings("manual", float("nan"))
+
+        self.assertEqual(message, "수동 초점 값이 올바르지 않아 자동 초점으로 유지됩니다.")
         self.assertEqual(focus_calls, [("auto", None)])
         self.assertEqual(app._receipt_settings.scanner_focus_mode, "auto")
         self.assertIsNone(app._receipt_settings.scanner_manual_focus_value)

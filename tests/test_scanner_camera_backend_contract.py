@@ -649,7 +649,7 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
                 [(focus_prop, 12.0)],
             )
 
-    def test_apply_focus_settings_manual_failure_falls_back_to_auto(self) -> None:
+    def test_apply_focus_settings_transient_manual_failure_remains_retryable(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
         focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
         prop_results = {
@@ -664,11 +664,62 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         applied = scanner.apply_focus_settings("manual", 12.0)
 
         self.assertFalse(applied)
-        self.assertEqual(scanner._focus_mode, "auto")
-        self.assertIsNone(scanner._manual_focus_value)
-        self.assertIs(scanner._focus_capability.manual_focus_supported, False)
+        self.assertEqual(applied.status, "failed")
+        self.assertEqual(scanner._focus_mode, "manual")
+        self.assertEqual(scanner._manual_focus_value, 12.0)
+        self.assertIs(scanner._focus_capability.manual_focus_supported, None)
         if autofocus_prop is not None:
             self.assertIn((autofocus_prop, 1.0), fake_cap.set_calls)
+
+    def test_apply_focus_settings_retries_after_transient_manual_failure(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        if focus_prop is None:
+            self.skipTest("OpenCV manual focus property is unavailable")
+
+        class _TransientFocusFailureCapture(_FocusAwareCapture):
+            def __init__(self) -> None:
+                super().__init__({autofocus_prop: True} if autofocus_prop is not None else {})
+                self.focus_attempts = 0
+
+            def set(self, prop: int, value: float) -> bool:
+                self.set_calls.append((prop, value))
+                if prop == focus_prop:
+                    self.focus_attempts += 1
+                    return self.focus_attempts > 1
+                return True
+
+        fake_cap = _TransientFocusFailureCapture()
+        scanner = ScannerView()
+        scanner._cap = fake_cap
+
+        first = scanner.apply_focus_settings("manual", 12.0)
+        second = scanner.apply_focus_settings("manual", 12.0)
+
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(second.status, "applied")
+        self.assertTrue(second)
+        self.assertEqual(fake_cap.focus_attempts, 2)
+        self.assertIs(scanner._focus_capability.manual_focus_supported, True)
+
+    def test_apply_focus_settings_falls_back_to_auto_only_when_manual_is_unsupported(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        fake_cap = _FocusAwareCapture(
+            {autofocus_prop: True} if autofocus_prop is not None else {}
+        )
+        scanner = ScannerView()
+        scanner._cap = fake_cap
+        scanner._focus_capability = FocusCapability(
+            autofocus_supported=autofocus_prop is not None,
+            manual_focus_supported=False,
+        )
+
+        result = scanner.apply_focus_settings("manual", 12.0)
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertFalse(result)
+        self.assertEqual(scanner._focus_mode, "auto")
+        self.assertIsNone(scanner._manual_focus_value)
 
     def test_configure_focus_for_capture_applies_current_mode_and_caches_capability(self) -> None:
         autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)

@@ -85,6 +85,19 @@ class ReceiptSettingsModelTest(unittest.TestCase):
         self.assertEqual(restored.scanner_focus_mode, "auto")
         self.assertIsNone(restored.scanner_manual_focus_value)
 
+    def test_scanner_focus_settings_reject_non_finite_manual_values(self) -> None:
+        for raw_value in ("nan", "inf", "-inf", float("nan"), float("inf")):
+            with self.subTest(raw_value=raw_value):
+                restored = ReceiptSettings.from_dict(
+                    {
+                        "scanner_focus_mode": "manual",
+                        "scanner_manual_focus_value": raw_value,
+                    }
+                )
+
+                self.assertEqual(restored.scanner_focus_mode, "auto")
+                self.assertIsNone(restored.scanner_manual_focus_value)
+
     def test_sound_rule_from_dict_falls_back_to_safe_defaults(self) -> None:
         restored = ReceiptSettings.from_dict(
             {

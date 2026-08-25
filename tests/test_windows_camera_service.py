@@ -80,6 +80,50 @@ class WindowsCameraServiceTest(unittest.TestCase):
             self.assertTrue(applied)
             self.assertIn((focus_prop, 7.0), capture.set_calls)
 
+    def test_apply_focus_mode_rejects_manual_when_autofocus_cannot_be_disabled(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        if autofocus_prop is None or focus_prop is None:
+            self.skipTest("OpenCV focus properties are unavailable")
+
+        class _AutofocusDisableFailureCapture(_FakeCapture):
+            def set(self, prop: int, value: float) -> bool:
+                self.set_calls.append((prop, value))
+                if prop == autofocus_prop and value == 0.0:
+                    return False
+                return True
+
+        capture = _AutofocusDisableFailureCapture()
+        capability = FocusCapability(autofocus_supported=True, manual_focus_supported=True)
+
+        result = apply_focus_mode(capture, capability, mode="manual", manual_focus_value=7.0)
+
+        self.assertFalse(result)
+        self.assertEqual(result.status, "failed")
+        self.assertNotIn((focus_prop, 7.0), capture.set_calls)
+        self.assertIn((autofocus_prop, 1.0), capture.set_calls)
+
+    def test_apply_focus_mode_rejects_non_finite_manual_value(self) -> None:
+        autofocus_prop = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
+        focus_prop = getattr(cv2, "CAP_PROP_FOCUS", None)
+        property_results = {
+            prop: True
+            for prop in (autofocus_prop, focus_prop)
+            if prop is not None
+        }
+        capture = _FakeCapture(property_results=property_results)
+        capability = FocusCapability(
+            autofocus_supported=autofocus_prop is not None,
+            manual_focus_supported=focus_prop is not None,
+        )
+
+        result = apply_focus_mode(capture, capability, mode="manual", manual_focus_value=float("nan"))
+
+        self.assertFalse(result)
+        self.assertEqual(result.status, "failed")
+        if focus_prop is not None:
+            self.assertFalse(any(prop == focus_prop for prop, _ in capture.set_calls))
+
     def test_open_camera_settings_uses_opencv_settings_property(self) -> None:
         settings_prop = getattr(cv2, "CAP_PROP_SETTINGS", None)
         property_results = {settings_prop: True} if settings_prop is not None else {}

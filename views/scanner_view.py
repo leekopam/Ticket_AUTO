@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pyzbar.pyzbar import decode
 
 from services.windows_camera_service import (
+    FocusApplyResult,
     FocusCapability,
     FocusMode,
     WindowsCameraService,
@@ -382,18 +383,28 @@ class ScannerView:
         capability: FocusCapability,
         *,
         mode: FocusMode,
-        applied: bool,
+        result: FocusApplyResult,
     ) -> FocusCapability:
         if mode == "manual":
+            manual_supported = capability.manual_focus_supported
+            if result.status == "applied":
+                manual_supported = True
+            elif result.status == "unsupported":
+                manual_supported = False
             return FocusCapability(
                 autofocus_supported=capability.autofocus_supported,
-                manual_focus_supported=applied,
+                manual_focus_supported=manual_supported,
                 focus_min=capability.focus_min,
                 focus_max=capability.focus_max,
                 focus_step=capability.focus_step,
             )
+        autofocus_supported = capability.autofocus_supported
+        if result.status == "applied":
+            autofocus_supported = True
+        elif result.status == "unsupported":
+            autofocus_supported = False
         return FocusCapability(
-            autofocus_supported=applied,
+            autofocus_supported=autofocus_supported,
             manual_focus_supported=capability.manual_focus_supported,
             focus_min=capability.focus_min,
             focus_max=capability.focus_max,
@@ -419,7 +430,7 @@ class ScannerView:
             manual_focus_value = self._manual_focus_value
 
         with self._capture_io_lock:
-            applied = apply_focus_mode(
+            result = apply_focus_mode(
                 cap,
                 capability,
                 mode=focus_mode,
@@ -428,16 +439,20 @@ class ScannerView:
         learned_capability = self._capability_after_focus_attempt(
             capability,
             mode=focus_mode,
-            applied=applied,
+            result=result,
         )
         with self._lock:
             self._focus_capability = learned_capability
-            if focus_mode == "manual" and not applied:
+            if focus_mode == "manual" and result.status == "unsupported":
                 self._focus_mode = "auto"
                 self._manual_focus_value = None
-        return applied
+        return bool(result)
 
-    def apply_focus_settings(self, mode: FocusMode, manual_focus_value: float | None) -> bool:
+    def apply_focus_settings(
+        self,
+        mode: FocusMode,
+        manual_focus_value: float | None,
+    ) -> FocusApplyResult:
         """초점 모드와 값을 한 번의 장치 IO 작업으로 적용합니다."""
         normalized_value = None if manual_focus_value is None else float(manual_focus_value)
         normalized_mode: FocusMode = "manual" if mode == "manual" and normalized_value is not None else "auto"
@@ -448,12 +463,12 @@ class ScannerView:
             capability = self._focus_capability
 
         if cap is None:
-            return True
+            return FocusApplyResult(status="applied")
         if capability is None:
             capability = detect_focus_capability(cap)
 
         with self._capture_io_lock:
-            applied = apply_focus_mode(
+            result = apply_focus_mode(
                 cap,
                 capability,
                 mode=normalized_mode,
@@ -462,21 +477,26 @@ class ScannerView:
         learned_capability = self._capability_after_focus_attempt(
             capability,
             mode=normalized_mode,
-            applied=applied,
+            result=result,
         )
         with self._lock:
             self._focus_capability = learned_capability
-            if normalized_mode == "manual" and not applied:
+            if normalized_mode == "manual" and result.status == "unsupported":
                 self._focus_mode = "auto"
                 self._manual_focus_value = None
-        logger.info("초점 설정 변경: mode=%s, value=%s, applied=%s", normalized_mode, normalized_value, applied)
-        return applied
+        logger.info(
+            "초점 설정 변경: mode=%s, value=%s, status=%s",
+            normalized_mode,
+            normalized_value,
+            result.status,
+        )
+        return result
 
     def set_focus_mode(self, mode: FocusMode) -> bool:
         normalized_mode: FocusMode = "manual" if mode == "manual" else "auto"
         with self._lock:
             manual_focus_value = self._manual_focus_value
-        return self.apply_focus_settings(normalized_mode, manual_focus_value)
+        return bool(self.apply_focus_settings(normalized_mode, manual_focus_value))
 
     def set_manual_focus_value(self, value: float | None) -> bool:
         normalized_value = None if value is None else float(value)
@@ -486,7 +506,7 @@ class ScannerView:
 
         if focus_mode != "manual":
             return True
-        return self.apply_focus_settings("manual", normalized_value)
+        return bool(self.apply_focus_settings("manual", normalized_value))
 
     def open_camera_settings(self) -> bool:
         """현재 스캔 카메라가 제공하는 Windows/제조사 설정 창을 엽니다."""
@@ -981,13 +1001,15 @@ class ScannerView:
 
     @classmethod
     def _enable_autofocus(cls, cap: cv2.VideoCapture) -> bool:
-        return apply_focus_mode(
-            cap,
-            FocusCapability(
-                autofocus_supported=cls._autofocus_prop() is not None,
-                manual_focus_supported=False,
-            ),
-            mode="auto",
+        return bool(
+            apply_focus_mode(
+                cap,
+                FocusCapability(
+                    autofocus_supported=cls._autofocus_prop() is not None,
+                    manual_focus_supported=False,
+                ),
+                mode="auto",
+            )
         )
 
     def _update_phone_screen_recovery_state(self, frame: np.ndarray) -> str:
