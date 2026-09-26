@@ -53,7 +53,14 @@ if ($ExeStartupSeconds -le 0) {
 }
 
 $runMode = if ($Release) { "Release" } elseif ($E2E) { "E2E" } else { "Fast" }
-$testPath = if ($E2E) { "tests\e2e" } else { "tests" }
+# Fast는 브라우저(Playwright) 의존 스위트를 제외해 장비 없이 실행 가능하게 한다.
+$pytestTestArgs = if ($E2E) {
+    @("tests\e2e", "tests\e2e_stub", "tests\e2e_ui")
+} elseif ($Release) {
+    @("tests")
+} else {
+    @("tests", "--ignore=tests\e2e_ui", "--ignore=tests\e2e_stub")
+}
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
 $resultsRoot = Join-Path $repoRoot "artifacts\test-results\$timestamp"
 New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
@@ -69,9 +76,9 @@ try {
     $pytestLog = Join-Path $resultsRoot "pytest.log"
     $pytestXml = Join-Path $resultsRoot "pytest.xml"
     Invoke-LoggedNativeCommand $venvPython @(
-        "-m", "pytest", $testPath, "-q", "--tb=short", "-p", "no:cacheprovider",
+        "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider",
         "--junitxml=$pytestXml"
-    ) $pytestLog
+    ) + $pytestTestArgs $pytestLog
     $completedSteps.Add("pytest")
 
     if ($Release) {
