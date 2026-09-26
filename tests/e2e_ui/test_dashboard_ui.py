@@ -104,8 +104,17 @@ def test_u02_dashboard_search_and_order_flow(page, flet_server):
     # 검색: 테스트 워크북에 1건 존재
     search_box = page.get_by_role("textbox", name="주문번호, 이름, 연락처로 검색")
     search_box.fill("테스트 사용자")
-    page.get_by_role("button", name="검색", exact=True).click()
-    wait_semantics_text(page, "검색 필터 건수", "1건", timeout_ms=_TIMEOUT_MS)
+    # 재빌드 타이밍에 클릭이 삼켜질 수 있어 결과가 뜰 때까지 재시도한다.
+    for attempt in range(3):
+        page.get_by_role("button", name="검색", exact=True).click()
+        try:
+            wait_semantics_text(
+                page, "검색 필터 건수", "1건", timeout_ms=_TIMEOUT_MS // 2
+            )
+            break
+        except AssertionError:
+            if attempt == 2:
+                raise
 
     # 결과 행의 복사 버튼 → 실제 클립보드에 해당 주문번호가 들어간다.
     # (행 셀 텍스트는 Flutter web semantics에서 materialize되지 않아

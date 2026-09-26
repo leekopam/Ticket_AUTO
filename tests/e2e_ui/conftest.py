@@ -81,7 +81,12 @@ def page(flet_server, request):
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # E2E_HEADED=1이면 브라우저를 화면에 띄우고 slow_mo로 동작을 보기 좋게 늦춘다.
+        headed = os.environ.get("E2E_HEADED") == "1"
+        browser = p.chromium.launch(
+            headless=not headed,
+            slow_mo=400 if headed else 0,
+        )
         context = browser.new_context(
             viewport={"width": 1800, "height": 920},
             permissions=["clipboard-read", "clipboard-write"],

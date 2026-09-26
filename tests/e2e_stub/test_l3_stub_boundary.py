@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from e2e.support import (
@@ -60,11 +62,13 @@ WITCHFORM_BROKEN_HTML = """<!doctype html>
 
 @pytest.fixture
 def pw_page():
-    """headless Chromium 페이지를 제공한다."""
+    """headless Chromium 페이지를 제공한다. E2E_HEADED=1이면 화면에 표시."""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=os.environ.get("E2E_HEADED") != "1"
+        )
         page = browser.new_page()
         yield page
         try:
