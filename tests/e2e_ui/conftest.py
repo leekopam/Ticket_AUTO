@@ -31,6 +31,10 @@ def flet_server(tmp_path_factory):
     port = find_free_port()
     control_port = find_free_port()
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    # 서버 출력은 파일로 리다이렉트한다. 파이프를 비우지 않고 두면
+    # 로그가 버퍼를 채웠을 때 서버가 블록될 수 있다.
+    log_path = runtime_dir / "flet-server.log"
+    log_file = open(log_path, "w", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -40,11 +44,8 @@ def flet_server(tmp_path_factory):
             "--runtime-dir", str(runtime_dir),
             "--data-file", str(data_file),
         ],
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         env=env,
     )
     ready = wait_for_port(control_port, timeout_sec=15.0) and wait_for_port(
@@ -52,12 +53,13 @@ def flet_server(tmp_path_factory):
     )
     if not ready:
         proc.kill()
+        log_file.close()
         output = ""
         try:
-            output = proc.stdout.read() if proc.stdout else ""
+            output = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
         except Exception:
             pass
-        pytest.fail(f"대시보드 web 서버 기동 실패:\n{output[-4000:]}")
+        pytest.fail(f"대시보드 web 서버 기동 실패:\n{output}")
 
     yield {
         "base_url": f"http://127.0.0.1:{port}",
@@ -70,6 +72,7 @@ def flet_server(tmp_path_factory):
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+    log_file.close()
 
 
 @pytest.fixture

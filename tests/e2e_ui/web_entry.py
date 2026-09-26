@@ -57,10 +57,13 @@ def main() -> int:
 
     # 프린터 IO 경계를 스텁으로 교체해 실제 스풀러 출력을 막고 작업을 기록한다.
     import services.receipt_print_pipeline as receipt_pipeline
+    import views.settings_flet_view as settings_view
     from e2e.support import FakePrinterBackend
 
     fake_printer = FakePrinterBackend()
     receipt_pipeline.WindowsPrinterService = lambda: fake_printer  # type: ignore[assignment]
+    # 설정 뷰가 직접 임포트한 경로도 동일 스텁으로 교체한다.
+    settings_view.WindowsPrinterService = lambda: fake_printer  # type: ignore[assignment]
 
     # 런타임 재시작마다 새 스텁 앱을 만들고, 제어 서버는 최신 인스턴스로 라우팅한다.
     current_app: dict[str, FakeDashboardRuntimeApp | None] = {"value": None}
