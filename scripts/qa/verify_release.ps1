@@ -75,10 +75,12 @@ try {
     $env:TICKET_AUTO_RUN_PLAYWRIGHT_SMOKE = if ($Release) { "1" } else { "0" }
     $pytestLog = Join-Path $resultsRoot "pytest.log"
     $pytestXml = Join-Path $resultsRoot "pytest.xml"
-    Invoke-LoggedNativeCommand $venvPython @(
+    # 배열 + 배열은 인라인으로 쓰면 인자 모드에서 "+"가 별도 인자로 파싱되므로 변수로 합친다.
+    $pytestArgs = @(
         "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider",
         "--junitxml=$pytestXml"
-    ) + $pytestTestArgs $pytestLog
+    ) + $pytestTestArgs
+    Invoke-LoggedNativeCommand $venvPython $pytestArgs $pytestLog
     $completedSteps.Add("pytest")
 
     if ($Release) {
