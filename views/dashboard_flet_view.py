@@ -902,6 +902,7 @@ def build_order_search_panel(
                             "검색",
                             icon=ICONS.SEARCH_ROUNDED,
                             on_click=on_search,
+                            key="dashboard_order_search_button",
                             style=ft.ButtonStyle(
                                 bgcolor=ACCENT_PRIMARY,
                                 color="#FFFFFF",
@@ -1226,6 +1227,7 @@ def build_camera_focus_side_handle(
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         tooltip="설정 열기",
+        key="dashboard_settings_drawer_handle",
     )
 
 
@@ -1782,6 +1784,7 @@ def build_search_result_rows(
             icon_size=14,
             icon_color="#94A3B8",
             tooltip="주문번호 복사",
+            key="dashboard_copy_order_button",
             width=28,
             height=28,
             on_click=lambda _e, on=order_number: on_copy_order_number(on),
@@ -2205,12 +2208,18 @@ class DashboardFletView:
 
     def __init__(self, runtime_manager: TicketRuntimeManager | None = None):
         settings = ReceiptSettingsStore(".runtime/receipt_settings.json").load()
+        # 주입된 매니저(테스트 스텁)면 시작 시 카메라 기반 실제 Application 팩토리로 덮어쓰지 않는다.
+        self._runtime_manager_provided = runtime_manager is not None
         self._runtime_manager = runtime_manager or create_dashboard_runtime_manager(
             camera_index=settings.camera_index,
         )
 
-    def run(self) -> None:
-        ft.app(target=self._build_page)
+    def run(self, web_port: int | None = None) -> None:
+        # web_port 지정 시 브라우저 없이 web 서버 모드로만 기동한다(E2E 테스트용).
+        if web_port is None:
+            ft.app(target=self._build_page)
+            return
+        ft.app(target=self._build_page, view=ft.AppView.WEB_BROWSER, port=web_port)
 
     def _build_page(self, page: ft.Page) -> None:
         page.title = "Ticket_AUTO Control Center"
@@ -2251,20 +2260,41 @@ class DashboardFletView:
         scan_success_count_store = ScanSuccessSoundStateStore()
         scan_success_sound_service = ScanSuccessSoundService(state_store=scan_success_count_store)
 
-        state_text = ft.Text("IDLE", size=18, weight=ft.FontWeight.BOLD, color="#1F1F1F")
+        state_text = ft.Text(
+            "IDLE",
+            size=18,
+            weight=ft.FontWeight.BOLD,
+            color="#1F1F1F",
+            key="dashboard_runtime_state_text",
+            tooltip="런타임 상태",
+        )
         state_badge = ft.Container(
             content=state_text,
             padding=ft.padding.symmetric(horizontal=12, vertical=8),
             bgcolor="#DDE8FF",
             border_radius=10,
+            key="dashboard_runtime_state_badge",
         )
-        last_event_text = ft.Text("마지막 이벤트: -", color="#505050")
-        runtime_hint_text = ft.Text("런타임 대기 중", color="#606060", size=13)
+        last_event_text = ft.Text(
+            "마지막 이벤트: -",
+            color="#505050",
+            key="dashboard_last_event_text",
+            tooltip="마지막 런타임 이벤트",
+        )
+        runtime_hint_text = ft.Text(
+            "런타임 대기 중",
+            color="#606060",
+            size=13,
+            key="dashboard_runtime_hint_text",
+            tooltip="런타임 안내 메시지",
+        )
         processed_count_text = ft.Text(
             format_processed_count_text(load_processed_success_count(scan_success_count_store)),
             size=12,
             color=ACCENT_PRIMARY_DEEP,
             weight=ft.FontWeight.W_600,
+            key="dashboard_processed_count_text",
+            tooltip="처리완료 누적 카운트",
         )
         processed_count_reset_button = ft.OutlinedButton(
             content=ft.Row(
@@ -2293,6 +2323,7 @@ class DashboardFletView:
             ),
             on_click=lambda _e: _reset_processed_success_count(),
             tooltip="처리완료 누적 카운트를 0으로 초기화",
+            key="dashboard_reset_processed_count",
             style=ft.ButtonStyle(
                 color="#4A6278",
                 side=ft.border.all(1, ACCENT_PRIMARY_BORDER),
@@ -2333,6 +2364,7 @@ class DashboardFletView:
             expand=True,
             border_radius=8,
             height=42,
+            key="dashboard_order_search_field",
         )
         filter_dropdown = ft.Dropdown(
             value="전체",
@@ -2345,9 +2377,23 @@ class DashboardFletView:
             height=42,
             border_radius=8,
             content_padding=ft.padding.symmetric(horizontal=10, vertical=0),
+            key="dashboard_order_filter",
         )
-        filter_count_text = ft.Text("", size=13, color="#666666")
-        search_feedback_text = ft.Text("", size=13, color="#777777", visible=False)
+        filter_count_text = ft.Text(
+            "",
+            size=13,
+            color="#666666",
+            key="dashboard_filter_count_text",
+            tooltip="검색 필터 건수",
+        )
+        search_feedback_text = ft.Text(
+            "",
+            size=13,
+            color="#777777",
+            visible=False,
+            key="dashboard_search_feedback_text",
+            tooltip="검색 결과 안내",
+        )
 
         def _build_header_cell(text: str, expand: int) -> ft.Container:
             return ft.Container(
@@ -2378,6 +2424,7 @@ class DashboardFletView:
             expand=True,
             spacing=0,
             auto_scroll=False,
+            key="dashboard_search_result_list",
         )
 
         btn_start_stop = ft.ElevatedButton(
@@ -2388,18 +2435,21 @@ class DashboardFletView:
                 color="#FFFFFF",
                 shape=ft.RoundedRectangleBorder(radius=8),
             ),
+            key="dashboard_start_stop_button",
         )
         btn_relogin = ft.OutlinedButton(
             "재로그인",
             icon=ICONS.LOGIN_ROUNDED,
+            key="dashboard_relogin_button",
         )
         btn_open_witchform = ft.OutlinedButton(
             "Witchform 열기",
             icon=ICONS.OPEN_IN_NEW_ROUNDED,
+            key="dashboard_open_witchform_button",
         )
 
-        btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED)
-        btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED)
+        btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
+        btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
         btn_ticket_tab.icon_size = 18
         btn_receipt_tab.icon_size = 18
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
@@ -2432,11 +2482,13 @@ class DashboardFletView:
             icon=ICONS.REFRESH_ROUNDED,
             tooltip="새로고침",
             icon_size=20,
+            key="dashboard_search_refresh_button",
         )
         btn_import_data = ft.OutlinedButton(
             "data 파일 가져오기",
             icon=ICONS.UPLOAD_FILE_ROUNDED,
             tooltip="엑셀 data 파일을 가져와 Resources/data/data.xlsx 로 바로 적용합니다.",
+            key="dashboard_import_data_button",
         )
         data_file_picker = ft.FilePicker()
         _attach_page_service(page, data_file_picker)
@@ -2765,10 +2817,11 @@ class DashboardFletView:
 
         def on_start(_: ft.ControlEvent) -> None:
             # 시작 시 현재 선택된 카메라 인덱스로 app_factory 갱신
-            selected_cam = int(camera_dropdown.value or "0")
-            self._runtime_manager._app_factory = partial(
-                Application, show_order_window=False, camera_index=selected_cam,
-            )
+            if not self._runtime_manager_provided:
+                selected_cam = int(camera_dropdown.value or "0")
+                self._runtime_manager._app_factory = partial(
+                    Application, show_order_window=False, camera_index=selected_cam,
+                )
             dispatch_runtime_status_refresh(
                 "STARTING",
                 "티켓 확인 시작 중",
@@ -2821,7 +2874,14 @@ class DashboardFletView:
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
 
-        camera_view = ft.Image(width=400, height=300, fit=ft.ImageFit.CONTAIN, visible=False)
+        camera_view = ft.Image(
+            width=400,
+            height=300,
+            fit=ft.ImageFit.CONTAIN,
+            visible=False,
+            key="dashboard_camera_view",
+            semantics_label="카메라 미리보기",
+        )
 
         def on_camera_frame(b64_str: str) -> None:
             dispatch_camera_frame_update(page, camera_view, b64_str, search_refresh_stop)
@@ -3150,9 +3210,27 @@ class DashboardFletView:
         )
 
         # 구매자 정보 표시 UI
-        buyer_name_text = ft.Text("", size=18, weight=ft.FontWeight.BOLD)
-        buyer_phone_text = ft.Text("", size=16, color="#333333")
-        buyer_seat_text = ft.Text("", size=16, color="#333333")
+        buyer_name_text = ft.Text(
+            "",
+            size=18,
+            weight=ft.FontWeight.BOLD,
+            key="dashboard_buyer_name_text",
+            tooltip="구매자 이름",
+        )
+        buyer_phone_text = ft.Text(
+            "",
+            size=16,
+            color="#333333",
+            key="dashboard_buyer_phone_text",
+            tooltip="구매자 연락처",
+        )
+        buyer_seat_text = ft.Text(
+            "",
+            size=16,
+            color="#333333",
+            key="dashboard_buyer_seat_text",
+            tooltip="구매자 좌석",
+        )
         buyer_goods_text = ft.Text("", size=15, color="#243447", visible=False)
         buyer_goods_hint = ft.Text(
             "상품 구매 시 이곳에 표시됩니다.",
@@ -3174,17 +3252,33 @@ class DashboardFletView:
             visible=False,
             scroll=ft.ScrollMode.AUTO,
         )
-        buyer_ticket_text = ft.Text("", size=14, color=ACCENT_PRIMARY_DARK, weight=ft.FontWeight.BOLD)
-        buyer_received_text = ft.Text("", size=13, color="#888888")
+        buyer_ticket_text = ft.Text(
+            "",
+            size=14,
+            color=ACCENT_PRIMARY_DARK,
+            weight=ft.FontWeight.BOLD,
+            key="dashboard_buyer_ticket_text",
+            tooltip="구매자 티켓 정보",
+        )
+        buyer_received_text = ft.Text(
+            "",
+            size=13,
+            color="#888888",
+            key="dashboard_buyer_received_text",
+            tooltip="구매자 수령 상태",
+        )
         buyer_empty_hint = ft.Text(
             "QR 스캔 시 구매자 정보가 표시됩니다",
             size=14, color="#AAAAAA", text_align=ft.TextAlign.CENTER,
+            key="dashboard_buyer_empty_hint",
+            tooltip="구매자 정보 비어 있음 안내",
         )
 
         btn_buyer_print = ft.ElevatedButton(
             "출력",
             icon=ICONS.PRINT_ROUNDED,
             disabled=True,
+            key="dashboard_buyer_print_button",
             tooltip="영수증 출력",
             style=ft.ButtonStyle(
                 bgcolor=ACCENT_PRIMARY,
@@ -3198,6 +3292,7 @@ class DashboardFletView:
             "미리보기",
             icon=ICONS.VISIBILITY_ROUNDED,
             disabled=True,
+            key="dashboard_buyer_preview_button",
             height=34,
             style=ft.ButtonStyle(
                 padding=ft.padding.symmetric(horizontal=12, vertical=0),
@@ -3231,6 +3326,7 @@ class DashboardFletView:
             ],
             spacing=6,
             visible=False,
+            key="dashboard_buyer_detail_panel",
         )
 
         def update_buyer_info(order: Order) -> None:

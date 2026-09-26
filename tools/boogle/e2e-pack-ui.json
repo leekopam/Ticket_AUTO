@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "0.1.0",
+  "projectId": "95463b14-9996-45a3-a19b-54f38b96ca75",
+  "adapter": { "id": "command", "version": "0.1.0" },
+  "testPack": { "id": "ticket-auto-e2e-ui", "version": "0.1.0" },
+  "command": {
+    "executable": "D:\\Project\\02_Magical_Play\\01_Develop\\Ticket_AUTO\\.venv\\Scripts\\python.exe",
+    "args": ["-m", "pytest", "tests/e2e_ui", "-q"],
+    "workingDirectory": "D:\\Project\\02_Magical_Play\\01_Develop\\Ticket_AUTO",
+    "timeoutMs": 300000
+  },
+  "inputConditions": { "suite": "flet-web-ui" },
+  "environmentConditions": { "platform": "windows" }
+}

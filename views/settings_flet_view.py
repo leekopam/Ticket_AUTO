@@ -1138,6 +1138,7 @@ def _build_receipt_sidebar_output_panel(
     *,
     qr_auto_print_switch: ft.Control,
     product_receipt_switch: ft.Control,
+    save_status_text: ft.Control | None = None,
 ) -> ft.Container:
     return ft.Container(
         expand=True,
@@ -1185,6 +1186,7 @@ def _build_receipt_sidebar_output_panel(
                         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                     ),
                 ),
+                *([save_status_text] if save_status_text is not None else []),
             ],
             spacing=14,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -5647,24 +5649,35 @@ def build_receipt_sidebar_settings_panel(
     qr_auto_print_switch = ft.Switch(
         label="QR 스캔 시 영수증 자동 출력",
         value=bool(getattr(settings, "qr_scan_auto_print_enabled", True)),
+        key="receipt_settings_auto_print_switch",
         **_switch_theme_kwargs(),
     )
     product_receipt_switch = ft.Switch(
         label="상품 영수증 추가 출력",
         value=bool(getattr(settings, "print_product_receipt", False)),
+        key="receipt_settings_product_receipt_switch",
         **_switch_theme_kwargs(),
+    )
+    receipt_save_status_text = ft.Text(
+        "변경 시 자동 저장됩니다.",
+        size=12,
+        color="#64748B",
+        key="receipt_settings_status_text",
+        tooltip="영수증 설정 저장 상태",
     )
 
     def _on_qr_auto_print_switch(_: ft.ControlEvent) -> None:
         latest = settings_store.load()
         latest.qr_scan_auto_print_enabled = bool(qr_auto_print_switch.value)
         settings_store.save(latest)
+        receipt_save_status_text.value = "영수증 자동 출력 설정 저장 완료"
         page.update()
 
     def _on_product_receipt_switch(_: ft.ControlEvent) -> None:
         latest = settings_store.load()
         latest.print_product_receipt = bool(product_receipt_switch.value)
         settings_store.save(latest)
+        receipt_save_status_text.value = "상품 영수증 설정 저장 완료"
         page.update()
 
     qr_auto_print_switch.on_change = _on_qr_auto_print_switch
@@ -5673,6 +5686,7 @@ def build_receipt_sidebar_settings_panel(
     return _build_receipt_sidebar_output_panel(
         qr_auto_print_switch=qr_auto_print_switch,
         product_receipt_switch=product_receipt_switch,
+        save_status_text=receipt_save_status_text,
     )
 
 
@@ -5706,7 +5720,13 @@ def build_app_settings_panel(
     sound_picker = ft.FilePicker()
     _attach_page_service(page, sound_picker)
 
-    settings_status_text = ft.Text("변경 시 자동 저장됩니다.", size=12, color="#64748B")
+    settings_status_text = ft.Text(
+        "변경 시 자동 저장됩니다.",
+        size=12,
+        color="#64748B",
+        key="settings_status_text",
+        tooltip="설정 저장 상태",
+    )
     scan_sound_rule_name_field = ft.TextField(
         label="프로그램 표시 이름",
         value="",
@@ -5733,12 +5753,14 @@ def build_app_settings_panel(
             ft.dropdown.Option(key="manual", text="수동 초점"),
         ],
         border_radius=10,
+        key="settings_focus_mode_dropdown",
     )
     manual_focus_value_field = ft.TextField(
         label="수동 초점 값",
         value="" if settings.scanner_manual_focus_value is None else str(settings.scanner_manual_focus_value),
         hint_text="예: 8.0",
         border_radius=10,
+        key="settings_manual_focus_field",
     )
     if focus_capability_badge is None:
         focus_capability_badge = ft.Container(
@@ -5758,6 +5780,7 @@ def build_app_settings_panel(
     camera_settings_button = ft.OutlinedButton(
         "카메라 고급 설정",
         icon=ICONS.TUNE_ROUNDED,
+        key="settings_camera_advanced_button",
         disabled=on_open_camera_settings is None,
         tooltip=(
             "Windows 또는 제조사가 제공하는 카메라 속성 창 열기"
@@ -5775,16 +5798,19 @@ def build_app_settings_panel(
     debug_count_scan_success_switch = ft.Switch(
         label="QR 스캔 성공 시 누적 카운트 반영",
         value=debug_settings.count_scan_success_as_processed,
+        key="settings_debug_count_scan_switch",
         **_switch_theme_kwargs(),
     )
     debug_duplicate_sound_switch = ft.Switch(
         label="중복 스캔 시 효과음 재생",
         value=debug_settings.play_sound_for_duplicate_received_qr,
+        key="settings_debug_duplicate_sound_switch",
         **_switch_theme_kwargs(),
     )
     debug_offline_scan_switch = ft.Switch(
         label="오프라인 스캔 테스트 모드",
         value=debug_settings.offline_scan_mode,
+        key="settings_debug_offline_scan_switch",
         **_switch_theme_kwargs(),
     )
     debug_qr_order_input = ft.TextField(
@@ -5792,10 +5818,28 @@ def build_app_settings_panel(
         hint_text="예: WFLM7QSDTC_69D53CU23685",
         expand=True,
         height=48,
+        key="settings_debug_qr_order_input",
     )
-    btn_generate_qr = ft.ElevatedButton(text="QR 생성", height=48)
-    debug_qr_image = ft.Image(visible=False, width=180, height=180, fit=ft.ImageFit.CONTAIN)
-    debug_qr_status_text = ft.Text("", size=12, color="#64748B")
+    btn_generate_qr = ft.ElevatedButton(
+        text="QR 생성",
+        height=48,
+        key="settings_debug_qr_generate_button",
+    )
+    debug_qr_image = ft.Image(
+        visible=False,
+        width=180,
+        height=180,
+        fit=ft.ImageFit.CONTAIN,
+        key="settings_debug_qr_image",
+        semantics_label="생성된 테스트 QR 이미지",
+    )
+    debug_qr_status_text = ft.Text(
+        "",
+        size=12,
+        color="#64748B",
+        key="settings_debug_qr_status_text",
+        tooltip="테스트 QR 생성 결과",
+    )
     debug_qr_section = ft.Container(
         bgcolor="#F0F7FF",
         border_radius=12,
@@ -5817,7 +5861,13 @@ def build_app_settings_panel(
             spacing=8,
         ),
     )
-    debug_status_summary_text = ft.Text(size=12, color="#475569", selectable=True)
+    debug_status_summary_text = ft.Text(
+        size=12,
+        color="#475569",
+        selectable=True,
+        key="settings_debug_status_summary",
+        tooltip="활성 디버그 기능 요약",
+    )
     scan_sound_rules_state: dict[str, object] = {
         "rules": _load_scan_success_sound_rules(settings),
         "selected_index": 0 if _load_scan_success_sound_rules(settings) else None,

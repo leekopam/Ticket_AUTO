@@ -1,6 +1,7 @@
 .runtime/
 .tmp/
 .venv/
+/nul
 .worktrees/
 __pycache__/
 *.pyc
