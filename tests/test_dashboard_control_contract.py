@@ -115,12 +115,62 @@ class DashboardControlContractTest(unittest.TestCase):
             self.skipTest(f"flet not installed: {exc}")
         return ft, dashboard
 
-    def test_dashboard_page_uses_laptop_safe_default_window_size(self) -> None:
+    def test_dashboard_page_uses_resizable_window_with_minimum_size(self) -> None:
         source = Path("views/dashboard_flet_view.py").read_text(encoding="utf-8-sig")
 
-        self.assertIn("page.window.width = 1800", source)
-        self.assertIn("page.window.height = 920", source)
-        self.assertIn("page.window.resizable = False", source)
+        self.assertIn("page.window.width = DASHBOARD_DEFAULT_WINDOW_WIDTH", source)
+        self.assertIn("page.window.height = DASHBOARD_DEFAULT_WINDOW_HEIGHT", source)
+        self.assertIn("page.window.min_width = DASHBOARD_MIN_WINDOW_WIDTH", source)
+        self.assertIn("page.window.min_height = DASHBOARD_MIN_WINDOW_HEIGHT", source)
+        self.assertIn("page.window.resizable = True", source)
+
+    def test_settings_drawer_width_scales_with_window(self) -> None:
+        """설정 서랍 폭은 창 폭에 맞춰 최소~기본 사이에서 조정된다."""
+        _ft, dashboard = self._import_dashboard()
+
+        self.assertEqual(
+            dashboard.resolve_settings_drawer_width(None),
+            dashboard.CAMERA_SETTINGS_DRAWER_WIDTH,
+        )
+        self.assertEqual(dashboard.resolve_settings_drawer_width(1800), 500)
+        self.assertEqual(dashboard.resolve_settings_drawer_width(1200), 420)
+        self.assertEqual(
+            dashboard.resolve_settings_drawer_width(900),
+            dashboard.CAMERA_SETTINGS_DRAWER_MIN_WIDTH,
+        )
+
+    def test_responsive_layout_adjusts_settings_drawer_width(self) -> None:
+        """창 리사이즈 시 서랍/핸들/오버레이 폭과 닫힘 오프셋이 함께 갱신된다."""
+        source = Path("views/dashboard_flet_view.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("drawer_w = resolve_settings_drawer_width(window_w)", source)
+        self.assertIn("camera_focus_drawer.width = drawer_w", source)
+        self.assertIn("camera_focus_overlay_group.width = drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH", source)
+        self.assertIn("camera_focus_side_handle.right = drawer_w", source)
+        self.assertIn("drawer_w / (drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH)", source)
+
+    def test_order_number_cell_bounds_text_inside_cell_width(self) -> None:
+        """긴 주문번호가 이름 열을 침범하지 않도록 셀 안에서 폭이 제한된다."""
+        _ft, dashboard = self._import_dashboard()
+
+        rows = dashboard.build_search_result_rows(
+            (
+                dashboard.SearchResultRowState(
+                    order_number="ORDER-LONG-ID-1234567890-ABCDEF",
+                    name="홍길동",
+                    phone="010-0000-0000",
+                    seat="A-1",
+                    goods_text="-",
+                ),
+            ),
+            on_order_number_click=lambda _order: None,
+            on_copy_order_number=lambda _order: None,
+        )
+
+        order_cell_row = rows[0].content.controls[0].content
+        self.assertFalse(getattr(order_cell_row, "tight", False))
+        text_host = order_cell_row.controls[1]
+        self.assertTrue(bool(getattr(text_host, "expand", False)))
 
     def test_data_file_picker_import_callback_shows_all_rows_for_all_filter(self) -> None:
         _ft, dashboard = self._import_dashboard()

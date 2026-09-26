@@ -45,10 +45,23 @@ ICONS = getattr(ft, "Icons", ft.icons)
 SEARCH_DEBOUNCE_SEC = 0.25
 EXCEL_WATCH_INTERVAL_SEC = 0.5
 CAMERA_SETTINGS_DRAWER_WIDTH = 500
+CAMERA_SETTINGS_DRAWER_MIN_WIDTH = 380
+CAMERA_SETTINGS_DRAWER_WIDTH_RATIO = 0.35
 CAMERA_SETTINGS_HANDLE_WIDTH = 28
 DASHBOARD_SIDEBAR_WIDTH = 244
+# 창 크기 조절을 허용하되, 레이아웃이 깨지지 않는 최소 크기를 지정한다.
+DASHBOARD_DEFAULT_WINDOW_WIDTH = 1800
+DASHBOARD_DEFAULT_WINDOW_HEIGHT = 920
+DASHBOARD_MIN_WINDOW_WIDTH = 1200
+DASHBOARD_MIN_WINDOW_HEIGHT = 700
+# 검색 테이블 위쪽 고정 영역(제어 버튼+구매자/카메라+검색 툴바)의 대략적 세로 합
+SEARCH_TABLE_VERTICAL_OVERHEAD = 580
+SEARCH_TABLE_MIN_HEIGHT = 320
+# 카메라 미리보기는 창 폭에 맞춰 이 범위 안에서 4:3 비율로 조정한다.
+CAMERA_PREVIEW_MIN_WIDTH = 280
+CAMERA_PREVIEW_MAX_WIDTH = 400
+CAMERA_PREVIEW_HEIGHT_RATIO = 0.75
 CAMERA_SETTINGS_OVERLAY_WIDTH = CAMERA_SETTINGS_DRAWER_WIDTH + CAMERA_SETTINGS_HANDLE_WIDTH
-CAMERA_SETTINGS_OVERLAY_CLOSED_OFFSET_X = CAMERA_SETTINGS_DRAWER_WIDTH / CAMERA_SETTINGS_OVERLAY_WIDTH
 ACCENT_PRIMARY = "#39C5BB"
 ACCENT_PRIMARY_DARK = "#1C8C84"
 ACCENT_PRIMARY_DEEP = "#145F59"
@@ -887,8 +900,30 @@ def build_order_search_panel(
     search_feedback_text: ft.Text,
     search_result_header: ft.Control,
     search_result_list: ft.Control,
+    table_host_ref: dict[str, ft.Container | None] | None = None,
 ) -> ft.Container:
-    """주문 검색 툴바와 결과 영역 레이아웃을 조립한다."""
+    """주문 검색 툴바와 결과 영역 레이아웃을 조립한다.
+
+    결과 테이블 컨테이너는 창 크기에 따라 높이가 재조정되므로
+    table_host_ref를 통해 외부에 노출한다.
+    """
+    table_host = ft.Container(
+        content=ft.Column(
+            controls=[
+                search_result_header,
+                search_result_list,
+            ],
+            spacing=0,
+        ),
+        bgcolor="#FFFFFF",
+        border=ft.border.all(1, "#D2D2D2"),
+        border_radius=8,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        height=SEARCH_TABLE_MIN_HEIGHT,
+        key="dashboard_search_result_table_host",
+    )
+    if table_host_ref is not None:
+        table_host_ref["value"] = table_host
     return ft.Container(
         content=ft.Column(
             controls=[
@@ -915,20 +950,7 @@ def build_order_search_panel(
                     spacing=8,
                 ),
                 search_feedback_text,
-                ft.Container(
-                    content=ft.Column(
-                        controls=[
-                            search_result_header,
-                            search_result_list,
-                        ],
-                        spacing=0,
-                    ),
-                    bgcolor="#FFFFFF",
-                    border=ft.border.all(1, "#D2D2D2"),
-                    border_radius=8,
-                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                    height=500,
-                ),
+                table_host,
             ],
             spacing=8,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -1112,6 +1134,16 @@ def build_settings_sidebar_placeholder_panel(
             spacing=14,
             expand=True,
         ),
+    )
+
+
+def resolve_settings_drawer_width(window_width: float | None) -> int:
+    """창 폭에 맞춰 설정 서랍 폭을 최소~기본 사이즈 사이에서 계산한다."""
+    if not window_width:
+        return CAMERA_SETTINGS_DRAWER_WIDTH
+    return max(
+        CAMERA_SETTINGS_DRAWER_MIN_WIDTH,
+        min(CAMERA_SETTINGS_DRAWER_WIDTH, int(window_width * CAMERA_SETTINGS_DRAWER_WIDTH_RATIO)),
     )
 
 
@@ -1317,12 +1349,17 @@ def build_receipt_preview_dialog(
     *,
     preview_items: list[tuple[str, str]],
     on_close: Callable[[ft.ControlEvent], None],
+    max_width: int = 452,
+    max_height: int = 700,
 ) -> ft.AlertDialog:
     """영수증 인쇄 미리보기 다이얼로그를 생성한다.
 
     Args:
         preview_items: (라벨, base64) 튜플 리스트. 상품 영수증 포함 시 2장.
+        max_width/max_height: 현재 창 크기에 맞춰 콘텐츠 최대 크기를 제한한다.
     """
+    dialog_width = min(452, max_width)
+    dialog_height = min(700, max_height)
     def _preview_type_style(label: str) -> tuple[str, str, str, str]:
         normalized = (label or "").strip()
         if normalized == "상품 영수증":
@@ -1392,8 +1429,8 @@ def build_receipt_preview_dialog(
     return ft.AlertDialog(
         title=ft.Text(f"영수증 미리보기{title_suffix}", size=18, weight=ft.FontWeight.BOLD),
         content=ft.Container(
-            width=452,
-            height=700,
+            width=dialog_width,
+            height=dialog_height,
             content=ft.Column(
                 controls=controls,
                 scroll=ft.ScrollMode.AUTO,
@@ -1763,7 +1800,12 @@ def build_search_result_rows(
 
     def _build_order_number_cell(order_number: str) -> ft.Control:
         """주문번호 셀을 생성한다. 콜백이 있으면 클릭 가능한 링크로 표시한다."""
-        text = ft.Text(order_number, size=13, color=ACCENT_PRIMARY_DARK)
+        text = ft.Text(
+            order_number,
+            size=13,
+            color=ACCENT_PRIMARY_DARK,
+            tooltip=order_number,
+        )
         if on_order_number_click is not None:
             order_text_widget: ft.Control = ft.GestureDetector(
                 content=ft.Container(
@@ -1789,11 +1831,15 @@ def build_search_result_rows(
             height=28,
             on_click=lambda _e, on=order_number: on_copy_order_number(on),
         )
+        # tight Row는 콘텐츠 폭 그대로 렌더링해 긴 주문번호가 이름 열을 침범한다.
+        # expand 컨테이너로 텍스트에 셀 폭을 부여해 넘치면 줄바꿈되게 한다.
         return ft.Row(
-            controls=[copy_btn, order_text_widget],
+            controls=[
+                copy_btn,
+                ft.Container(content=order_text_widget, expand=True),
+            ],
             spacing=2,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            tight=True,
         )
 
     def _apply_hover(e: ft.HoverEvent, text: ft.Text) -> None:
@@ -2223,9 +2269,11 @@ class DashboardFletView:
 
     def _build_page(self, page: ft.Page) -> None:
         page.title = "Ticket_AUTO Control Center"
-        page.window.width = 1800
-        page.window.height = 920
-        page.window.resizable = False
+        page.window.width = DASHBOARD_DEFAULT_WINDOW_WIDTH
+        page.window.height = DASHBOARD_DEFAULT_WINDOW_HEIGHT
+        page.window.min_width = DASHBOARD_MIN_WINDOW_WIDTH
+        page.window.min_height = DASHBOARD_MIN_WINDOW_HEIGHT
+        page.window.resizable = True
         page.padding = 0
         page.bgcolor = "#EDEDED"
         page.theme_mode = ft.ThemeMode.LIGHT
@@ -2544,8 +2592,18 @@ class DashboardFletView:
                         page.dialog.open = False
                         safe_page_update(page, search_refresh_stop)
 
+                    # 창보다 큰 다이얼로그는 잘리므로 현재 창 크기에 맞춰 제한한다.
+                    window_w = float(
+                        getattr(page.window, "width", None) or DASHBOARD_DEFAULT_WINDOW_WIDTH
+                    )
+                    window_h = float(
+                        getattr(page.window, "height", None) or DASHBOARD_DEFAULT_WINDOW_HEIGHT
+                    )
                     page.dialog = build_receipt_preview_dialog(
-                        preview_items=preview_items, on_close=_close_preview,
+                        preview_items=preview_items,
+                        on_close=_close_preview,
+                        max_width=max(320, int(window_w) - 120),
+                        max_height=max(360, int(window_h) - 140),
                     )
                     page.dialog.open = True
                     safe_page_update(page, search_refresh_stop)
@@ -3014,10 +3072,12 @@ class DashboardFletView:
             camera_focus_side_handle.visible = is_settings_tab
             camera_focus_overlay_group.visible = is_settings_tab
             camera_focus_overlay_group.opacity = 1.0 if is_settings_tab else 0.0
+            # 닫힘 오프셋은 현재 서랍 폭 기준으로 계산해 핸들만 보이게 한다.
+            drawer_w = camera_focus_drawer.width or CAMERA_SETTINGS_DRAWER_WIDTH
             camera_focus_overlay_group.offset = (
                 ft.Offset(0, 0)
                 if is_open
-                else ft.Offset(CAMERA_SETTINGS_OVERLAY_CLOSED_OFFSET_X, 0)
+                else ft.Offset(drawer_w / (drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH), 0)
             )
             _apply_camera_focus_side_handle_style()
             if push_update:
@@ -3380,10 +3440,13 @@ class DashboardFletView:
                                 controls=[btn_buyer_print, btn_buyer_preview],
                                 spacing=8,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                # 좁은 패널에서 wrap으로 내려갈 때 버튼 묶음이 내용 폭만 차지하게 한다.
+                                tight=True,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
                     ),
                     buyer_empty_hint,
                     buyer_detail_col,
@@ -3409,6 +3472,7 @@ class DashboardFletView:
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
                     ),
                     buyer_goods_hint,
                     buyer_goods_cards,
@@ -3449,6 +3513,7 @@ class DashboardFletView:
         special_rule_progress_panel_ref["value"] = special_rule_progress_panel
         special_rule_progress_panel.visible = next_special_rule_sections.visible
 
+        search_table_host_ref: dict[str, ft.Container | None] = {"value": None}
         ticket_panel = build_ticket_dashboard_panel(
             top_controls_col=top_controls_col,
             buyer_info_panel=buyer_info_panel,
@@ -3464,8 +3529,66 @@ class DashboardFletView:
                 search_feedback_text=search_feedback_text,
                 search_result_header=search_result_header,
                 search_result_list=search_result_list,
+                table_host_ref=search_table_host_ref,
             ),
         )
+
+        def _apply_responsive_layout(
+            width: float | None = None,
+            height: float | None = None,
+        ) -> None:
+            """창 크기에 맞춰 검색 테이블 높이와 카메라 미리보기 크기를 조정한다."""
+            window_w = float(
+                width
+                or getattr(page, "width", None)
+                or getattr(page.window, "width", None)
+                or DASHBOARD_DEFAULT_WINDOW_WIDTH
+            )
+            window_h = float(
+                height
+                or getattr(page, "height", None)
+                or getattr(page.window, "height", None)
+                or DASHBOARD_DEFAULT_WINDOW_HEIGHT
+            )
+            table_host = search_table_host_ref["value"]
+            if table_host is not None:
+                # 테이블이 창 아래까지 남은 공간을 채우되 최소 높이는 보장한다.
+                table_host.height = max(
+                    SEARCH_TABLE_MIN_HEIGHT,
+                    int(window_h - SEARCH_TABLE_VERTICAL_OVERHEAD),
+                )
+            # 좁은 창에서는 카메라 미리보기를 줄여 구매자 패널 폭을 확보한다.
+            camera_width = max(
+                CAMERA_PREVIEW_MIN_WIDTH,
+                min(
+                    CAMERA_PREVIEW_MAX_WIDTH,
+                    int((window_w - DASHBOARD_SIDEBAR_WIDTH - 96) * 0.28),
+                ),
+            )
+            camera_height = int(camera_width * CAMERA_PREVIEW_HEIGHT_RATIO)
+            camera_container.width = camera_view.width = camera_width
+            camera_container.height = camera_view.height = camera_height
+            # 설정 서랍도 창 폭에 맞춰 줄이고, 닫힘 오프셋을 새 폭 기준으로 맞춘다.
+            drawer_w = resolve_settings_drawer_width(window_w)
+            camera_focus_drawer.width = drawer_w
+            camera_focus_overlay_group.width = drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH
+            camera_focus_side_handle.right = drawer_w
+            if not camera_focus_panel_state["value"]:
+                camera_focus_overlay_group.offset = ft.Offset(
+                    drawer_w / (drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH), 0
+                )
+
+        def _on_window_resized(event: ft.WindowResizeEvent) -> None:
+            if search_refresh_stop.is_set():
+                return
+            _apply_responsive_layout(
+                getattr(event, "width", None),
+                getattr(event, "height", None),
+            )
+            safe_page_update(page, search_refresh_stop)
+
+        page.on_resized = _on_window_resized
+        _apply_responsive_layout()
 
         receipt_settings_panel = ft.Container(expand=True)
 

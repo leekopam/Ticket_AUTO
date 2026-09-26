@@ -80,10 +80,14 @@ class OrderView:
         self._seat_label = tk.Label(self._root, text="좌석번호:", font=large_font)
         self._seat_label.pack(pady=10)
 
-        self._goods_label = tk.Label(self._root, text="상품:", font=medium_font, justify=tk.LEFT)
+        self._goods_label = tk.Label(
+            self._root, text="상품:", font=medium_font, justify=tk.LEFT, wraplength=560
+        )
         self._goods_label.pack(pady=10)
 
-        self._ticket_label = tk.Label(self._root, text="", font=medium_font, justify=tk.LEFT, fg="#1C8C84")
+        self._ticket_label = tk.Label(
+            self._root, text="", font=medium_font, justify=tk.LEFT, fg="#1C8C84", wraplength=560
+        )
         self._ticket_label.pack(pady=10)
 
         # 영수증 수동 출력 버튼
