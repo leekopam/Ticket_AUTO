@@ -53,13 +53,13 @@ if ($ExeStartupSeconds -le 0) {
 }
 
 $runMode = if ($Release) { "Release" } elseif ($E2E) { "E2E" } else { "Fast" }
-# Fast는 브라우저(Playwright) 의존 스위트를 제외해 장비 없이 실행 가능하게 한다.
+# Fast는 브라우저(Playwright)·실장비 의존 스위트를 제외해 장비 없이 실행 가능하게 한다.
 $pytestTestArgs = if ($E2E) {
-    @("tests\e2e", "tests\e2e_stub", "tests\e2e_ui")
+    @("tests\e2e", "tests\e2e_stub", "tests\e2e_ui", "tests\e2e_device")
 } elseif ($Release) {
     @("tests")
 } else {
-    @("tests", "--ignore=tests\e2e_ui", "--ignore=tests\e2e_stub")
+    @("tests", "--ignore=tests\e2e_ui", "--ignore=tests\e2e_stub", "--ignore=tests\e2e_device")
 }
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
 $resultsRoot = Join-Path $repoRoot "artifacts\test-results\$timestamp"
