@@ -1028,6 +1028,19 @@ def build_order_search_panel(
     )
 
 
+def build_camera_preview_image() -> ft.Image:
+    """카메라 미리보기와 네이티브 E2E가 동일한 이미지 설정을 사용한다."""
+    # Flet 0.23.2 Windows에서 key가 있으면 프레임 교체 중 이미지가 잠깐 사라진다.
+    return ft.Image(
+        width=400,
+        height=300,
+        fit=ft.ImageFit.CONTAIN,
+        gapless_playback=True,
+        visible=False,
+        semantics_label="카메라 미리보기",
+    )
+
+
 def apply_camera_frame_state(camera_view: ft.Image, b64_str: str, *, is_web: bool) -> None:
     """카메라 프레임 표시 상태를 한 번에 갱신한다."""
     if is_web:
@@ -3158,15 +3171,7 @@ class DashboardFletView:
         btn_work_tab.on_click = lambda _: set_tab("work")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
 
-        camera_view = ft.Image(
-            width=400,
-            height=300,
-            fit=ft.ImageFit.CONTAIN,
-            gapless_playback=True,
-            visible=False,
-            key="dashboard_camera_view",
-            semantics_label="카메라 미리보기",
-        )
+        camera_view = build_camera_preview_image()
 
         def on_camera_frame(b64_str: str) -> None:
             dispatch_camera_frame_update(page, camera_view, b64_str, search_refresh_stop)

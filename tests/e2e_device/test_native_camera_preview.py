@@ -37,7 +37,7 @@ def test_native_camera_preview_stays_visible(tmp_path: Path) -> None:
             x, y = win32gui.ClientToScreen(hwnd, (0, 0))
 
             def brightness() -> int:
-                with ImageGrab.grab(bbox=(x + 80, y + 80, x + 81, y + 81)) as image:
+                with ImageGrab.grab(bbox=(x + 200, y + 150, x + 201, y + 151)) as image:
                     return image.getpixel((0, 0))[0]
 
             deadline = time.monotonic() + 5
