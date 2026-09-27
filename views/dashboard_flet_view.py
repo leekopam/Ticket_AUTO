@@ -643,6 +643,16 @@ class BuyerPanelState:
 
 
 @dataclass(frozen=True)
+class TicketResultState:
+    title: str
+    detail: str
+    bgcolor: str
+    border_color: str
+    text_color: str
+    icon: str
+
+
+@dataclass(frozen=True)
 class SearchResultRowState:
     order_number: str
     name: str
@@ -735,6 +745,59 @@ def build_buyer_panel_state(
         ticket_visible=bool(ticket_goods),
         received_text=f"수령완료: {order.received_at}" if order.is_received else "",
         received_visible=order.is_received,
+    )
+
+
+def resolve_ticket_result_state(
+    order: Order | None,
+    *,
+    processing: bool = False,
+    error: str = "",
+) -> TicketResultState:
+    """스캔 결과 카드에 실제 수령 저장 상태만 표시한다."""
+    if order is None:
+        return TicketResultState(
+            "QR 스캔 대기",
+            "QR 코드를 스캔하면 자동으로 수령 처리합니다.",
+            ACCENT_PRIMARY_SOFT,
+            ACCENT_PRIMARY_BORDER,
+            ACCENT_PRIMARY_DEEP,
+            ICONS.INFO_OUTLINE_ROUNDED,
+        )
+    if error:
+        return TicketResultState(
+            "수령 처리 실패",
+            error,
+            STATUS_DANGER_SOFT,
+            STATUS_DANGER,
+            STATUS_DANGER,
+            ICONS.ERROR_ROUNDED,
+        )
+    if processing:
+        return TicketResultState(
+            "수령 처리 중",
+            f"주문 {order.order_number}의 수령 결과를 확인하고 있습니다.",
+            STATUS_WARNING_SOFT,
+            STATUS_WARNING_TEXT,
+            STATUS_WARNING_TEXT,
+            ICONS.HOURGLASS_TOP_ROUNDED,
+        )
+    if order.is_received:
+        return TicketResultState(
+            "수령 완료",
+            f"{order.received_at} · 주문 {order.order_number}",
+            ACCENT_PRIMARY_SOFT,
+            ACCENT_PRIMARY_DEEP,
+            ACCENT_PRIMARY_DEEP,
+            ICONS.CHECK_CIRCLE_ROUNDED,
+        )
+    return TicketResultState(
+        "수령 확인 필요",
+        f"주문 {order.order_number}의 처리 상태를 확인해주세요.",
+        STATUS_WARNING_SOFT,
+        STATUS_WARNING_TEXT,
+        STATUS_WARNING_TEXT,
+        ICONS.INFO_OUTLINE_ROUNDED,
     )
 
 
@@ -979,22 +1042,20 @@ def build_ticket_dashboard_panel(
     special_rule_progress_panel: ft.Control,
     order_search_panel: ft.Control,
 ) -> ft.Container:
-    """티켓 확인 탭의 상단 제어, 구매자/카메라, 검색 영역 레이아웃을 조립한다."""
+    """티켓 확인 탭을 카메라 좌측, 스캔 결과 우측으로 배치한다."""
     return ft.Container(
         content=ft.Column(
             controls=[
                 ft.Container(
                     content=top_controls_col,
-                    padding=ft.padding.only(bottom=10, right=10),
-                    border=ft.border.only(bottom=ft.border.BorderSide(1, "#E0E0E0")),
-                    margin=ft.margin.only(bottom=10),
+                    padding=ft.padding.only(bottom=8, right=10),
                 ),
                 ft.Row(
                     controls=[
-                        buyer_info_panel,
                         camera_container,
+                        buyer_info_panel,
                     ],
-                    spacing=16,
+                    spacing=14,
                     vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
                 special_rule_progress_panel,
@@ -1785,6 +1846,7 @@ def build_buyer_event_view_state(
 def build_search_result_rows(
     row_states: tuple[SearchResultRowState, ...],
     *,
+    selected_order_number: str | None = None,
     on_order_number_click: Callable[[str], None] | None = None,
     on_copy_order_number: Callable[[str], None] | None = None,
 ) -> list[ft.Container]:
@@ -1883,6 +1945,7 @@ def build_search_result_rows(
 
     rows: list[ft.Container] = []
     for row_state in row_states:
+        selected = row_state.order_number == selected_order_number
         rows.append(ft.Container(
             content=ft.Row(
                 controls=[
@@ -1911,11 +1974,36 @@ def build_search_result_rows(
                 spacing=10,
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
-            bgcolor=row_state.row_bg,
+            bgcolor=ACCENT_PRIMARY_SOFT if selected else row_state.row_bg,
             padding=ft.padding.symmetric(horizontal=16, vertical=12),
-            border=ft.border.only(bottom=ft.border.BorderSide(1, "#EEEEEE")),
+            border=ft.border.only(
+                left=ft.border.BorderSide(
+                    4, ACCENT_PRIMARY_DEEP if selected else "#00000000"
+                ),
+                bottom=ft.border.BorderSide(1, "#EEEEEE"),
+            ),
+            animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
+            data=row_state.order_number,
         ))
     return rows
+
+
+def select_search_result_row(
+    rows: list[ft.Container],
+    selected_order_number: str | None,
+) -> None:
+    """기존 검색 행에서 마지막 스캔 주문을 표시한다."""
+    for index, row in enumerate(rows):
+        selected = row.data == selected_order_number
+        row.bgcolor = ACCENT_PRIMARY_SOFT if selected else (
+            "#FFFFFF" if index % 2 == 0 else "#FAFAFA"
+        )
+        row.border = ft.border.only(
+            left=ft.border.BorderSide(
+                4, ACCENT_PRIMARY_DEEP if selected else "#00000000"
+            ),
+            bottom=ft.border.BorderSide(1, "#EEEEEE"),
+        )
 
 
 def apply_order_search_dashboard_state(
@@ -1928,6 +2016,7 @@ def apply_order_search_dashboard_state(
     search_result_list: ft.ListView,
     search_feedback_text: ft.Text,
     last_search_signature: dict[str, tuple[object, ...] | None],
+    selected_order_number: str | None = None,
     on_order_number_click: Callable[[str], None] | None = None,
     on_copy_order_number: Callable[[str], None] | None = None,
 ) -> None:
@@ -1939,6 +2028,7 @@ def apply_order_search_dashboard_state(
     refresh_print_controls(search_blocked=search_view_state.search_blocked)
     search_result_list.controls = build_search_result_rows(
         search_view_state.row_states,
+        selected_order_number=selected_order_number,
         on_order_number_click=on_order_number_click,
         on_copy_order_number=on_copy_order_number,
     )
@@ -2084,6 +2174,7 @@ def dispatch_runtime_event_dashboard_state(
     on_start: Callable[[ft.ControlEvent], None],
     on_stop: Callable[[ft.ControlEvent], None],
     refresh_search_results: Callable[[], None],
+    after_status_update: Callable[[], None] | None = None,
     closing_event: threading.Event | None = None,
 ) -> None:
     """런타임 이벤트를 대시보드 상태 반영과 검색 재실행까지 묶어 처리한다."""
@@ -2107,6 +2198,8 @@ def dispatch_runtime_event_dashboard_state(
             closing_event=closing_event,
             push_update=False,
         )
+        if after_status_update is not None:
+            after_status_update()
 
     dispatch_runtime_event_update(
         page,
@@ -2547,6 +2640,7 @@ class DashboardFletView:
         # 주문 선택 출력용 Dropdown + 버튼
         orders_map: dict[str, Order] = {}
         current_buyer_order: dict[str, Order | None] = {"value": None}
+        pending_order_number: dict[str, str | None] = {"value": None}
         last_search_signature = {"value": None}
         search_blocked_state = {"value": False}
         search_result_highlight_state = {"value": False}
@@ -2807,6 +2901,11 @@ class DashboardFletView:
                 search_result_list=search_result_list,
                 search_feedback_text=search_feedback_text,
                 last_search_signature=last_search_signature,
+                selected_order_number=(
+                    current_buyer_order["value"].order_number
+                    if current_buyer_order["value"] is not None
+                    else None
+                ),
                 on_order_number_click=_on_order_number_click,
                 on_copy_order_number=_on_copy_order_number,
             )
@@ -2991,6 +3090,7 @@ class DashboardFletView:
                 on_start=on_start,
                 on_stop=on_stop,
                 refresh_search_results=lambda: refresh_active_order_views(push_update=False),
+                after_status_update=lambda: _sync_ticket_result_after_runtime(state, message),
                 closing_event=search_refresh_stop,
             )
 
@@ -3377,19 +3477,28 @@ class DashboardFletView:
             side_handle=camera_focus_side_handle,
         )
         camera_focus_overlay_group = dashboard_overlay_host.controls[1]
-        top_controls_col = ft.Column(
+        top_controls_col = ft.Row(
             controls=[
-                ft.Text("티켓 확인 제어", size=28, weight=ft.FontWeight.BOLD, color="#1D1D1D"),
-                ft.Container(height=8),
+                ft.Column(
+                    controls=[
+                        ft.Text("티켓 확인", size=28, weight=ft.FontWeight.BOLD, color="#0F172A"),
+                        ft.Text(
+                            "QR 스캔 시 주문을 확인하고 수령을 자동 처리합니다.",
+                            size=13,
+                            color="#64748B",
+                        ),
+                    ],
+                    spacing=3,
+                ),
                 ft.Row(
-                    controls=[btn_start_stop, btn_open_witchform, btn_phone_link, processed_count_reset_button],
-                    spacing=10,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[btn_open_witchform, btn_phone_link, processed_count_reset_button],
+                    spacing=8,
                     wrap=True,
                 ),
             ],
-            spacing=8,
-            expand=False,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            wrap=True,
         )
 
         # 구매자 정보 표시 UI
@@ -3456,6 +3565,56 @@ class DashboardFletView:
             key="dashboard_buyer_empty_hint",
             tooltip="구매자 정보 비어 있음 안내",
         )
+        result_status_title = ft.Text(
+            "QR 스캔 대기",
+            size=23,
+            weight=ft.FontWeight.BOLD,
+            color=ACCENT_PRIMARY_DEEP,
+            key="dashboard_ticket_result_title",
+        )
+        result_status_detail = ft.Text(
+            "QR 코드를 스캔하면 자동으로 수령 처리합니다.",
+            size=12,
+            color=ACCENT_PRIMARY_DEEP,
+            key="dashboard_ticket_result_detail",
+        )
+        result_status_icon = ft.Icon(
+            ICONS.INFO_OUTLINE_ROUNDED,
+            size=32,
+            color=ACCENT_PRIMARY_DEEP,
+        )
+        result_status_panel = ft.Container(
+            bgcolor=ACCENT_PRIMARY_SOFT,
+            border=ft.border.all(2, ACCENT_PRIMARY_BORDER),
+            border_radius=12,
+            padding=ft.padding.symmetric(horizontal=16, vertical=14),
+            content=ft.Row(
+                controls=[
+                    result_status_icon,
+                    ft.Column(
+                        controls=[result_status_title, result_status_detail],
+                        spacing=2,
+                        expand=True,
+                    ),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            key="dashboard_ticket_result_status",
+        )
+
+        def _apply_ticket_result_status(*, processing: bool = False, error: str = "") -> None:
+            result = resolve_ticket_result_state(
+                current_buyer_order["value"], processing=processing, error=error
+            )
+            result_status_title.value = result.title
+            result_status_title.color = result.text_color
+            result_status_detail.value = result.detail
+            result_status_detail.color = result.text_color
+            result_status_icon.name = result.icon
+            result_status_icon.color = result.text_color
+            result_status_panel.bgcolor = result.bgcolor
+            result_status_panel.border = ft.border.all(2, result.border_color)
 
         btn_buyer_print = ft.ElevatedButton(
             "출력",
@@ -3501,13 +3660,15 @@ class DashboardFletView:
         buyer_detail_col = ft.Column(
             controls=[
                 buyer_name_text,
+                ft.Row(
+                    controls=[buyer_seat_text, buyer_ticket_text],
+                    spacing=16,
+                    wrap=True,
+                ),
                 buyer_phone_text,
-                buyer_seat_text,
-                ft.Divider(height=1, color="#E0E0E0"),
-                buyer_ticket_text,
                 buyer_received_text,
             ],
-            spacing=6,
+            spacing=8,
             visible=False,
             key="dashboard_buyer_detail_panel",
         )
@@ -3536,61 +3697,60 @@ class DashboardFletView:
                 buyer_empty_hint=buyer_empty_hint,
                 refresh_print_controls=refresh_print_controls,
             )
+            _apply_ticket_result_status(
+                processing=pending_order_number["value"] == order.order_number
+            )
 
         def on_order_event(order: Order) -> None:
             """Application에서 전달된 주문 정보를 UI에 반영한다."""
-            call_page_from_thread(page, lambda: _apply_order_update(order), search_refresh_stop)
+            already_received = order.is_received
+            call_page_from_thread(
+                page,
+                lambda: _apply_order_update(order, already_received),
+                search_refresh_stop,
+            )
 
-        def _apply_order_update(order: Order) -> None:
+        def _apply_order_update(order: Order, already_received: bool) -> None:
+            pending_order_number["value"] = None if already_received else order.order_number
             update_buyer_info(order)
+            select_search_result_row(search_result_list.controls, order.order_number)
             safe_page_update(page, search_refresh_stop)
+
+        def _sync_ticket_result_after_runtime(state: str, message: str) -> None:
+            pending_number = pending_order_number["value"]
+            order = current_buyer_order["value"]
+            if pending_number is None or order is None or order.order_number != pending_number:
+                return
+            if state == "READY":
+                pending_order_number["value"] = None
+                update_buyer_info(order)
+            elif state == "ERROR":
+                pending_order_number["value"] = None
+                _apply_ticket_result_status(error=message or "수령 상태를 확인해주세요.")
+            elif state in {"STOPPED", "IDLE"}:
+                pending_order_number["value"] = None
+                _apply_ticket_result_status(
+                    error="처리가 중단되었습니다. 티켓 확인을 다시 시작해주세요."
+                )
 
         self._runtime_manager.set_order_listener(on_order_event)
 
-        buyer_identity_panel = ft.Container(
+        buyer_info_panel = ft.Container(
             expand=True,
-            height=318,
+            height=330,
             bgcolor="#FFFFFF",
             border_radius=14,
             border=ft.border.all(1, "#D9E1EC"),
             padding=ft.padding.all(18),
             content=ft.Column(
                 controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Text("구매자 정보", weight=ft.FontWeight.BOLD, size=16),
-                            ft.Row(
-                                controls=[btn_buyer_print, btn_buyer_preview],
-                                spacing=8,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                # 좁은 패널에서 wrap으로 내려갈 때 버튼 묶음이 내용 폭만 차지하게 한다.
-                                tight=True,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        wrap=True,
-                    ),
+                    result_status_panel,
                     buyer_empty_hint,
                     buyer_detail_col,
-                ],
-                spacing=10,
-                expand=True,
-            ),
-        )
-
-        buyer_goods_panel = ft.Container(
-            expand=True,
-            height=318,
-            bgcolor="#FFFFFF",
-            border_radius=14,
-            border=ft.border.all(1, "#D9E1EC"),
-            padding=ft.padding.all(18),
-            content=ft.Column(
-                controls=[
+                    ft.Divider(height=1, color="#D9E1EC"),
                     ft.Row(
                         controls=[
-                            ft.Text("상품 정보", weight=ft.FontWeight.BOLD, size=16),
+                            ft.Text("상품 정보", weight=ft.FontWeight.BOLD, size=14),
                             buyer_goods_count_badge,
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -3599,16 +3759,17 @@ class DashboardFletView:
                     ),
                     buyer_goods_hint,
                     buyer_goods_cards,
+                    ft.Row(
+                        controls=[btn_buyer_print, btn_buyer_preview],
+                        spacing=8,
+                        wrap=True,
+                    ),
                 ],
-                spacing=12,
+                spacing=10,
                 expand=True,
+                scroll=ft.ScrollMode.AUTO,
             ),
-        )
-
-        buyer_info_panel = ft.Row(
-            controls=[buyer_identity_panel, buyer_goods_panel],
-            spacing=12,
-            expand=True,
+            key="dashboard_buyer_result_panel",
         )
 
         camera_container = ft.Container(
@@ -3623,7 +3784,10 @@ class DashboardFletView:
         )
 
         camera_column = ft.Column(
-            controls=[camera_container],
+            controls=[
+                camera_container,
+                btn_start_stop,
+            ],
             spacing=8,
         )
 
@@ -3689,7 +3853,7 @@ class DashboardFletView:
                 if table_host is not None
                 else None
             )
-            # 좁은 창에서는 카메라 미리보기를 줄여 구매자 패널 폭을 확보한다.
+            # 좁은 창에서는 카메라 열을 줄여 결과 카드 폭을 확보한다.
             camera_width = max(
                 CAMERA_PREVIEW_MIN_WIDTH,
                 min(
@@ -3714,6 +3878,7 @@ class DashboardFletView:
             last_applied_layout["resolved"] = resolved
             if table_host is not None:
                 table_host.height = table_height
+            camera_column.width = camera_width
             camera_container.width = camera_view.width = camera_width
             camera_container.height = camera_view.height = camera_height
             # 닫힘 오프셋을 새 서랍 폭 기준으로 맞춘다.

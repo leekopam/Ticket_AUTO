@@ -129,6 +129,7 @@ def test_u02_dashboard_search_and_order_flow(page, flet_server):
     _emit_order(control_url)
     wait_semantics_text(page, "구매자 이름", "테스트 사용자", timeout_ms=_TIMEOUT_MS)
     wait_semantics_text(page, "구매자 좌석", "A-001", timeout_ms=_TIMEOUT_MS)
+    wait_semantics_text(page, "수령 처리 중", "수령 처리 중", timeout_ms=_TIMEOUT_MS)
 
     # 구매자 출력 버튼 → 실제 출력 파이프라인 → 스텁 프린터 큐 기록.
     # (snackbar는 Flutter web semantics에 materialize되지 않아 큐로 검증한다.)
