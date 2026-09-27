@@ -44,13 +44,24 @@ def test_native_camera_preview_stays_visible(tmp_path: Path) -> None:
             while brightness() < 150 and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert brightness() >= 150, "네이티브 첫 프레임이 표시되지 않음"
-            samples = [brightness() for _ in range(80)]
+            samples = []
+            windows = []
+            for _ in range(5):
+                window = []
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    window.append(brightness())
+                    time.sleep(0.02)
+                samples.extend(window)
+                windows.append(window)
             black_frames = sum(value < 100 for value in samples)
             record_metric("camera_preview_samples", len(samples))
             record_metric("camera_preview_black_frames", black_frames)
+            assert len(samples) >= 80, f"네이티브 화면 표본 부족: {len(samples)}개"
             assert black_frames == 0, f"네이티브 프레임 교체 중 검은 화면: {samples}"
-            assert sum(160 <= value <= 200 for value in samples) >= 3, f"이전 프레임 정지: {samples}"
-            assert sum(200 < value <= 240 for value in samples) >= 3, f"새 프레임 정지: {samples}"
+            for window in windows:
+                assert any(160 <= value <= 200 for value in window), f"이전 프레임 정지: {window}"
+                assert any(200 < value <= 240 for value in window), f"새 프레임 정지: {window}"
         finally:
             if hwnd and win32gui.IsWindow(hwnd):
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)

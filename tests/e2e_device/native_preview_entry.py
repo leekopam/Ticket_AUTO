@@ -34,7 +34,7 @@ def main(page: ft.Page) -> None:
     frames = (_frame(180), _frame(220))
 
     def feed() -> None:
-        for i in range(200):
+        for i in range(360):
             dispatch_camera_frame_update(page, image, frames[i % 2])
             time.sleep(0.05)
 
