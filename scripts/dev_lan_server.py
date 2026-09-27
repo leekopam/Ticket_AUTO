@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -64,7 +65,23 @@ def main() -> None:
     excel = ExcelService(str(tmp / "data.xlsx"))
 
     port = int(args[0]) if args else 18765
-    server, pairing, fingerprint = create_server(excel=excel, port=port)
+    # E2E 전용: 임시 XLSX에서만 수령을 흉내 낸다. 운영 서버에는 이 콜백을 전달하지 않는다.
+    def simulate_receipt(qr_url: str) -> dict[str, str]:
+        order_id = parse_qs(urlsplit(qr_url).query).get("r", [""])[0]
+        order = excel.find_order(order_id)
+        if order is None:
+            return {"state": "rejected", "message": "테스트 주문을 찾을 수 없습니다."}
+        if order.is_received:
+            return {"state": "already_processed", "order_id": order_id, "message": "이미 수령된 주문입니다."}
+        if "취소" in (order.order_status or ""):
+            return {"state": "rejected", "order_id": order_id, "message": "취소된 주문입니다."}
+        if not excel.mark_order_received(order_id, time.strftime("%Y-%m-%d %H:%M:%S")):
+            return {"state": "needs_reconciliation", "order_id": order_id, "message": "테스트 기록 실패"}
+        excel.mark_order_status(order_id, "거래종료")
+        return {"state": "succeeded", "order_id": order_id, "message": "테스트 수령 완료"}
+
+    scan_handler = simulate_receipt if "--e2e-simulate-receipt" in sys.argv else None
+    server, pairing, fingerprint = create_server(excel=excel, port=port, scan_handler=scan_handler)
     join_code = pairing.issue_join_code()
     generation, _ = DatasetTracker(excel).current()
 

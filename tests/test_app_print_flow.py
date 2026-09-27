@@ -83,6 +83,7 @@ class _FakeOrderViewModel:
         self.load_calls = 0
         self.open_calls = 0
         self.complete_calls = 0
+        self.process_calls = 0
         self.mark_calls = 0
         self.rollback_calls = 0
 
@@ -104,6 +105,10 @@ class _FakeOrderViewModel:
         self.complete_calls += 1
         if self._click_result_seq:
             return self._click_result_seq.pop(0)
+        return self.click_result
+
+    def process_receipt_for(self, order_number: str, url: str) -> ReceiptClickResult:
+        self.process_calls += 1
         return self.click_result
 
     def mark_current_order_received(self, timestamp_str: str | None = None) -> bool:
@@ -182,6 +187,23 @@ def _build_app_with_order_vm(order_vm: _FakeOrderViewModel):
 
 
 class AppPrintFlowTest(unittest.TestCase):
+    def test_phone_scan_requires_witchform_recheck_before_excel_write(self) -> None:
+        order = Order(order_number="ORDER-001", name="TEST", phone="010", seat="A-1", goods=[])
+        order_vm = _FakeOrderViewModel(order=order, click_result=ReceiptClickResult(success=True, verified=False))
+        app = _build_app_with_order_vm(order_vm)
+        app._active_phone_scan = object()
+
+        app._process_resolved_qr(
+            "https://witchform.com/qrcode_link.php?a=1",
+            BrowserResolveResult(ok=True, status_code=302, location="/x"),
+            allow_auth_retry=False,
+        )
+
+        self.assertEqual(order_vm.process_calls, 1)
+        self.assertEqual(order_vm.complete_calls, 0)
+        self.assertEqual(order_vm.mark_calls, 0)
+        self.assertEqual(app._state, app_main.AppState.ERROR)
+
     def test_open_witchform_login_page_uses_configured_url_without_replacing_order_page(self) -> None:
         app = app_main.Application.__new__(app_main.Application)
         calls: list[tuple[str, bool]] = []

@@ -3,7 +3,7 @@
 계약 정본: docs/contracts/api-v1.md
 - TLS 필수(자체서명 + 폰 측 지문 핀), /pair 외 Bearer 토큰 인증
 - request_id 멱등성, dataset_generation 세대 검증, 주문 단위 락
-- XLSX 쓰기는 PC만 수행. 폰의 처리 결과는 /actions/{id}/result로 보고받아 기록한다.
+- XLSX 쓰기는 PC만 수행. /scan은 PC 스캔 런타임에서 수령 완료를 확인한다.
 """
 from __future__ import annotations
 

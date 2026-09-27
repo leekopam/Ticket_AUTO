@@ -129,10 +129,13 @@ class Application:
         self._active_phone_scan: _PhoneScan | None = None
         self._last_scan_order: Order | None = None
         self._phone_was_received = False
+        self._phone_web_already_received = False
         self._last_status_message = ""
 
     def process_phone_qr(self, qr_url: str) -> dict[str, str]:
         """휴대폰 QR을 PC 스캔과 같은 런타임 순서로 처리한다."""
+        if self._load_ticket_debug_settings().offline_scan_mode:
+            return {"state": "rejected", "message": "오프라인 디버그 모드에서는 휴대폰 수령 처리를 사용할 수 없습니다."}
         if self._state not in (AppState.READY, AppState.PROCESSING) or self._is_stop_requested():
             return {"state": "rejected", "message": "PC 티켓 확인과 윗치폼 로그인을 먼저 시작해주세요."}
         request = _PhoneScan(qr_url)
@@ -633,13 +636,14 @@ class Application:
                 self._active_phone_scan = phone_scan
                 self._last_scan_order = None
                 self._phone_was_received = False
+                self._phone_web_already_received = False
                 try:
                     self._enter_processing()
                     self._process_qr(phone_scan.qr_url, allow_auth_retry=True)
                     order = self._last_scan_order
                     latest = self._excel_service.find_order(order.order_number) if order else None
                     if self._state == AppState.READY and latest and latest.is_received:
-                        state = "already_processed" if self._phone_was_received else "succeeded"
+                        state = "already_processed" if self._phone_was_received or self._phone_web_already_received else "succeeded"
                     else:
                         state = "needs_reconciliation" if order else "failed"
                     phone_scan.result = {
@@ -794,17 +798,24 @@ class Application:
             return
 
         if not offline_mode:
-            try:
-                order_page_opened = self._order_viewmodel.open_current_order_page()
-            except Exception:
-                logger.warning("주문 상세 페이지 열기 중 예외 발생", exc_info=True)
-                order_page_opened = False
+            phone_scan = getattr(self, "_active_phone_scan", None) is not None
+            if phone_scan:
+                order_page_opened = True
+            else:
+                try:
+                    order_page_opened = self._order_viewmodel.open_current_order_page()
+                except Exception:
+                    logger.warning("주문 상세 페이지 열기 중 예외 발생", exc_info=True)
+                    order_page_opened = False
             if not order_page_opened:
                 self._enter_error("주문 상세 페이지를 열 수 없습니다.")
                 return
 
             try:
-                click_result = self._order_viewmodel.complete_receipt()
+                click_result = (
+                    self._order_viewmodel.process_receipt_for(order.order_number, parse_result.full_url)
+                    if phone_scan else self._order_viewmodel.complete_receipt()
+                )
             except Exception as exc:
                 logger.warning("수령 완료 처리 중 예외 발생", exc_info=True)
                 click_result = ReceiptClickResult(
@@ -814,23 +825,36 @@ class Application:
                 # 페이지 로딩 지연으로 인한 일시적 실패 가능성 — 1.5초 대기 후 1회 자동 재시도
                 self._enter_processing("수령 완료 처리 재시도 중...")
                 time.sleep(1.5)
-                try:
-                    retry_page_opened = self._order_viewmodel.open_current_order_page()
-                except Exception:
-                    logger.warning("수령 완료 재시도 페이지 열기 중 예외 발생", exc_info=True)
-                    retry_page_opened = False
+                if phone_scan:
+                    retry_page_opened = True
+                else:
+                    try:
+                        retry_page_opened = self._order_viewmodel.open_current_order_page()
+                    except Exception:
+                        logger.warning("수령 완료 재시도 페이지 열기 중 예외 발생", exc_info=True)
+                        retry_page_opened = False
                 if retry_page_opened:
                     try:
-                        click_result = self._order_viewmodel.complete_receipt()
+                        click_result = (
+                            self._order_viewmodel.process_receipt_for(order.order_number, parse_result.full_url)
+                            if phone_scan else self._order_viewmodel.complete_receipt()
+                        )
                     except Exception as exc:
                         logger.warning("수령 완료 재시도 중 예외 발생", exc_info=True)
                         click_result = ReceiptClickResult(
                             success=False, error_code="RECEIPT_EXCEPTION", error_message=str(exc)
                         )
 
+            if phone_scan and click_result.success and not click_result.verified:
+                click_result = ReceiptClickResult(
+                    success=False, error_code="VERIFY_FAILED", error_message="윗치폼 수령 완료를 확인하지 못했습니다."
+                )
+
             if not click_result.success:
                 # 웹 페이지에서 이미 수령완료 상태인 경우 엑셀에 반영하고 정상 처리
                 if click_result.error_code == "ALREADY_RECEIVED":
+                    if phone_scan:
+                        self._phone_web_already_received = True
                     received_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self._order_viewmodel.mark_current_order_received(received_at)
                     debug_settings = self._load_ticket_debug_settings()
