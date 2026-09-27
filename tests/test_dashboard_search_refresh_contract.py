@@ -44,7 +44,7 @@ class DashboardSearchRefreshContractTest(unittest.TestCase):
 
     def test_runtime_event_dispatch_uses_dashboard_helper_with_search_refresh_callback(self) -> None:
         self.assertIn("dispatch_runtime_event_dashboard_state(", self.source)
-        self.assertIn("lambda: do_search(push_update=False),", self.source)
+        self.assertIn("lambda: refresh_active_order_views(push_update=False),", self.source)
 
     def test_runtime_status_refresh_uses_runtime_controls_helper(self) -> None:
         self.assertIn("dispatch_runtime_status_refresh(", self.source)
@@ -52,7 +52,7 @@ class DashboardSearchRefreshContractTest(unittest.TestCase):
 
     def test_set_tab_uses_sidebar_dispatch_helper(self) -> None:
         self.assertIn("dispatch_sidebar_tab_change(", self.source)
-        self.assertIn("refresh_search_results=lambda: do_search(push_update=False),", self.source)
+        self.assertIn("refresh_search_results=lambda: refresh_active_order_views(push_update=False),", self.source)
 
     def test_do_search_uses_order_search_dashboard_helper(self) -> None:
         self.assertIn("apply_order_search_dashboard_state(", self.source)

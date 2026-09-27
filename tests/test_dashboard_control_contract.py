@@ -30,6 +30,9 @@ class _FakeDashboardPage:
 class _FakeRuntimeManager:
     _app_factory = None
 
+    def process_phone_qr(self, _qr_url):
+        return {}
+
     def set_order_listener(self, *_listeners) -> None:
         return None
 

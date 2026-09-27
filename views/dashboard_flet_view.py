@@ -157,19 +157,22 @@ def resolve_tab_content(
     tab_key: str,
     ticket_panel: ft.Control,
     receipt_panel: ft.Control,
+    work_panel: ft.Control | None = None,
 ) -> ft.Control:
     """Return panel for selected tab."""
     if tab_key == "ticket":
         return ticket_panel
+    if tab_key == "work" and work_panel is not None:
+        return work_panel
     return receipt_panel
 
 
 def should_auto_refresh_order_views(tab_key: str, runtime_state: str) -> bool:
-    """Return True when ticket search results should refresh automatically.
+    """Return True when order views should refresh automatically.
 
-    티켓 확인 탭에서는 런타임 상태와 무관하게 항상 자동 갱신한다.
+    티켓 확인/티켓 업무 탭에서는 런타임 상태와 무관하게 항상 자동 갱신한다.
     """
-    return tab_key == "ticket"
+    return tab_key in ("ticket", "work")
 
 
 def resolve_preserved_order_selection(
@@ -701,6 +704,7 @@ class SidebarTabState:
     content: ft.Control
     ticket_tab_bgcolor: str
     receipt_tab_bgcolor: str
+    work_tab_bgcolor: str
     should_refresh_search: bool
 
 
@@ -1300,8 +1304,13 @@ def build_dashboard_sidebar(
     *,
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
+    btn_work_tab: ft.Control | None = None,
 ) -> ft.Container:
     """좌측 사이드바 레이아웃을 조립한다."""
+    tab_buttons = [btn_ticket_tab]
+    if btn_work_tab is not None:
+        tab_buttons.append(btn_work_tab)
+    tab_buttons.append(btn_receipt_tab)
     return ft.Container(
         width=DASHBOARD_SIDEBAR_WIDTH,
         bgcolor="#F5F6F8",
@@ -1314,8 +1323,7 @@ def build_dashboard_sidebar(
                     content=ft.Text("Magical Play", size=28, weight=ft.FontWeight.W_700, color="#172235"),
                 ),
                 ft.Container(height=14),
-                btn_ticket_tab,
-                btn_receipt_tab,
+                *tab_buttons,
                 ft.Container(expand=True),
                 ft.Container(
                     padding=ft.padding.only(left=6, bottom=2),
@@ -1477,6 +1485,8 @@ def bootstrap_dashboard_page(
     shell_content: ft.Control | None = None,
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
+    btn_work_tab: ft.Control | None = None,
+    work_panel: ft.Control | None = None,
     sidebar: ft.Control,
     btn_relogin: ft.Control,
     btn_start_stop: ft.ElevatedButton,
@@ -1502,12 +1512,14 @@ def bootstrap_dashboard_page(
             current_tab["value"],
             ticket_panel,
             receipt_settings_panel,
+            work_panel,
         ),
         current_tab=current_tab,
         tab_key=current_tab["value"],
         content_host=content_host,
         btn_ticket_tab=btn_ticket_tab,
         btn_receipt_tab=btn_receipt_tab,
+        btn_work_tab=btn_work_tab,
     )
 
     page.add(
@@ -1653,15 +1665,17 @@ def build_sidebar_tab_state(
     tab_key: str,
     ticket_panel: ft.Control,
     receipt_panel: ft.Control,
+    work_panel: ft.Control | None = None,
 ) -> SidebarTabState:
     """사이드바 탭 전환에 필요한 패널/스타일 상태를 계산한다."""
     active_bg = ACCENT_PRIMARY_SOFT
     inactive_bg = "#00000000"
     return SidebarTabState(
-        content=resolve_tab_content(tab_key, ticket_panel, receipt_panel),
+        content=resolve_tab_content(tab_key, ticket_panel, receipt_panel, work_panel),
         ticket_tab_bgcolor=active_bg if tab_key == "ticket" else inactive_bg,
         receipt_tab_bgcolor=active_bg if tab_key == "receipt" else inactive_bg,
-        should_refresh_search=tab_key == "ticket",
+        work_tab_bgcolor=active_bg if tab_key == "work" else inactive_bg,
+        should_refresh_search=tab_key in ("ticket", "work"),
     )
 
 
@@ -1690,14 +1704,17 @@ def apply_sidebar_tab_view_state(
     content_host: ft.Control,
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
+    btn_work_tab: ft.Control | None = None,
     ticket_hovered: bool = False,
     receipt_hovered: bool = False,
+    work_hovered: bool = False,
 ) -> None:
     """사이드바 탭 상태를 선택 상태, 콘텐츠, 버튼 스타일에 반영한다."""
     current_tab["value"] = tab_key
     content_host.content = tab_state.content
     ticket_active = tab_key == "ticket"
     receipt_active = tab_key == "receipt"
+    work_active = tab_key == "work"
     btn_ticket_tab.style = build_sidebar_nav_button_style(
         is_active=ticket_active,
         is_hovered=(not ticket_active) and ticket_hovered,
@@ -1706,6 +1723,12 @@ def apply_sidebar_tab_view_state(
         is_active=receipt_active,
         is_hovered=(not receipt_active) and receipt_hovered,
     )
+    if btn_work_tab is not None:
+        btn_work_tab.style = build_sidebar_nav_button_style(
+            is_active=work_active,
+            is_hovered=(not work_active) and work_hovered,
+        )
+        setattr(btn_work_tab, "icon_color", ACCENT_PRIMARY_DARK if work_active else ("#58ABA3" if work_hovered else "#5D6E82"))
     setattr(btn_ticket_tab, "icon_color", ACCENT_PRIMARY_DARK if ticket_active else ("#58ABA3" if ticket_hovered else "#5D6E82"))
     setattr(btn_receipt_tab, "icon_color", ACCENT_PRIMARY_DARK if receipt_active else ("#58ABA3" if receipt_hovered else "#5D6E82"))
 
@@ -1718,6 +1741,7 @@ def dispatch_sidebar_tab_change(
     content_host: ft.Control,
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
+    btn_work_tab: ft.Control | None = None,
     refresh_search_results: Callable[[], None],
     page: ft.Page,
     closing_event: threading.Event | None = None,
@@ -1731,6 +1755,7 @@ def dispatch_sidebar_tab_change(
         content_host=content_host,
         btn_ticket_tab=btn_ticket_tab,
         btn_receipt_tab=btn_receipt_tab,
+        btn_work_tab=btn_work_tab,
     )
     if tab_state.should_refresh_search:
         refresh_search_results()
@@ -2508,11 +2533,13 @@ class DashboardFletView:
             icon=ICONS.SMARTPHONE_ROUNDED,
             key="dashboard_phone_link_button",
         )
-        phone_link_service = PhoneLinkService()
+        phone_link_service = PhoneLinkService(scan_handler=self._runtime_manager.process_phone_qr)
 
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
+        btn_work_tab = ft.TextButton("티켓 업무", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")
         btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
         btn_ticket_tab.icon_size = 18
+        btn_work_tab.icon_size = 18
         btn_receipt_tab.icon_size = 18
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
         receipt_settings_panel_ref: dict[str, ft.Control | None] = {"value": None}
@@ -2524,11 +2551,71 @@ class DashboardFletView:
         search_blocked_state = {"value": False}
         search_result_highlight_state = {"value": False}
         search_feedback_override_state = {"value": ""}
-        sidebar_tab_hover_state = {"ticket": False, "receipt": False}
+        sidebar_tab_hover_state = {"ticket": False, "receipt": False, "work": False}
         print_job_state = {"in_progress": False}
         search_refresh_lock = threading.Lock()
         search_refresh_timer: threading.Timer | None = None
         search_refresh_stop = threading.Event()
+
+        # 티켓 업무 탭 — 수령 처리된 주문 내역 (좌 목록 + 우 상세)
+        from views.work_log_flet_view import (
+            apply_work_log_view_state,
+            build_ops_index,
+            build_work_log_panel,
+            build_work_log_view_state,
+        )
+
+        work_log_selection: dict[str, str | None] = {"value": None}
+        work_log_cache: dict[str, object] = {"orders": [], "ops_index": {}, "ticket_names": []}
+
+        def _apply_work_log_state() -> None:
+            view_state = build_work_log_view_state(
+                work_log_cache["orders"],
+                work_log_cache["ops_index"],
+                work_log_cache["ticket_names"],
+                selected_order_number=work_log_selection["value"],
+            )
+            apply_work_log_view_state(
+                work_log_panel,
+                view_state,
+                on_select=_on_work_log_select,
+            )
+
+        def _on_work_log_select(order_number: str) -> None:
+            work_log_selection["value"] = order_number
+            _apply_work_log_state()
+            safe_page_update(page, search_refresh_stop)
+
+        def refresh_work_log(push_update: bool = True) -> None:
+            try:
+                work_log_cache["orders"] = excel_service.search_orders_all()
+                work_log_cache["ops_index"] = build_ops_index(excel_service.list_operations())
+                work_log_cache["ticket_names"] = load_ticket_product_names(settings_store)
+            except Exception as exc:
+                logger.error("티켓 업무 내역 조회 실패: %s", exc, exc_info=True)
+                _show_dashboard_warning("처리 내역을 불러오지 못했습니다.")
+                return
+            selected = work_log_selection["value"]
+            if selected and not any(
+                order.order_number.upper() == selected.upper()
+                for order in work_log_cache["orders"]
+            ):
+                work_log_selection["value"] = None
+            _apply_work_log_state()
+            if push_update:
+                safe_page_update(page, search_refresh_stop)
+
+        def refresh_active_order_views(push_update: bool = True) -> None:
+            """현재 탭에 맞는 주문 뷰만 갱신한다."""
+            if current_tab["value"] == "work":
+                refresh_work_log(push_update=push_update)
+                return
+            do_search(push_update=push_update)
+
+        work_log_panel = build_work_log_panel(
+            on_select=_on_work_log_select,
+            on_refresh=lambda _e: refresh_work_log(),
+        )
 
         def _reset_processed_success_count(_e: ft.ControlEvent | None = None) -> None:
             scan_success_count_store.save_success_count(0)
@@ -2739,7 +2826,7 @@ class DashboardFletView:
         def refresh_search_results_from_thread(push_update: bool = True) -> None:
             call_page_from_thread(
                 page,
-                lambda: do_search(push_update=push_update),
+                lambda: refresh_active_order_views(push_update=push_update),
                 search_refresh_stop,
             )
 
@@ -2864,6 +2951,7 @@ class DashboardFletView:
                 tab_key,
                 ticket_panel,
                 receipt_panel or receipt_settings_panel,
+                work_log_panel,
             )
             dispatch_sidebar_tab_change(
                 tab_key,
@@ -2872,7 +2960,8 @@ class DashboardFletView:
                 content_host=content_host,
                 btn_ticket_tab=btn_ticket_tab,
                 btn_receipt_tab=btn_receipt_tab,
-                refresh_search_results=lambda: do_search(push_update=False),
+                btn_work_tab=btn_work_tab,
+                refresh_search_results=lambda: refresh_active_order_views(push_update=False),
                 page=page,
                 closing_event=search_refresh_stop,
                 push_update=push_update,
@@ -2901,7 +2990,7 @@ class DashboardFletView:
                 btn_start_stop=btn_start_stop,
                 on_start=on_start,
                 on_stop=on_stop,
-                refresh_search_results=lambda: do_search(push_update=False),
+                refresh_search_results=lambda: refresh_active_order_views(push_update=False),
                 closing_event=search_refresh_stop,
             )
 
@@ -2963,6 +3052,7 @@ class DashboardFletView:
         btn_open_witchform.on_click = _on_open_witchform
         btn_phone_link.on_click = _on_phone_link
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
+        btn_work_tab.on_click = lambda _: set_tab("work")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
 
         camera_view = ft.Image(
@@ -3659,6 +3749,7 @@ class DashboardFletView:
                 current_tab["value"],
                 ticket_panel,
                 active_receipt_content,
+                work_log_panel,
             )
             apply_sidebar_tab_view_state(
                 tab_state,
@@ -3667,8 +3758,10 @@ class DashboardFletView:
                 content_host=content_host,
                 btn_ticket_tab=btn_ticket_tab,
                 btn_receipt_tab=btn_receipt_tab,
+                btn_work_tab=btn_work_tab,
                 ticket_hovered=sidebar_tab_hover_state["ticket"],
                 receipt_hovered=sidebar_tab_hover_state["receipt"],
+                work_hovered=sidebar_tab_hover_state["work"],
             )
             if push_update:
                 safe_page_update(page, search_refresh_stop)
@@ -3678,11 +3771,13 @@ class DashboardFletView:
             _refresh_sidebar_nav_visuals(push_update=True)
 
         btn_ticket_tab.on_hover = lambda e: _on_sidebar_tab_hover("ticket", e)
+        btn_work_tab.on_hover = lambda e: _on_sidebar_tab_hover("work", e)
         btn_receipt_tab.on_hover = lambda e: _on_sidebar_tab_hover("receipt", e)
 
         sidebar = build_dashboard_sidebar(
             btn_ticket_tab=btn_ticket_tab,
             btn_receipt_tab=btn_receipt_tab,
+            btn_work_tab=btn_work_tab,
         )
 
         _apply_camera_focus_drawer(push_update=False)
@@ -3697,6 +3792,8 @@ class DashboardFletView:
             shell_content=dashboard_overlay_host,
             btn_ticket_tab=btn_ticket_tab,
             btn_receipt_tab=btn_receipt_tab,
+            btn_work_tab=btn_work_tab,
+            work_panel=work_log_panel,
             sidebar=sidebar,
             btn_relogin=btn_relogin,
             btn_start_stop=btn_start_stop,
