@@ -3,8 +3,15 @@ Load order information from Excel.
 """
 from __future__ import annotations
 
+import functools
+import json
+import os
 import re
+import shutil
+import threading
 import time
+import uuid
+from datetime import datetime
 
 from openpyxl import load_workbook
 
@@ -18,8 +25,33 @@ SEAT_HEADER = "좌석번호"
 ORDER_STATUS_HEADER = "주문상태"
 SOURCE_PROGRESS_STATUS_HEADER = "진행상태"
 PROCESSING_TIME_HEADER = "처리시간"
+META_SHEET = "_meta"
+OPERATIONS_SHEET = "_operations"
+OPERATION_HEADERS = (
+    "request_id",
+    "order_id",
+    "action",
+    "device_id",
+    "state",
+    "result_json",
+    "created_at",
+    "updated_at",
+)
+META_DATASET_ID_KEY = "dataset_id"
+META_CREATED_AT_KEY = "created_at"
 _WRITE_RETRY_COUNT = 3
 _WRITE_RETRY_DELAY_SEC = 0.2
+
+
+def _synchronized(fn):
+    """쓰기 메서드를 서비스 단위 락으로 직렬화한다."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._write_lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class ExcelService:
@@ -28,16 +60,23 @@ class ExcelService:
             self._file_path = str(ensure_managed_data_file())
         else:
             self._file_path = str(resolve_project_path(file_path))
+        self._write_lock = threading.RLock()
 
     def search_orders(self, keyword: str = "") -> list[Order]:
         """주문번호/이름/연락처로 부분 일치 검색. 빈 키워드면 전체 반환(최대 200건)."""
+        return self._search_orders(keyword, max_results=200)
+
+    def search_orders_all(self, keyword: str = "") -> list[Order]:
+        """API용 전체 조회 — 200건 제한 없음. 읽기 실패 시 예외가 전파된다."""
+        return self._search_orders(keyword, max_results=None)
+
+    def _search_orders(self, keyword: str, max_results: int | None) -> list[Order]:
         keyword = keyword.strip()
         results: list[Order] = []
-        max_results = 200
 
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
         try:
-            ws = workbook.active
+            ws = self._data_sheet(workbook)
             headers = self._read_headers(ws)
 
             order_col = self._find_col(headers, ("주문번호",))
@@ -75,7 +114,7 @@ class ExcelService:
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
                     order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 ))
-                if len(results) >= max_results:
+                if max_results is not None and len(results) >= max_results:
                     break
 
             return results
@@ -86,7 +125,7 @@ class ExcelService:
         """가져올 파일이 주문 검색에 필요한 주문번호 헤더를 갖췄는지 확인한다."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
         try:
-            return bool(self._find_col(self._read_headers(workbook.active), ("주문번호",)))
+            return bool(self._find_col(self._read_headers(self._data_sheet(workbook)), ("주문번호",)))
         finally:
             workbook.close()
 
@@ -94,7 +133,7 @@ class ExcelService:
         """Find order by order_number."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
         try:
-            ws = workbook.active
+            ws = self._data_sheet(workbook)
             headers = self._read_headers(ws)
 
             order_col = self._find_col(headers, ("주문번호",))
@@ -138,7 +177,7 @@ class ExcelService:
 
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
         try:
-            ws = workbook.active
+            ws = self._data_sheet(workbook)
             headers = self._read_headers(ws)
 
             order_col = self._find_col(headers, ("주문번호",))
@@ -195,19 +234,20 @@ class ExcelService:
             return None
         return matches[0]
 
+    @_synchronized
     def _ensure_column(self, header_name: str) -> None:
         """지정한 헤더 컬럼이 없으면 자동 추가한다."""
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
                 headers = self._read_headers(ws)
                 if self._find_col(headers, (header_name,)):
                     return
                 new_col = ws.max_column + 1
                 ws.cell(row=1, column=new_col, value=header_name)
-                workbook.save(self._file_path)
+                self._save_atomic(workbook)
                 return
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -229,15 +269,16 @@ class ExcelService:
         """data.xlsx에 주문상태 컬럼이 없으면 자동 추가한다."""
         self._ensure_column(ORDER_STATUS_HEADER)
 
+    @_synchronized
     def ensure_processing_time_column(self) -> bool:
         """처리시간 헤더를 하나만 유지하고 마지막 열로 정규화한다."""
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
                 if self._ensure_final_processing_time_column(ws):
-                    workbook.save(self._file_path)
+                    self._save_atomic(workbook)
                 return True
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -248,13 +289,14 @@ class ExcelService:
                     workbook.close()
         return False
 
+    @_synchronized
     def mark_order_status(self, order_number: str, status: str) -> bool:
         """주문의 주문상태 값을 엑셀에 저장한다."""
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
                 headers = self._read_headers(ws)
                 order_col = self._find_col(headers, ("주문번호",))
                 if not order_col:
@@ -267,7 +309,7 @@ class ExcelService:
                 if not target_row:
                     return False
                 ws.cell(row=target_row, column=status_col, value=(status or "").strip())
-                workbook.save(self._file_path)
+                self._save_atomic(workbook)
                 return True
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -283,7 +325,7 @@ class ExcelService:
         workbook = None
         try:
             workbook = load_workbook(self._file_path, read_only=True, data_only=True)
-            ws = workbook.active
+            ws = self._data_sheet(workbook)
             headers = self._read_headers(ws)
             order_col = self._find_col(headers, ("주문번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
@@ -302,6 +344,7 @@ class ExcelService:
             if workbook is not None:
                 workbook.close()
 
+    @_synchronized
     def bulk_restore_received_status(self, received_map: dict[str, str]) -> int:
         """파일 교체 후 수령확인 상태를 일괄 복원한다. 반환값: 복원된 건수."""
         if not received_map:
@@ -310,7 +353,7 @@ class ExcelService:
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
                 headers = self._read_headers(ws)
                 order_col = self._find_col(headers, ("주문번호",))
                 if not order_col:
@@ -325,7 +368,7 @@ class ExcelService:
                     if order_number in received_map:
                         ws.cell(row=row_idx, column=receipt_col, value=received_map[order_number])
                         count += 1
-                workbook.save(self._file_path)
+                self._save_atomic(workbook)
                 return count
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -340,7 +383,7 @@ class ExcelService:
         """상품 컬럼명 리스트를 반환한다 (티켓 분류 UI용)."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)
         try:
-            ws = workbook.active
+            ws = self._data_sheet(workbook)
             headers = self._read_headers(ws)
             goods_cols = self._parse_goods_cols(headers)
             return [name or f"상품{idx}" for idx, _col, name in goods_cols]
@@ -355,13 +398,14 @@ class ExcelService:
         """Restore previous receipt value when print step fails."""
         return self._update_order_received(order_number, previous_value)
 
+    @_synchronized
     def mark_order_processing_time(self, order_number: str, timestamp_str: str) -> bool:
         """최종 성공한 주문의 처리시간을 마지막 열에 기록한다."""
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
                 self._ensure_final_processing_time_column(ws)
                 headers = self._read_headers(ws)
                 order_col = self._find_col(headers, ("주문번호",))
@@ -372,7 +416,7 @@ class ExcelService:
                 if not target_row:
                     return False
                 ws.cell(row=target_row, column=processing_time_col, value=(timestamp_str or "").strip())
-                workbook.save(self._file_path)
+                self._save_atomic(workbook)
                 return True
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -383,12 +427,13 @@ class ExcelService:
                     workbook.close()
         return False
 
+    @_synchronized
     def _update_order_received(self, order_number: str, value: str) -> bool:
         for attempt in range(_WRITE_RETRY_COUNT):
             workbook = None
             try:
                 workbook = load_workbook(self._file_path)
-                ws = workbook.active
+                ws = self._data_sheet(workbook)
 
                 headers = self._read_headers(ws)
                 order_col = self._find_col(headers, ("주문번호",))
@@ -405,7 +450,7 @@ class ExcelService:
                     return False
 
                 ws.cell(row=target_row, column=receipt_col, value=(value or "").strip())
-                workbook.save(self._file_path)
+                self._save_atomic(workbook)
                 return True
             except (PermissionError, OSError):
                 if attempt == _WRITE_RETRY_COUNT - 1:
@@ -528,3 +573,280 @@ class ExcelService:
     def _normalize_phone(value) -> str:
         raw = str(value).strip() if value is not None else ""
         return re.sub(r"\D+", "", raw)
+
+    # ------------------------------------------------------------------
+    # 내부 시트/원자적 저장 (API 서버 연동용)
+    # ------------------------------------------------------------------
+
+    def _data_sheet(self, workbook):
+        """주문번호 헤더를 가진 데이터 시트를 고른다. 없으면 active 폴백."""
+        for ws in workbook.worksheets:
+            if ws.title in (META_SHEET, OPERATIONS_SHEET):
+                continue
+            if self._find_col(self._read_headers(ws), ("주문번호",)):
+                return ws
+        return workbook.active
+
+    def _save_atomic(self, workbook) -> None:
+        """임시 파일 저장 → 재오픈 검증 → 백업 → os.replace로 교체한다."""
+        target = self._file_path
+        tmp_path = f"{target}.tmp.xlsx"
+        backup_path = f"{target}.bak"
+
+        workbook.save(tmp_path)
+        try:
+            workbook.close()
+        except Exception:
+            pass
+
+        check = None
+        try:
+            check = load_workbook(tmp_path, read_only=True)
+            check.close()
+        except Exception:
+            check = None
+        finally:
+            if check is not None:
+                try:
+                    check.close()
+                except Exception:
+                    pass
+        if check is None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise RuntimeError("저장된 파일 검증에 실패했습니다.")
+
+        if os.path.exists(target):
+            try:
+                shutil.copy2(target, backup_path)
+            except OSError:
+                raise RuntimeError("백업 파일을 생성하지 못했습니다.")
+
+        os.replace(tmp_path, target)
+
+    @_synchronized
+    def get_meta(self) -> dict[str, str]:
+        """_meta 시트의 key=value 정보를 읽는다. 시트가 없으면 빈 dict."""
+        workbook = None
+        try:
+            workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+            if META_SHEET not in workbook.sheetnames:
+                return {}
+            ws = workbook[META_SHEET]
+            result: dict[str, str] = {}
+            for row in ws.iter_rows(min_row=1, values_only=True):
+                if not row or row[0] is None:
+                    continue
+                key = str(row[0]).strip()
+                value = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+                if key:
+                    result[key] = value
+            return result
+        except (PermissionError, OSError, RuntimeError):
+            return {}
+        finally:
+            if workbook is not None:
+                workbook.close()
+
+    @_synchronized
+    def ensure_dataset_id(self) -> str:
+        """운영 파일의 dataset_id를 보장하고 반환한다. 없으면 새로 발급한다."""
+        meta = self.get_meta()
+        dataset_id = meta.get(META_DATASET_ID_KEY, "").strip()
+        if dataset_id:
+            return dataset_id
+        dataset_id = uuid.uuid4().hex
+        self._write_meta({META_DATASET_ID_KEY: dataset_id, META_CREATED_AT_KEY: self._now_str()})
+        return dataset_id
+
+    @_synchronized
+    def write_meta(self, updates: dict[str, str]) -> bool:
+        """_meta 시트의 키를 갱신한다."""
+        return self._write_meta(updates)
+
+    def _write_meta(self, updates: dict[str, str]) -> bool:
+        if not updates:
+            return True
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                if META_SHEET in workbook.sheetnames:
+                    ws = workbook[META_SHEET]
+                else:
+                    ws = workbook.create_sheet(META_SHEET)
+                    ws.sheet_state = "hidden"
+                existing = {
+                    str(ws.cell(row=row, column=1).value or "").strip(): row
+                    for row in range(1, ws.max_row + 1)
+                    if str(ws.cell(row=row, column=1).value or "").strip()
+                }
+                for key, value in updates.items():
+                    key = str(key).strip()
+                    if not key:
+                        continue
+                    target_row = existing.get(key)
+                    if target_row is None:
+                        target_row = ws.max_row + 1
+                    ws.cell(row=target_row, column=1, value=key)
+                    ws.cell(row=target_row, column=2, value=str(value).strip())
+                self._save_atomic(workbook)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    try:
+                        workbook.close()
+                    except Exception:
+                        pass
+        return False
+
+    @_synchronized
+    def append_operation(self, record: dict[str, str]) -> bool:
+        """_operations 시트에 작업 이력을 한 건 추가한다."""
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = self._ensure_operations_sheet(workbook)
+                row_idx = ws.max_row + 1
+                values = [record.get(header, "") for header in OPERATION_HEADERS]
+                for col_idx, value in enumerate(values, start=1):
+                    ws.cell(row=row_idx, column=col_idx, value=str(value or ""))
+                self._save_atomic(workbook)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    try:
+                        workbook.close()
+                    except Exception:
+                        pass
+        return False
+
+    @_synchronized
+    def get_operation(self, request_id: str) -> dict[str, str] | None:
+        """request_id로 작업 이력 한 건을 조회한다."""
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return None
+        workbook = None
+        try:
+            workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+            if OPERATIONS_SHEET not in workbook.sheetnames:
+                return None
+            ws = workbook[OPERATIONS_SHEET]
+            headers = self._read_headers(ws)
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                current = str(self._cell(row, headers.get("request_id"))).strip()
+                if current != request_id:
+                    continue
+                return {
+                    name: str(self._cell(row, idx)).strip()
+                    for name, idx in headers.items()
+                    if name in OPERATION_HEADERS
+                }
+            return None
+        except (PermissionError, OSError, RuntimeError):
+            return None
+        finally:
+            if workbook is not None:
+                workbook.close()
+
+    @_synchronized
+    def update_operation(self, request_id: str, updates: dict[str, str]) -> bool:
+        """request_id 작업의 필드를 갱신한다."""
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return False
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                if OPERATIONS_SHEET not in workbook.sheetnames:
+                    return False
+                ws = workbook[OPERATIONS_SHEET]
+                headers = self._read_headers(ws)
+                request_col = headers.get("request_id")
+                if not request_col:
+                    return False
+                target_row = self._find_row_by_order(ws, request_col, request_id)
+                if not target_row:
+                    return False
+                for key, value in updates.items():
+                    col = headers.get(str(key))
+                    if not col:
+                        continue
+                    ws.cell(row=target_row, column=col, value=str(value or ""))
+                updated_col = headers.get("updated_at")
+                if updated_col:
+                    ws.cell(row=target_row, column=updated_col, value=self._now_str())
+                self._save_atomic(workbook)
+                return True
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    return False
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    try:
+                        workbook.close()
+                    except Exception:
+                        pass
+        return False
+
+    def list_operations(self, limit: int = 500) -> list[dict[str, str]]:
+        """최근 작업 이력을 오래된 순으로 반환한다."""
+        workbook = None
+        try:
+            workbook = load_workbook(self._file_path, read_only=True, data_only=True)
+            if OPERATIONS_SHEET not in workbook.sheetnames:
+                return []
+            ws = workbook[OPERATIONS_SHEET]
+            headers = self._read_headers(ws)
+            rows: list[dict[str, str]] = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                record = {
+                    name: str(self._cell(row, idx)).strip()
+                    for name, idx in headers.items()
+                    if name in OPERATION_HEADERS
+                }
+                if record.get("request_id"):
+                    rows.append(record)
+            if limit and len(rows) > limit:
+                rows = rows[-limit:]
+            return rows
+        except (PermissionError, OSError, RuntimeError):
+            return []
+        finally:
+            if workbook is not None:
+                workbook.close()
+
+    def _ensure_operations_sheet(self, workbook):
+        if OPERATIONS_SHEET in workbook.sheetnames:
+            return workbook[OPERATIONS_SHEET]
+        ws = workbook.create_sheet(OPERATIONS_SHEET)
+        ws.sheet_state = "hidden"
+        for col_idx, header in enumerate(OPERATION_HEADERS, start=1):
+            ws.cell(row=1, column=col_idx, value=header)
+        return ws
+
+    def data_file_signature(self) -> str:
+        """data_version 용 파일 서명(mtime+size)을 반환한다."""
+        try:
+            stat = os.stat(self._file_path)
+        except OSError:
+            return ""
+        return f"{stat.st_mtime_ns:x}.{stat.st_size:x}"
+
+    @staticmethod
+    def _now_str() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

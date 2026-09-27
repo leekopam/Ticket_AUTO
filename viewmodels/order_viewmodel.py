@@ -43,6 +43,22 @@ class OrderViewModel:
         """현재 열린 주문 페이지에서 수령 완료를 시도한다."""
         return self._browser_service.click_receipt_button()
 
+    def process_receipt_for(self, order_number: str, url: str) -> ReceiptClickResult:
+        """주문 단위로 수령 처리를 실행한다 (멀티 디바이스 안전).
+
+        `_current_order` 공유 상태에 의존하지 않고 명시적 주문번호/URL로
+        오픈+클릭+재검증을 하나의 작업으로 처리한다.
+        """
+        order_number = (order_number or "").strip()
+        url = (url or "").strip()
+        if not order_number or not url:
+            return ReceiptClickResult(
+                success=False,
+                error_code="INVALID_REQUEST",
+                error_message="주문번호와 주문 URL이 필요합니다.",
+            )
+        return self._browser_service.process_order_receipt(url)
+
     def mark_current_order_received(self, timestamp_str: str | None = None) -> bool:
         """현재 주문의 수령 완료 시각을 엑셀에 저장한다."""
         if not self._current_order:

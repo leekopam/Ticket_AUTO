@@ -60,6 +60,7 @@ class ReceiptClickResult:
     success: bool
     error_code: str = ""
     error_message: str = ""
+    verified: bool = False
 
 
 @dataclass
@@ -169,6 +170,17 @@ class BrowserService:
 
     def click_receipt_button(self) -> ReceiptClickResult:
         return self._invoke_rpc({"action": "click_receipt"}, timeout_sec=30)
+
+    def process_order_receipt(self, url: str, timeout_sec: int = 60) -> ReceiptClickResult:
+        """주문 1건의 페이지 오픈+수령 클릭+완료 재검증을 하나의 직렬화된 작업으로 실행한다.
+
+        open_page와 click_receipt를 따로 호출하면 사이에 다른 스캔이 끼어들 수 있어
+        멀티 디바이스 환경에서는 이 합성 작업만 사용해야 한다.
+        """
+        return self._invoke_rpc(
+            {"action": "process_order_receipt", "url": url},
+            timeout_sec=max(10, timeout_sec),
+        )
 
     def ensure_authenticated(self, timeout_sec: int = 180) -> bool:
         timeout_sec = max(1, timeout_sec)
@@ -349,6 +361,10 @@ class BrowserService:
                 return
             if action == "click_receipt":
                 result = self._handle_click_receipt()
+                finish(result, None)
+                return
+            if action == "process_order_receipt":
+                result = self._handle_process_order_receipt(task["url"])
                 finish(result, None)
                 return
             if action == "ensure_authenticated":
@@ -598,6 +614,49 @@ class BrowserService:
         self._close_current_page()
         self._invoke_receipt_complete_callback()
         return ReceiptClickResult(success=True)
+
+    def _handle_process_order_receipt(self, url: str) -> ReceiptClickResult:
+        """오픈+클릭+재검증을 워커 큐 안에서 원자적으로 실행한다."""
+        if not url or not str(url).strip():
+            return ReceiptClickResult(
+                success=False,
+                error_code="INVALID_URL",
+                error_message="주문 페이지 URL이 없습니다.",
+            )
+
+        if not self._handle_open_page(url):
+            return ReceiptClickResult(
+                success=False,
+                error_code="OPEN_PAGE_FAILED",
+                error_message="주문 페이지를 열지 못했습니다.",
+            )
+
+        click_result = self._handle_click_receipt()
+        if not click_result.success:
+            return click_result
+
+        # 클릭 성공 후 페이지를 다시 열어 실제 수령 상태를 읽기 전용으로 확인한다.
+        try:
+            self._open_page_with_current_context(url, preserve_current_page=False)
+        except Exception as exc:
+            return ReceiptClickResult(
+                success=False,
+                error_code="VERIFY_FAILED",
+                error_message=f"수령 결과 재확인 실패: {exc}",
+            )
+
+        try:
+            if self._page_shows_already_received():
+                result = ReceiptClickResult(success=True, verified=True)
+            else:
+                result = ReceiptClickResult(
+                    success=False,
+                    error_code="VERIFY_FAILED",
+                    error_message="수령 완료 표시를 확인하지 못했습니다.",
+                )
+        finally:
+            self._close_current_page()
+        return result
 
     def _handle_ensure_authenticated(self, timeout_sec: int) -> bool:
         timeout_sec = max(1, timeout_sec)
