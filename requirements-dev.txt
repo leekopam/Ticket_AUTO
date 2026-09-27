@@ -6,3 +6,5 @@ pytest==9.1.1
 pyvirtualcam==0.15.0
 # DirectShow 장치 이름→인덱스 조회용
 pygrabber==0.2
+# tests/e2e_native: 네이티브 Flet 창 UIA 자동화용 — Windows 데스크톱 세션 필요
+pywinauto==0.6.9

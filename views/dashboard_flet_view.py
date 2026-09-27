@@ -2394,13 +2394,19 @@ def call_page_from_thread(
 class DashboardFletView:
     """Main control center UI."""
 
-    def __init__(self, runtime_manager: TicketRuntimeManager | None = None):
+    def __init__(
+        self,
+        runtime_manager: TicketRuntimeManager | None = None,
+        window_title: str | None = None,
+    ):
         settings = ReceiptSettingsStore(".runtime/receipt_settings.json").load()
         # 주입된 매니저(테스트 스텁)면 시작 시 카메라 기반 실제 Application 팩토리로 덮어쓰지 않는다.
         self._runtime_manager_provided = runtime_manager is not None
         self._runtime_manager = runtime_manager or create_dashboard_runtime_manager(
             camera_index=settings.camera_index,
         )
+        # UIA E2E 등에서 창 식별용으로 제목을 바꿀 수 있다(기본값은 기존과 동일).
+        self._window_title = window_title or "Ticket_AUTO Control Center"
 
     def run(self, web_port: int | None = None) -> None:
         # web_port 지정 시 브라우저 없이 web 서버 모드로만 기동한다(E2E 테스트용).
@@ -2410,7 +2416,7 @@ class DashboardFletView:
         ft.app(target=self._build_page, view=ft.AppView.WEB_BROWSER, port=web_port)
 
     def _build_page(self, page: ft.Page) -> None:
-        page.title = "Ticket_AUTO Control Center"
+        page.title = self._window_title
         page.window.width = DASHBOARD_DEFAULT_WINDOW_WIDTH
         page.window.height = DASHBOARD_DEFAULT_WINDOW_HEIGHT
         page.window.min_width = DASHBOARD_MIN_WINDOW_WIDTH

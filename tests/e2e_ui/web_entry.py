@@ -82,6 +82,14 @@ def main() -> int:
     parser.add_argument("--runtime-dir", type=str, default="")
     parser.add_argument("--data-file", type=str, default="")
     parser.add_argument(
+        "--native",
+        action="store_true",
+        help="web 서버 대신 Windows 네이티브 창으로 기동한다(UIA E2E용)",
+    )
+    parser.add_argument(
+        "--title", type=str, default="", help="네이티브 창 제목 오버라이드"
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="수동 조작 모드: 브라우저 자동 열기 + 콘솔 명령으로 이벤트 주입",
@@ -158,7 +166,14 @@ def main() -> int:
             target=_demo_console, args=(control_url,), daemon=True
         ).start()
 
-    DashboardFletView(runtime_manager=runtime_manager).run(web_port=port)
+    view = DashboardFletView(
+        runtime_manager=runtime_manager,
+        window_title=args.title or None,
+    )
+    if args.native:
+        view.run()
+    else:
+        view.run(web_port=port)
     return 0
 
 
