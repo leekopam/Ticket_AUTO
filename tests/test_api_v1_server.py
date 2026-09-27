@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+import time
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,42 @@ def test_order_not_found(env):
     token = _pair_device(env)
     res = env["client"].get("/v1/orders/NOPE_0000", headers=_auth(token))
     assert res.json()["error"]["code"] == "ORDER_NOT_FOUND"
+
+
+def test_phone_scan_runs_pc_handler_once_and_reports_verified_result(tmp_path: Path):
+    data = tmp_path / "data.xlsx"
+    _make_orders_xlsx(data)
+    excel = ExcelService(str(data))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+    calls: list[str] = []
+
+    def handle_scan(qr_url: str) -> dict[str, str]:
+        calls.append(qr_url)
+        assert excel.mark_order_received("AAAA1111_BBBB2222", "2026-09-27 12:00:00")
+        return {"state": "succeeded", "order_id": "AAAA1111_BBBB2222", "message": "수령 완료"}
+
+    env = {"client": TestClient(create_api_v1_app(excel, pairing, scan_handler=handle_scan)), "pairing": pairing}
+    token = _pair_device(env)
+    request_id = str(uuid.uuid4())
+    qr_url = "https://witchform.com/qrcode_link.php?opaque=abc"
+    payload = {"request_id": request_id, "qr_url": qr_url}
+    assert env["client"].post("/v1/scan", json=payload, headers=_auth(token)).json()["state"] in {"accepted", "succeeded"}
+    for _ in range(50):
+        result = env["client"].get(f"/v1/actions/{request_id}", headers=_auth(token)).json()
+        if result["state"] == "succeeded":
+            break
+        time.sleep(0.02)
+    assert result["state"] == "succeeded"
+    assert result["order_id"] == "AAAA1111_BBBB2222"
+    assert env["client"].post("/v1/scan", json=payload, headers=_auth(token)).json()["state"] == "succeeded"
+    assert calls == [qr_url]
+    assert excel.find_order("AAAA1111_BBBB2222").is_received
+    bad = env["client"].post(
+        "/v1/scan",
+        json={"request_id": str(uuid.uuid4()), "qr_url": "https://witchform.com.evil.test/qrcode_link.php"},
+        headers=_auth(token),
+    ).json()
+    assert bad["error"]["code"] == "INVALID_QR"
 
 
 def test_action_receipt_flow_and_xlsx_write(env):

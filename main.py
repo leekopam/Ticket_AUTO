@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -73,6 +75,13 @@ class AppState(Enum):
 StatusListener = Callable[[str, str], None]
 
 
+@dataclass
+class _PhoneScan:
+    qr_url: str
+    done: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, str] = field(default_factory=dict)
+
+
 class Application:
     """주문 수령 자동화 애플리케이션."""
 
@@ -116,6 +125,21 @@ class Application:
         self._stop_requested = False
         self._relogin_requested = False
         self._control_lock = threading.Lock()
+        self._phone_scans: queue.Queue[_PhoneScan] = queue.Queue()
+        self._active_phone_scan: _PhoneScan | None = None
+        self._last_scan_order: Order | None = None
+        self._phone_was_received = False
+        self._last_status_message = ""
+
+    def process_phone_qr(self, qr_url: str) -> dict[str, str]:
+        """휴대폰 QR을 PC 스캔과 같은 런타임 순서로 처리한다."""
+        if self._state not in (AppState.READY, AppState.PROCESSING) or self._is_stop_requested():
+            return {"state": "rejected", "message": "PC 티켓 확인과 윗치폼 로그인을 먼저 시작해주세요."}
+        request = _PhoneScan(qr_url)
+        self._phone_scans.put(request)
+        if not request.done.wait(timeout=120):
+            return {"state": "needs_reconciliation", "message": "처리 결과를 확인하지 못했습니다. PC에서 확인해주세요."}
+        return request.result
 
     def set_camera_frame_listener(self, listener: Callable[[str], None] | None) -> None:
         """외부 뷰에서 카메라 프레임을 수신한다."""
@@ -342,6 +366,9 @@ class Application:
 
     def _emit_order(self, order: Order) -> None:
         """주문 정보를 외부 대시보드로 전달한다."""
+        if getattr(self, "_active_phone_scan", None) is not None:
+            self._last_scan_order = order
+            self._phone_was_received = order.is_received
         listener = getattr(self, "_order_listener", None)
         if listener is None:
             return
@@ -351,6 +378,7 @@ class Application:
             logger.warning("주문 콜백 처리 실패", exc_info=True)
 
     def _emit_status(self, state: str, message: str) -> None:
+        self._last_status_message = message
         listener = getattr(self, "_status_listener", None)
         if listener is None:
             return
@@ -595,6 +623,36 @@ class Application:
         while self._scanner_view.is_running() and not self._is_stop_requested():
             if self._consume_relogin_requested():
                 self._handle_relogin_request()
+                continue
+
+            try:
+                phone_scan = self._phone_scans.get_nowait()
+            except queue.Empty:
+                phone_scan = None
+            if phone_scan is not None:
+                self._active_phone_scan = phone_scan
+                self._last_scan_order = None
+                self._phone_was_received = False
+                try:
+                    self._enter_processing()
+                    self._process_qr(phone_scan.qr_url, allow_auth_retry=True)
+                    order = self._last_scan_order
+                    latest = self._excel_service.find_order(order.order_number) if order else None
+                    if self._state == AppState.READY and latest and latest.is_received:
+                        state = "already_processed" if self._phone_was_received else "succeeded"
+                    else:
+                        state = "needs_reconciliation" if order else "failed"
+                    phone_scan.result = {
+                        "state": state,
+                        "order_id": order.order_number if order else "",
+                        "message": self._last_status_message,
+                    }
+                except Exception:
+                    logger.exception("휴대폰 QR 처리 실패")
+                    phone_scan.result = {"state": "needs_reconciliation", "message": "PC에서 처리 상태를 확인해주세요."}
+                finally:
+                    self._active_phone_scan = None
+                    phone_scan.done.set()
                 continue
 
             qr_url = self._scanner_view.get_next_qr(timeout_sec=0.1)

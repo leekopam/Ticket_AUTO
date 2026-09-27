@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+from typing import Callable
 
 from project_paths import ensure_managed_data_file
 from services.api_v1_server import (
@@ -27,9 +28,15 @@ DEFAULT_PORT = 18765  # 8765는 일부 환경에서 타 앱이 점유한다
 class PhoneLinkService:
     """LAN API 서버 수명주기와 페어링 승인을 담당한다."""
 
-    def __init__(self, port: int = DEFAULT_PORT, data_path: Path | None = None):
+    def __init__(
+        self,
+        port: int = DEFAULT_PORT,
+        data_path: Path | None = None,
+        scan_handler: Callable[[str], dict[str, str]] | None = None,
+    ):
         self._port = port
         self._data_path = data_path
+        self._scan_handler = scan_handler
         self._lock = threading.RLock()
         self._server: LanApiServer | None = None
         self._pairing: PairingService | None = None
@@ -51,7 +58,9 @@ class PhoneLinkService:
 
             data_path = self._data_path if self._data_path is not None else ensure_managed_data_file()
             excel = ExcelService(str(data_path))
-            server, pairing, fingerprint = create_server(excel=excel, port=self._port)
+            server, pairing, fingerprint = create_server(
+                excel=excel, port=self._port, scan_handler=self._scan_handler
+            )
             join_code = pairing.issue_join_code()
             generation, _ = DatasetTracker(excel).current()
 

@@ -41,6 +41,7 @@ META_DATASET_ID_KEY = "dataset_id"
 META_CREATED_AT_KEY = "created_at"
 _WRITE_RETRY_COUNT = 3
 _WRITE_RETRY_DELAY_SEC = 0.2
+_WORKBOOK_WRITE_LOCK = threading.RLock()  # ponytail: 전역 직렬화; 파일별 동시 쓰기가 필요해지면 경로별 락으로 교체
 
 
 def _synchronized(fn):
@@ -60,7 +61,7 @@ class ExcelService:
             self._file_path = str(ensure_managed_data_file())
         else:
             self._file_path = str(resolve_project_path(file_path))
-        self._write_lock = threading.RLock()
+        self._write_lock = _WORKBOOK_WRITE_LOCK
 
     def search_orders(self, keyword: str = "") -> list[Order]:
         """주문번호/이름/연락처로 부분 일치 검색. 빈 키워드면 전체 반환(최대 200건)."""

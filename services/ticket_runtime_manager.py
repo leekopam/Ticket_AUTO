@@ -296,6 +296,14 @@ class TicketRuntimeManager:
             logger.warning("로그인 페이지 열기 실패", exc_info=True)
             return False
 
+    def process_phone_qr(self, qr_url: str) -> dict[str, str]:
+        with self._lock:
+            app = self._app
+            running = bool(self._thread and self._thread.is_alive())
+        if not running or app is None:
+            return {"state": "rejected", "message": "PC 티켓 확인을 먼저 시작해주세요."}
+        return app.process_phone_qr(qr_url)
+
     def _run_app(self) -> None:
         app: Application | None
         with self._lock:

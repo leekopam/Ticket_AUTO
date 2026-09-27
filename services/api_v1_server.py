@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +29,7 @@ MAX_BODY_BYTES = 32 * 1024
 AUTO_PAUSE_FAILURE_STREAK = 5
 
 ACTION_RECEIPT = "receipt"
+ACTION_SCAN_RECEIPT = "scan_receipt"
 TERMINAL_STATES = {"succeeded", "already_processed", "failed", "needs_reconciliation", "rejected"}
 CANCELLED_MARKERS = ("주문취소", "자동주문취소", "취소")
 RECONCILE_MARKER = "확인필요"
@@ -57,6 +59,13 @@ class ActionRequestBody(BaseModel):
     order_id: _ShortStr
     action: _ShortStr
     dataset_generation: _ShortStr = ""
+
+
+class ScanRequestBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    request_id: _ShortStr
+    qr_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)]
 
 
 class ActionResultBody(BaseModel):
@@ -239,11 +248,13 @@ def create_api_v1_app(
     pairing: PairingService,
     *,
     auth_status_provider: Callable[[], bool] | None = None,
+    scan_handler: Callable[[str], dict[str, str]] | None = None,
 ) -> FastAPI:
     tracker = DatasetTracker(excel)
     registry = ActionRegistry(excel)
     app = FastAPI(title="Ticket_AUTO LAN API", version="v1", docs_url=None, redoc_url=None)
     app.state.paused = False
+    scan_dispatch_lock = threading.Lock()
 
     @app.middleware("http")
     async def limit_body_size(request: Request, call_next):
@@ -372,13 +383,47 @@ def create_api_v1_app(
 
     def _action_payload(record: dict[str, Any]) -> dict[str, Any]:
         _, data_version = tracker.current()
+        result = record.get("result", {})
         return {
             "state": record.get("state", ""),
             "request_id": record.get("request_id", ""),
-            "order_id": record.get("order_id", ""),
+            "order_id": record.get("order_id", "") or result.get("order_id", ""),
             "data_version": data_version,
-            "result": record.get("result", {}),
+            "result": result,
         }
+
+    @app.post("/v1/scan")
+    def scan_receipt(body: ScanRequestBody, device: str = Depends(require_device)):
+        """폰의 원본 QR을 PC의 검증된 스캔 흐름으로 전달한다."""
+        parsed = urlsplit(body.qr_url)
+        if (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.lower()) != (
+            "https", "witchform.com", "/qrcode_link.php"
+        ):
+            return _error("rejected", "INVALID_QR", "올바른 윗치폼 QR이 아닙니다.")
+        if scan_handler is None:
+            return _error("rejected", "RUNTIME_UNAVAILABLE", "PC 티켓 확인을 시작해주세요.")
+        with scan_dispatch_lock:
+            existing = registry.get(body.request_id)
+            if existing is not None:
+                return _action_payload(existing)
+            if app.state.paused:
+                return _error("rejected", "PAUSED", "처리가 일시정지 상태입니다. PC에서 재개해주세요.")
+            registry.register(body.request_id, "", ACTION_SCAN_RECEIPT, device)
+
+        def run_scan() -> None:
+            try:
+                result = scan_handler(body.qr_url)
+                state = result.get("state", "failed")
+                if state not in TERMINAL_STATES:
+                    raise ValueError("잘못된 스캔 처리 결과")
+            except Exception:
+                logger.exception("휴대폰 QR 처리 중 예외")
+                state = "needs_reconciliation"
+                result = {"message": "PC에서 처리 상태를 확인해주세요."}
+            registry.transition(body.request_id, state, result)
+
+        threading.Thread(target=run_scan, daemon=True).start()
+        return _action_payload(registry.get(body.request_id) or {})
 
     @app.post("/v1/actions")
     def create_action(body: ActionRequestBody, device: str = Depends(require_device)):
@@ -427,6 +472,8 @@ def create_api_v1_app(
         record = registry.get(request_id)
         if record is None:
             return _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.")
+        if record.get("action") == ACTION_SCAN_RECEIPT:
+            return _error("rejected", "INVALID_REQUEST", "PC가 스캔 결과를 기록합니다.")
         if record.get("state") in TERMINAL_STATES:
             return _action_payload(record)
 
@@ -532,6 +579,7 @@ def create_server(
     port: int = 8765,
     pairing: PairingService | None = None,
     auth_status_provider: Callable[[], bool] | None = None,
+    scan_handler: Callable[[str], dict[str, str]] | None = None,
 ) -> tuple[LanApiServer, PairingService, str]:
     """서버+페어링 서비스+인증서 지문을 준비한다 (Flet 앱/단독 실행 공용)."""
     from services.cert_service import ensure_server_cert
@@ -539,7 +587,7 @@ def create_server(
     excel = excel or ExcelService()
     pairing = pairing or PairingService()
     cert = ensure_server_cert()
-    app = create_api_v1_app(excel, pairing, auth_status_provider=auth_status_provider)
+    app = create_api_v1_app(excel, pairing, auth_status_provider=auth_status_provider, scan_handler=scan_handler)
     server = LanApiServer(app, host, port, cert.cert_path, cert.key_path)
     return server, pairing, cert.sha256_fingerprint
 
