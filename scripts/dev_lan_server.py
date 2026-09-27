@@ -1,12 +1,14 @@
 """LAN API 개발·E2E 검증용 단독 서버.
 
-- 임시 XLSX(테스트 주문 3건)로 서버를 띄우고 페어링 QR 페이로드를 출력한다.
+- 임시 XLSX(테스트 주문 3건) 또는 --data로 지정한 XLSX 사본으로 서버를 띄운다.
 - 승인 대기 티켓을 자동 승인한다(개발 전용 — 운영 경로에는 없는 동작).
-- 사용: python scripts/dev_lan_server.py
+- 사용: python scripts/dev_lan_server.py [port] [--data path.xlsx]
+- PAIRING_PAYLOAD(JSON)를 출력하고 payloads.json도 함께 쓴다.
 """
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -47,11 +49,21 @@ def _auto_approve(pairing, stop: threading.Event) -> None:
 def main() -> None:
     from services.excel_service import ExcelService
 
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    data_arg = next(
+        (sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--data" and i + 1 < len(sys.argv)),
+        None,
+    )
     tmp = Path(tempfile.mkdtemp(prefix="ticket_auto_dev_"))
-    _make_orders_xlsx(tmp / "data.xlsx")
+    if data_arg:
+        # 운영 파일을 직접 쓰지 않고 사본으로 서비스한다
+        shutil.copy(data_arg, tmp / "data.xlsx")
+        print(f"[dev] 데이터 사본 사용: {data_arg}", flush=True)
+    else:
+        _make_orders_xlsx(tmp / "data.xlsx")
     excel = ExcelService(str(tmp / "data.xlsx"))
 
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 18765
+    port = int(args[0]) if args else 18765
     server, pairing, fingerprint = create_server(excel=excel, port=port)
     join_code = pairing.issue_join_code()
     generation, _ = DatasetTracker(excel).current()
@@ -63,6 +75,8 @@ def main() -> None:
 
     stop = threading.Event()
     threading.Thread(target=_auto_approve, args=(pairing, stop), daemon=True).start()
+
+    (tmp / "pairing_payload.json").write_text(json.dumps(payload, ensure_ascii=False))
 
     server.start()
     print(f"[dev] 서버: https://{lan_ip}:{server.port} (데이터: {tmp})", flush=True)
