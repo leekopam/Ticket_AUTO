@@ -107,6 +107,25 @@ try {
             "--log-path", $smokeLog
         ) (Join-Path $resultsRoot "exe-smoke-runner.log")
         $completedSteps.Add("packaged EXE startup smoke")
+
+        # 소스 실행과 exe의 기능 경계(self-check)를 비교해 패키징 회귀를 검출한다.
+        $srcSelfCheck = Join-Path $resultsRoot "selfcheck-src.json"
+        Invoke-LoggedNativeCommand $venvPython @(
+            "main.py", "--self-check", "--out", $srcSelfCheck
+        ) (Join-Path $resultsRoot "selfcheck-src.log")
+        $completedSteps.Add("source env self-check")
+
+        $exeSelfCheck = Join-Path $resultsRoot "selfcheck-exe.json"
+        Invoke-LoggedNativeCommand $exePath @(
+            "--self-check", "--out", $exeSelfCheck
+        ) (Join-Path $resultsRoot "selfcheck-exe.log")
+        $completedSteps.Add("packaged EXE self-check")
+
+        $compareScript = Join-Path $scriptRoot "compare_self_check.py"
+        Invoke-LoggedNativeCommand $venvPython @(
+            $compareScript, "--src", $srcSelfCheck, "--exe", $exeSelfCheck
+        ) (Join-Path $resultsRoot "selfcheck-parity.log")
+        $completedSteps.Add("feature parity check")
     }
 
     $status = "PASSED"

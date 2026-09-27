@@ -1126,6 +1126,14 @@ class Application:
 
 
 if __name__ == "__main__":
+    import sys
+
+    # 소스 실행과 패키징 exe의 기능 동치를 검증하는 진단 모드(GUI 미기동)
+    if "--self-check" in sys.argv:
+        from services.self_check_service import run_self_check_cli
+
+        raise SystemExit(run_self_check_cli(sys.argv[1:]))
+
     from views.dashboard_flet_view import run_dashboard_app
 
     run_dashboard_app()
