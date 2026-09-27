@@ -5,7 +5,7 @@ Boogle command 어댑터는 .ps1 실행 파일을 거부하므로 이 스크립�
 BOOGLE_* 환경변수 계약(metric/artifact manifest)으로 변환한다.
 
 수집 evidence:
-- artifacts/test-results/<ts>/ 의 summary.md, pytest.xml, exe-smoke.log, 로그 tail
+- artifacts/test-results/<run>/ 의 summary.md, pytest.xml, exe-smoke.log, 로그 tail
 - metric: release/verify_ok, release/duration_s, release/pytest_* 등
 """
 from __future__ import annotations
@@ -15,11 +15,14 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VERIFY_SCRIPT = PROJECT_ROOT / "scripts" / "qa" / "verify_release.ps1"
 RESULTS_ROOT = PROJECT_ROOT / "artifacts" / "test-results"
+
+
 def _find_powershell() -> str:
     """Windows PowerShell 실행 파일 경로를 반환한다(실제 설치 폴더는 v1.0)."""
     candidates = [
@@ -46,13 +49,6 @@ def _artifact_kind(file_name: str) -> str:
         ".webp": "capture", ".webm": "video", ".mp4": "video",
         ".zip": "trace", ".ndjson": "trace",
     }.get(ext, "output")
-
-
-def _latest_results_dir() -> Path | None:
-    if not RESULTS_ROOT.exists():
-        return None
-    dirs = [p for p in RESULTS_ROOT.iterdir() if p.is_dir()]
-    return max(dirs, key=lambda p: p.name) if dirs else None
 
 
 def _seal_results(results_dir: Path, artifacts_dir: Path) -> list[str]:
@@ -99,18 +95,19 @@ def main() -> int:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
+    results_dir = RESULTS_ROOT / f"release_{uuid.uuid4().hex}"
     cmd = [
         _find_powershell(),
         "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(VERIFY_SCRIPT), "-Release",
+        "-ResultsPath", str(results_dir),
     ]
     completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
     duration_s = time.perf_counter() - started
-    verify_ok = completed.returncode == 0
+    verify_ok = completed.returncode == 0 and (results_dir / "summary.md").is_file()
 
-    results_dir = _latest_results_dir()
     sealed: list[str] = []
-    if results_dir is not None:
+    if results_dir.is_dir():
         sealed = _seal_results(results_dir, artifacts_dir)
         print(f"[release_verify] sealed {len(sealed)} files from {results_dir.name}")
 
@@ -127,7 +124,7 @@ def main() -> int:
         ),
         _metric(
             "release/exe_smoke_ok",
-            1.0 if (results_dir and (results_dir / "exe-smoke.log").is_file()) else 0.0,
+            1.0 if verify_ok and (results_dir / "exe-smoke.log").is_file() else 0.0,
             unit="bool", direction="higher",
             threshold_kind="absolute", threshold_value=1.0,
         ),

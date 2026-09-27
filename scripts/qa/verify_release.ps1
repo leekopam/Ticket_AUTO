@@ -10,7 +10,8 @@ param(
     [switch]$Release,
 
     [string]$SpecPath = "build_support\specs\Ticket_AUTO_flat.spec",
-    [double]$ExeStartupSeconds = 10
+    [double]$ExeStartupSeconds = 10,
+    [string]$ResultsPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -62,7 +63,11 @@ $pytestTestArgs = if ($E2E) {
     @("tests", "--ignore=tests\e2e_ui", "--ignore=tests\e2e_stub", "--ignore=tests\e2e_device")
 }
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
-$resultsRoot = Join-Path $repoRoot "artifacts\test-results\$timestamp"
+$resultsRoot = if ($ResultsPath) {
+    [System.IO.Path]::GetFullPath($ResultsPath)
+} else {
+    Join-Path $repoRoot "artifacts\test-results\$timestamp"
+}
 New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
 
 $summaryPath = Join-Path $resultsRoot "summary.md"
