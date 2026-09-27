@@ -1028,9 +1028,12 @@ def build_order_search_panel(
     )
 
 
-def apply_camera_frame_state(camera_view: ft.Image, b64_str: str) -> None:
+def apply_camera_frame_state(camera_view: ft.Image, b64_str: str, *, is_web: bool) -> None:
     """카메라 프레임 표시 상태를 한 번에 갱신한다."""
-    camera_view.src = f"data:image/jpeg;base64,{b64_str}"
+    if is_web:
+        camera_view.src = f"data:image/jpeg;base64,{b64_str}"
+    else:
+        camera_view.src_base64 = b64_str
     camera_view.visible = True
 
 
@@ -1627,7 +1630,7 @@ def dispatch_camera_frame_update(
     """카메라 프레임 UI 반영을 UI 스레드 경계 안에서 처리한다."""
 
     def _apply_frame() -> None:
-        apply_camera_frame_state(camera_view, b64_str)
+        apply_camera_frame_state(camera_view, b64_str, is_web=page.web)
         safe_page_update(camera_view, closing_event)
 
     call_page_from_thread(page, _apply_frame, closing_event)
