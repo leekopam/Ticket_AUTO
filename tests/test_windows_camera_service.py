@@ -14,7 +14,9 @@ from services.windows_camera_service import (
     FocusCapability,
     WindowsCameraService,
     apply_focus_mode,
+    claim_active_camera_index,
     detect_focus_capability,
+    release_active_camera_index,
 )
 
 
@@ -201,6 +203,71 @@ class WindowsCameraServiceTest(unittest.TestCase):
             ],
         )
 
+    def test_list_cameras_skips_claimed_camera_indices(self) -> None:
+        """점유된 카메라 인덱스는 프로브 없이 목록에 포함된다."""
+        service = WindowsCameraService()
+        claim_active_camera_index(0)
+        try:
+            with (
+                patch.object(
+                    service, "_get_wmi_camera_names", return_value=["HD Pro Webcam C920"]
+                ),
+                patch.object(
+                    service, "_probe_opencv_indices", return_value=[]
+                ) as probe,
+            ):
+                devices = service.list_cameras()
+        finally:
+            release_active_camera_index(0)
+
+        # WMI 목표 수를 점유 장치가 채우므로 프로브 자체가 실행되지 않는다.
+        probe.assert_not_called()
+        self.assertEqual(devices, [CameraDevice(index=0, name="HD Pro Webcam C920")])
+
+    def test_list_cameras_keeps_unclaimed_probe_targets(self) -> None:
+        """점유 장치 외의 빈 슬롯은 계속 프로브해 목록에 합산한다."""
+        service = WindowsCameraService()
+        claim_active_camera_index(7)
+        try:
+            with (
+                patch.object(
+                    service, "_get_wmi_camera_names", return_value=["A", "B"]
+                ),
+                patch.object(
+                    service, "_probe_opencv_indices", return_value=[0]
+                ) as probe,
+            ):
+                devices = service.list_cameras()
+        finally:
+            release_active_camera_index(7)
+
+        probe.assert_called_once()
+        self.assertEqual(probe.call_args.kwargs["skip_indices"], {7})
+        self.assertEqual(
+            devices,
+            [
+                CameraDevice(index=0, name="A"),
+                CameraDevice(index=7, name="B"),
+            ],
+        )
+
+    def test_probe_opencv_indices_skips_claimed_indices(self) -> None:
+        calls: list[tuple[int, object | None]] = []
+
+        def _video_capture(index: int, backend: object | None = None) -> _FakeCapture:
+            calls.append((index, backend))
+            return _FakeCapture(opened=True)
+
+        with patch(
+            "services.windows_camera_service.cv2.VideoCapture", side_effect=_video_capture
+        ):
+            result = WindowsCameraService._probe_opencv_indices(
+                max_index=2, skip_indices={0}
+            )
+
+        self.assertEqual(result, [1, 2])
+        self.assertNotIn(0, [index for index, _ in calls])
+
     def test_list_cameras_reuses_recent_opencv_probe_result(self) -> None:
         service = WindowsCameraService()
 
@@ -213,7 +280,9 @@ class WindowsCameraServiceTest(unittest.TestCase):
 
         self.assertEqual(first, [CameraDevice(index=0, name="카메라 0")])
         self.assertEqual(second, [CameraDevice(index=0, name="카메라 0")])
-        probe.assert_called_once_with(max_index=9, target_count=None)
+        probe.assert_called_once_with(
+            max_index=9, target_count=None, skip_indices=frozenset()
+        )
 
     def test_list_cameras_suppresses_duplicate_inflight_opencv_probe(self) -> None:
         service = WindowsCameraService()
@@ -222,7 +291,12 @@ class WindowsCameraServiceTest(unittest.TestCase):
         results: list[list[CameraDevice]] = []
         errors: list[Exception] = []
 
-        def slow_probe(*, max_index: int = 9, target_count: int | None = None) -> list[int]:
+        def slow_probe(
+            *,
+            max_index: int = 9,
+            target_count: int | None = None,
+            skip_indices: object = frozenset(),
+        ) -> list[int]:
             probe_started.set()
             release_probe.wait(timeout=5)
             return [1]

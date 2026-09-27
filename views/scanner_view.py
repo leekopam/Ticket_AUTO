@@ -21,7 +21,9 @@ from services.windows_camera_service import (
     FocusMode,
     WindowsCameraService,
     apply_focus_mode,
+    claim_active_camera_index,
     detect_focus_capability,
+    release_active_camera_index,
 )
 
 
@@ -343,6 +345,8 @@ class ScannerView:
         self._camera_first_frame_timing_logged = True
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
         self._is_running = True
+        # 스트리밍 중 목록 프로브가 같은 장치를 다시 열어 스트림이 튀지 않게 점유한다.
+        claim_active_camera_index(self._camera_index)
         self._worker_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._worker_thread.start()
         self._start_complete.set()
@@ -1082,6 +1086,7 @@ class ScannerView:
         with self._lock:
             if self._camera_index == new_index:
                 return
+            old_index = self._camera_index
             self._camera_index = new_index
             old_cap = self._cap
             self._cap = None
@@ -1089,7 +1094,11 @@ class ScannerView:
             self._focus_capability = None
             self._camera_cap_ready_at = 0.0
             self._camera_first_frame_timing_logged = True
+            running = self._is_running
 
+        if running:
+            # 새 장치를 먼저 점유해 프로브가 열고 있는 장치를 건드리지 못하게 한다.
+            claim_active_camera_index(new_index)
         self._set_camera_status(_STATUS_CAMERA_RECONNECTING)
         if old_cap is not None:
             try:
@@ -1097,6 +1106,8 @@ class ScannerView:
                     old_cap.release()
             except Exception:
                 pass
+        if running:
+            release_active_camera_index(old_index)
 
     def release(self) -> None:
         self._is_running = False
@@ -1111,6 +1122,7 @@ class ScannerView:
             except Exception:
                 pass
             self._cap = None
+        release_active_camera_index(self._camera_index)
         self._camera_backend_name = None
         self._focus_capability = None
         self._camera_cap_ready_at = 0.0

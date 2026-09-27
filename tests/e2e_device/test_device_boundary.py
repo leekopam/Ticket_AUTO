@@ -170,6 +170,82 @@ def test_receipt_print_reaches_real_spooler() -> None:
             time.sleep(0.3)
 
 
+def test_camera_list_probe_keeps_active_stream_stable() -> None:
+    """스트리밍 중 list_cameras() 프로브가 점유 카메라를 건드리지 않는다.
+
+    DirectShow는 사용 중인 장치를 다시 열면 기존 스트림이 튀거나 오픈이
+    장시간 블록된다(실측: 읽기 실패→재연결 사이클, 프로브 19.8s).
+    ScannerView가 점유한 인덱스는 프로브에서 제외되어야 한다.
+    """
+    pyvirtualcam = pytest.importorskip("pyvirtualcam", reason="pyvirtualcam 미설치")
+
+    try:
+        cam_ctx = pyvirtualcam.Camera(width=640, height=480, fps=15, backend="obs")
+    except Exception as exc:
+        pytest.skip(f"OBS 가상 카메라 드라이버 없음: {exc}")
+
+    with cam_ctx as cam:
+        frame = _build_qr_feed_frame(TEST_QR_URL, cam.width, cam.height)
+        stop = threading.Event()
+
+        def _feed() -> None:
+            while not stop.is_set():
+                cam.send(frame)
+                cam.sleep_until_next_frame()
+
+        feeder = threading.Thread(target=_feed, daemon=True)
+        feeder.start()
+        try:
+            index = _find_camera_index(_OBS_CAMERA_NAME)
+            if index is None:
+                pytest.skip(f"{_OBS_CAMERA_NAME} 장치가 DirectShow 목록에 없음")
+
+            frames: list[float] = []
+            statuses: list[tuple[float, str | None]] = []
+            scanner = ScannerView(
+                camera_index=index,
+                on_frame_ready=lambda _b64: frames.append(time.monotonic()),
+            )
+            scanner.set_camera_status_listener(
+                lambda m: statuses.append((time.monotonic(), m))
+            )
+            scanner.start()
+            try:
+                deadline = time.monotonic() + 15.0
+                while not frames and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                if not frames:
+                    pytest.skip("스트리밍 프레임을 수신하지 못함")
+                time.sleep(1.0)
+
+                from services.windows_camera_service import WindowsCameraService
+
+                service = WindowsCameraService()
+                service._cached_wmi_names_at = 0.0
+                service._cached_opencv_indices.clear()
+                probe_start = time.monotonic()
+                devices = service.list_cameras()
+                probe_ms = (time.monotonic() - probe_start) * 1000.0
+                time.sleep(0.5)
+
+                # 스트림이 튀었으면 읽기 실패/재연결 상태 이벤트가 발생한다.
+                disturbed = [m for ts, m in statuses if ts >= probe_start and m]
+                assert not disturbed, f"프로브 중 카메라 상태 이벤트 발생: {disturbed}"
+                assert index in [d.index for d in devices], "점유 카메라가 목록에서 빠짐"
+                assert probe_ms < 15000.0, (
+                    f"프로브 {probe_ms:.0f}ms — 점유 장치 접촉 징후"
+                )
+                assert time.monotonic() - frames[-1] < 2.0, (
+                    "프로브 후 프레임 스트림이 멈춤"
+                )
+                record_metric("device_camera_probe_stable")
+            finally:
+                scanner.release()
+        finally:
+            stop.set()
+            feeder.join(timeout=2)
+
+
 def test_physical_camera_focus_control_path() -> None:
     """실물 카메라 드라이버가 초점 제어 명령에 실제로 응답하는지 확인한다.
 

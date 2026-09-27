@@ -16,6 +16,33 @@ import cv2
 FocusMode = Literal["auto", "manual"]
 FocusApplyStatus = Literal["applied", "failed", "unsupported"]
 
+# 프로세스 내에서 스캐너가 점유한 카메라 인덱스.
+# DirectShow는 사용 중인 장치를 다시 열면 기존 스트림이 튀거나 오픈이 장시간
+# 블록되므로, 목록 프로브가 점유 장치를 건드리지 않게 한다.
+_ACTIVE_CAMERA_LOCK = threading.Lock()
+_ACTIVE_CAMERA_CLAIMS: dict[int, int] = {}
+
+
+def claim_active_camera_index(index: int) -> None:
+    """스캐너가 점유한 카메라 인덱스를 등록한다(재진입 가능한 참조 카운트)."""
+    with _ACTIVE_CAMERA_LOCK:
+        _ACTIVE_CAMERA_CLAIMS[index] = _ACTIVE_CAMERA_CLAIMS.get(index, 0) + 1
+
+
+def release_active_camera_index(index: int) -> None:
+    """카메라 인덱스 점유를 해제한다."""
+    with _ACTIVE_CAMERA_LOCK:
+        remaining = _ACTIVE_CAMERA_CLAIMS.get(index, 0)
+        if remaining <= 1:
+            _ACTIVE_CAMERA_CLAIMS.pop(index, None)
+        else:
+            _ACTIVE_CAMERA_CLAIMS[index] = remaining - 1
+
+
+def _active_camera_indices() -> set[int]:
+    with _ACTIVE_CAMERA_LOCK:
+        return set(_ACTIVE_CAMERA_CLAIMS)
+
 
 @dataclass(frozen=True)
 class FocusApplyResult:
@@ -174,16 +201,31 @@ class WindowsCameraService:
         """
         wmi_names = self._get_cached_wmi_camera_names()
         target_count = len(wmi_names) if wmi_names else None
-        openable_indices = self._get_cached_opencv_indices(
+        claimed = {
+            index
+            for index in _active_camera_indices()
+            if 0 <= index <= max_index
+        }
+        probed_indices = self._get_cached_opencv_indices(
             max_index=max_index,
             target_count=target_count,
+            skip_indices=claimed,
         )
+        # 점유된 카메라는 이미 스트리밍 중이므로 프로브 없이 사용 가능으로 본다.
+        openable_indices = sorted(set(probed_indices) | claimed)
 
         if wmi_names:
-            return [
+            named = [
                 CameraDevice(index=index, name=wmi_names[position])
                 for position, index in enumerate(openable_indices[: len(wmi_names)])
             ]
+            # 점유 장치가 WMI 목록 수를 넘으면 잘리지 않게 일반 이름으로 유지한다.
+            named += [
+                CameraDevice(index=index, name=f"카메라 {index}")
+                for index in openable_indices[len(wmi_names) :]
+                if index in claimed
+            ]
+            return named
 
         return [
             CameraDevice(index=index, name=f"카메라 {index}")
@@ -217,8 +259,19 @@ class WindowsCameraService:
         *,
         max_index: int,
         target_count: int | None,
+        skip_indices: set[int] | frozenset[int] = frozenset(),
     ) -> list[int]:
-        cache_key = (max_index, target_count)
+        # 점유 장치가 이미 목표 수를 채우면 프로브 자체를 건너뛴다.
+        probe_target = (
+            None
+            if target_count is None
+            else max(0, target_count - len(skip_indices))
+        )
+        if probe_target == 0:
+            return []
+
+        skip_key = frozenset(skip_indices)
+        cache_key = (max_index, probe_target, skip_key)
         now = time.monotonic()
         cached = self._cached_opencv_indices.get(cache_key)
         if cached is not None:
@@ -243,7 +296,11 @@ class WindowsCameraService:
                     return list(cached_indices)
 
             probe_start = time.perf_counter()
-            indices = self._probe_opencv_indices(max_index=max_index, target_count=target_count)
+            indices = self._probe_opencv_indices(
+                max_index=max_index,
+                target_count=probe_target,
+                skip_indices=skip_indices,
+            )
             probe_ms = (time.perf_counter() - probe_start) * 1000.0
             self._cached_opencv_indices[cache_key] = (time.monotonic(), list(indices))
             print(
@@ -258,11 +315,17 @@ class WindowsCameraService:
         max_index: int = 9,
         *,
         target_count: int | None = None,
+        skip_indices: set[int] | frozenset[int] = frozenset(),
     ) -> list[int]:
-        """Return indices that can open and deliver a real frame."""
+        """Return indices that can open and deliver a real frame.
+
+        ``skip_indices``의 인덱스는 다른 스트림이 점유 중이므로 열지 않는다.
+        """
         result: list[int] = []
         with WindowsCameraService._silence_opencv_probe_logs():
             for index in range(max_index + 1):
+                if index in skip_indices:
+                    continue
                 cap = None
                 try:
                     for backend in (cv2.CAP_DSHOW, None):
