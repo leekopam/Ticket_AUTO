@@ -27,6 +27,7 @@ from project_paths import (
     resolve_project_path,
 )
 from services.excel_service import ExcelService
+from services.phone_link_service import PhoneLinkService
 from services.receipt_print_pipeline import print_order_receipt, render_receipt_preview_base64
 from services.receipt_settings_store import ReceiptSettingsStore
 from services.scan_success_sound_service import (
@@ -35,6 +36,7 @@ from services.scan_success_sound_service import (
 )
 from services.ticket_runtime_manager import TicketRuntimeManager
 from services.windows_camera_service import CameraDevice, WindowsCameraService
+from views.phone_link_dialog import open_phone_link_dialog
 from views.settings_flet_view import (
     build_app_settings_panel,
     build_receipt_settings_panel,
@@ -1485,6 +1487,7 @@ def bootstrap_dashboard_page(
     watch_excel_changes: Callable[[], None],
     cancel_scheduled_search_refresh: Callable[[], None],
     closing_event: threading.Event,
+    on_window_closing: Callable[[], None] | None = None,
 ) -> None:
     """Apply initial dashboard wiring, lifecycle hooks, and shell mount."""
     apply_runtime_controls_state(
@@ -1525,6 +1528,11 @@ def bootstrap_dashboard_page(
             closing_event.set()
             cancel_scheduled_search_refresh()
             runtime_manager.unsubscribe(on_runtime_event)
+            if on_window_closing is not None:
+                try:
+                    on_window_closing()
+                except Exception:
+                    logger.warning("창 종료 후처리 실패", exc_info=True)
 
             def _stop_and_close() -> None:
                 try:
@@ -2495,6 +2503,12 @@ class DashboardFletView:
             icon=ICONS.OPEN_IN_NEW_ROUNDED,
             key="dashboard_open_witchform_button",
         )
+        btn_phone_link = ft.OutlinedButton(
+            "휴대폰 연결",
+            icon=ICONS.SMARTPHONE_ROUNDED,
+            key="dashboard_phone_link_button",
+        )
+        phone_link_service = PhoneLinkService()
 
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
         btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
@@ -2559,6 +2573,24 @@ class DashboardFletView:
                 call_page_from_thread(page, lambda: callback(message), search_refresh_stop)
 
             threading.Thread(target=_open, daemon=True).start()
+
+        def _on_phone_link(_e: ft.ControlEvent) -> None:
+            def _start_and_open() -> None:
+                def _open_dialog() -> None:
+                    try:
+                        open_phone_link_dialog(
+                            page=page,
+                            service=phone_link_service,
+                            safe_update=lambda c: safe_page_update(c, search_refresh_stop),
+                            call_from_thread=lambda cb: call_page_from_thread(page, cb, search_refresh_stop),
+                        )
+                    except Exception:
+                        logger.warning("휴대폰 연결 다이얼로그 생성 실패", exc_info=True)
+                        _show_dashboard_warning("휴대폰 연결 서버를 시작하지 못했습니다.")
+
+                call_page_from_thread(page, _open_dialog, search_refresh_stop)
+
+            threading.Thread(target=_start_and_open, daemon=True).start()
 
         def refresh_print_controls(*, search_blocked: bool = False) -> None:
             btn_buyer_print.disabled = compute_print_button_disabled(
@@ -2929,6 +2961,7 @@ class DashboardFletView:
         btn_start_stop.on_click = on_start
         btn_relogin.on_click = on_relogin
         btn_open_witchform.on_click = _on_open_witchform
+        btn_phone_link.on_click = _on_phone_link
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
 
@@ -3259,7 +3292,7 @@ class DashboardFletView:
                 ft.Text("티켓 확인 제어", size=28, weight=ft.FontWeight.BOLD, color="#1D1D1D"),
                 ft.Container(height=8),
                 ft.Row(
-                    controls=[btn_start_stop, btn_open_witchform, processed_count_reset_button],
+                    controls=[btn_start_stop, btn_open_witchform, btn_phone_link, processed_count_reset_button],
                     spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     wrap=True,
@@ -3533,11 +3566,17 @@ class DashboardFletView:
             ),
         )
 
+        last_applied_layout: dict[str, tuple | None] = {"resolved": None}
+
         def _apply_responsive_layout(
             width: float | None = None,
             height: float | None = None,
-        ) -> None:
-            """창 크기에 맞춰 검색 테이블 높이와 카메라 미리보기 크기를 조정한다."""
+        ) -> bool:
+            """창 크기에 맞춰 검색 테이블 높이와 카메라 미리보기 크기를 조정한다.
+
+            해상된 크기가 이전과 같으면 아무것도 하지 않고 False를 반환해
+            연속 리사이즈 이벤트에서 불필요한 page.update를 막는다.
+            """
             window_w = float(
                 width
                 or getattr(page, "width", None)
@@ -3551,12 +3590,15 @@ class DashboardFletView:
                 or DASHBOARD_DEFAULT_WINDOW_HEIGHT
             )
             table_host = search_table_host_ref["value"]
-            if table_host is not None:
-                # 테이블이 창 아래까지 남은 공간을 채우되 최소 높이는 보장한다.
-                table_host.height = max(
+            # 테이블이 창 아래까지 남은 공간을 채우되 최소 높이는 보장한다.
+            table_height = (
+                max(
                     SEARCH_TABLE_MIN_HEIGHT,
                     int(window_h - SEARCH_TABLE_VERTICAL_OVERHEAD),
                 )
+                if table_host is not None
+                else None
+            )
             # 좁은 창에서는 카메라 미리보기를 줄여 구매자 패널 폭을 확보한다.
             camera_width = max(
                 CAMERA_PREVIEW_MIN_WIDTH,
@@ -3566,10 +3608,25 @@ class DashboardFletView:
                 ),
             )
             camera_height = int(camera_width * CAMERA_PREVIEW_HEIGHT_RATIO)
+            # 설정 서랍도 창 폭에 맞춰 줄인다.
+            drawer_w = resolve_settings_drawer_width(window_w)
+            resolved = (table_height, camera_width, camera_height, drawer_w)
+            # 영수증 양식 캔버스도 창 크기에 맞춰 다시 계산한다 (지연 생성 전이면 건너뜀).
+            apply_window_size = getattr(
+                receipt_settings_panel_ref["value"], "_apply_window_size", None
+            )
+            canvas_changed = bool(
+                callable(apply_window_size)
+                and apply_window_size(window_w, window_h)
+            )
+            if resolved == last_applied_layout["resolved"]:
+                return canvas_changed
+            last_applied_layout["resolved"] = resolved
+            if table_host is not None:
+                table_host.height = table_height
             camera_container.width = camera_view.width = camera_width
             camera_container.height = camera_view.height = camera_height
-            # 설정 서랍도 창 폭에 맞춰 줄이고, 닫힘 오프셋을 새 폭 기준으로 맞춘다.
-            drawer_w = resolve_settings_drawer_width(window_w)
+            # 닫힘 오프셋을 새 서랍 폭 기준으로 맞춘다.
             camera_focus_drawer.width = drawer_w
             camera_focus_overlay_group.width = drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH
             camera_focus_side_handle.right = drawer_w
@@ -3577,15 +3634,16 @@ class DashboardFletView:
                 camera_focus_overlay_group.offset = ft.Offset(
                     drawer_w / (drawer_w + CAMERA_SETTINGS_HANDLE_WIDTH), 0
                 )
+            return True
 
         def _on_window_resized(event: ft.WindowResizeEvent) -> None:
             if search_refresh_stop.is_set():
                 return
-            _apply_responsive_layout(
+            if _apply_responsive_layout(
                 getattr(event, "width", None),
                 getattr(event, "height", None),
-            )
-            safe_page_update(page, search_refresh_stop)
+            ):
+                safe_page_update(page, search_refresh_stop)
 
         page.on_resized = _on_window_resized
         _apply_responsive_layout()
@@ -3649,6 +3707,7 @@ class DashboardFletView:
             watch_excel_changes=watch_excel_changes,
             cancel_scheduled_search_refresh=cancel_scheduled_search_refresh,
             closing_event=search_refresh_stop,
+            on_window_closing=phone_link_service.stop,
         )
         do_search(push_update=True)
 
