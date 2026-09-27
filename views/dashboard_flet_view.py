@@ -1030,7 +1030,7 @@ def build_order_search_panel(
 
 def apply_camera_frame_state(camera_view: ft.Image, b64_str: str) -> None:
     """카메라 프레임 표시 상태를 한 번에 갱신한다."""
-    camera_view.src_base64 = b64_str
+    camera_view.src = f"data:image/jpeg;base64,{b64_str}"
     camera_view.visible = True
 
 
@@ -3159,6 +3159,7 @@ class DashboardFletView:
             width=400,
             height=300,
             fit=ft.ImageFit.CONTAIN,
+            gapless_playback=True,
             visible=False,
             key="dashboard_camera_view",
             semantics_label="카메라 미리보기",

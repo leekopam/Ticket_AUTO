@@ -260,6 +260,49 @@ def _write_metrics() -> None:
             aggregation="sum",
         ),
     ]
+    if "camera_preview_samples" in counters:
+        metrics.extend(
+            [
+                _metric(
+                    "e2e/camera_preview_samples",
+                    float(counters["camera_preview_samples"]),
+                    unit="count",
+                    direction="higher",
+                    threshold_kind="absolute",
+                    threshold_value=0.0,
+                ),
+                _metric(
+                    "e2e/camera_preview_black_frames",
+                    float(counters["camera_preview_black_frames"]),
+                    unit="count",
+                    direction="lower",
+                    threshold_kind="absolute",
+                    threshold_value=0.0,
+                ),
+            ]
+        )
+    if "device_camera_sampled_frames" in counters:
+        sampled = counters["device_camera_sampled_frames"]
+        metrics.extend(
+            [
+                _metric(
+                    "e2e/device_camera_qr_decode_percent",
+                    100.0 * counters["device_camera_qr_frames"] / sampled if sampled else 0.0,
+                    unit="percent",
+                    direction="higher",
+                    threshold_kind="relative_percent",
+                    threshold_value=20.0,
+                ),
+                _metric(
+                    "e2e/device_camera_read_failures",
+                    float(counters["device_camera_read_failures"]),
+                    unit="count",
+                    direction="lower",
+                    threshold_kind="absolute",
+                    threshold_value=0.0,
+                ),
+            ]
+        )
     Path(_METRICS_PATH).write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
         encoding="utf-8",

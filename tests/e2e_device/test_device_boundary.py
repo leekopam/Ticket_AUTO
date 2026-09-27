@@ -36,6 +36,7 @@ from views.scanner_view import ScannerView
 _OBS_CAMERA_NAME = "OBS Virtual Camera"
 _PDF_PRINTER_NAME = "Microsoft Print to PDF"
 _CAMERA_DECODE_TIMEOUT_SEC = 15.0
+_CAMERA_STABILITY_SAMPLE_SEC = 4.0
 _PRINTER_JOB_WAIT_TIMEOUT_SEC = 10.0
 
 
@@ -104,7 +105,25 @@ def test_virtual_camera_feed_decodes_via_real_capture() -> None:
                     decoded = ScannerView._decode_qr(captured)
                     if decoded:
                         break
-                record_metric("device_camera_frames", frames_read)
+                sampled_frames = 0
+                decoded_frames = 0
+                read_failures = 0
+                frame_times: list[float] = []
+                if decoded == TEST_QR_URL:
+                    sample_deadline = time.monotonic() + _CAMERA_STABILITY_SAMPLE_SEC
+                    while time.monotonic() < sample_deadline:
+                        ok, captured = cap.read()
+                        if not ok or captured is None:
+                            read_failures += 1
+                            time.sleep(0.05)
+                            continue
+                        frame_times.append(time.monotonic())
+                        sampled_frames += 1
+                        decoded_frames += ScannerView._decode_qr(captured) == TEST_QR_URL
+                record_metric("device_camera_frames", frames_read + sampled_frames)
+                record_metric("device_camera_sampled_frames", sampled_frames)
+                record_metric("device_camera_qr_frames", decoded_frames)
+                record_metric("device_camera_read_failures", read_failures)
             finally:
                 cap.release()
         finally:
@@ -112,6 +131,14 @@ def test_virtual_camera_feed_decodes_via_real_capture() -> None:
             feeder.join(timeout=2)
 
     assert decoded == TEST_QR_URL
+    assert sampled_frames >= 20, f"연속 캡처 부족: {sampled_frames}프레임"
+    assert read_failures == 0, f"가상 카메라 읽기 실패: {read_failures}회"
+    assert decoded_frames / sampled_frames >= 0.8, (
+        f"QR 연속 판독률 저하: {decoded_frames}/{sampled_frames}"
+    )
+    assert max(b - a for a, b in zip(frame_times, frame_times[1:])) < 0.75, (
+        "카메라 프레임 간격이 0.75초 이상 끊김"
+    )
     record_metric("device_camera_qr_decodes")
 
 
