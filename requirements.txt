@@ -40,3 +40,6 @@ flet-runtime==0.23.2
 fastapi==0.123.10
 uvicorn==0.38.0
 httpx==0.28.1
+
+# LAN API 서버 자체서명 인증서 생성 (안드로이드 페어링)
+cryptography==48.0.1
