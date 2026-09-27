@@ -252,7 +252,7 @@ def create_api_v1_app(
 ) -> FastAPI:
     tracker = DatasetTracker(excel)
     registry = ActionRegistry(excel)
-    app = FastAPI(title="Ticket_AUTO LAN API", version="v1", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Ticket_AUTO LAN API", version="v1", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.paused = False
     scan_dispatch_lock = threading.Lock()
 
@@ -261,20 +261,32 @@ def create_api_v1_app(
         content_length = request.headers.get("content-length")
         if content_length and content_length.isdigit() and int(content_length) > MAX_BODY_BYTES:
             return _error("rejected", "INVALID_REQUEST", "요청 본문이 너무 큽니다.", status_code=413)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > MAX_BODY_BYTES:
+                return _error("rejected", "INVALID_REQUEST", "요청 본문이 너무 큽니다.", status_code=413)
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
         return await call_next(request)
 
     def require_device(request: Request) -> str:
         header = request.headers.get("authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        device_name = pairing.device_name_for_token(token) if token else None
-        if device_name is None:
+        device_id = pairing.device_id_for_token(token) if token else None
+        if device_id is None:
             from fastapi import HTTPException
 
             raise HTTPException(
                 status_code=401,
                 detail={"code": "UNAUTHORIZED", "message": "기기 인증이 필요합니다."},
             )
-        return device_name
+        return device_id
+
+    def owned_action(request_id: str, device_id: str) -> dict[str, Any] | None:
+        record = registry.get(request_id)
+        return record if record is not None and record.get("device_id") == device_id else None
 
     # ------------------------------ pair ------------------------------
 
@@ -405,7 +417,11 @@ def create_api_v1_app(
         with scan_dispatch_lock:
             existing = registry.get(body.request_id)
             if existing is not None:
-                return _action_payload(existing)
+                return (
+                    _action_payload(existing)
+                    if existing.get("device_id") == device
+                    else _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.", status_code=404)
+                )
             if app.state.paused:
                 return _error("rejected", "PAUSED", "처리가 일시정지 상태입니다. PC에서 재개해주세요.")
             registry.register(body.request_id, "", ACTION_SCAN_RECEIPT, device)
@@ -433,7 +449,11 @@ def create_api_v1_app(
 
         existing = registry.get(body.request_id)
         if existing is not None:
-            return _action_payload(existing)
+            return (
+                _action_payload(existing)
+                if existing.get("device_id") == device
+                else _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.", status_code=404)
+            )
 
         if app.state.paused:
             return _error("rejected", "PAUSED", "처리가 일시정지 상태입니다. PC에서 재개해주세요.")
@@ -462,16 +482,16 @@ def create_api_v1_app(
 
     @app.get("/v1/actions/{request_id}")
     def get_action(request_id: str, device: str = Depends(require_device)):
-        record = registry.get(request_id)
+        record = owned_action(request_id, device)
         if record is None:
-            return _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.")
+            return _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.", status_code=404)
         return _action_payload(record)
 
     @app.post("/v1/actions/{request_id}/result")
     def report_action_result(request_id: str, body: ActionResultBody, device: str = Depends(require_device)):
-        record = registry.get(request_id)
+        record = owned_action(request_id, device)
         if record is None:
-            return _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.")
+            return _error("rejected", "INVALID_REQUEST", "알 수 없는 요청입니다.", status_code=404)
         if record.get("action") == ACTION_SCAN_RECEIPT:
             return _error("rejected", "INVALID_REQUEST", "PC가 스캔 결과를 기록합니다.")
         if record.get("state") in TERMINAL_STATES:
@@ -507,13 +527,6 @@ def create_api_v1_app(
             logger.warning("연속 실패 %d건 — 처리를 자동 일시정지합니다.", registry.consecutive_failures)
 
         return _action_payload(registry.get(request_id) or {})
-
-    # ------------------------------ admin (로컬 관리용) ------------------------------
-
-    @app.post("/v1/admin/pause")
-    def set_pause(paused: bool = True, device: str = Depends(require_device)):
-        app.state.paused = bool(paused)
-        return {"state": "ok", "paused": app.state.paused}
 
     return app
 

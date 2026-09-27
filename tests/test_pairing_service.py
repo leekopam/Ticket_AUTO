@@ -47,6 +47,14 @@ def test_join_code_is_one_time(pairing: PairingService):
     assert second.error_code == "EXPIRED_JOIN_CODE"
 
 
+def test_issuing_new_join_code_invalidates_previous_code(pairing: PairingService):
+    old_code = pairing.issue_join_code()
+    new_code = pairing.issue_join_code()
+
+    assert pairing.request_pair(join_code=old_code).state == "error"
+    assert pairing.request_pair(join_code=new_code).state == "pending_approval"
+
+
 def test_expired_join_code(pairing: PairingService, monkeypatch):
     code = pairing.issue_join_code()
     # 만료 시점 이후로 시간을 이동시킨다
@@ -54,6 +62,16 @@ def test_expired_join_code(pairing: PairingService, monkeypatch):
     monkeypatch.setattr(entry, "expires_at", time.time() - 1)
     result = pairing.request_pair(join_code=code)
     assert result.state == "error"
+
+
+def test_expired_approval_cannot_issue_token(pairing: PairingService):
+    code = pairing.issue_join_code()
+    pending = pairing.request_pair(join_code=code, device_name="expired-phone")
+    pairing._tickets[pending.pair_ticket].expires_at = time.time() - 1
+
+    assert pairing.approve(pending.pair_ticket) == ""
+    assert pairing.request_pair(pair_ticket=pending.pair_ticket).state == "error"
+    assert pairing.revoke_all() == 0
 
 
 def test_wrong_code_lockout(pairing: PairingService):
@@ -87,6 +105,28 @@ def test_token_validation_and_revocation(pairing: PairingService, tmp_path: Path
     assert reloaded.revoke_token(token)
     assert reloaded.device_name_for_token(token) is None
     assert not reloaded.revoke_token("not-a-token")
+
+
+def test_token_store_failure_does_not_approve_or_revoke_in_memory(pairing: PairingService, monkeypatch):
+    code = pairing.issue_join_code()
+    pending = pairing.request_pair(join_code=code, device_name="staff")
+
+    def fail_save(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pairing, "_save_tokens", fail_save)
+    with pytest.raises(OSError):
+        pairing.approve(pending.pair_ticket)
+    assert pairing.request_pair(pair_ticket=pending.pair_ticket).state == "pending_approval"
+    assert pairing.revoke_all() == 0
+
+    monkeypatch.undo()
+    token = pairing.approve(pending.pair_ticket)
+    assert token
+    monkeypatch.setattr(pairing, "_save_tokens", fail_save)
+    with pytest.raises(OSError):
+        pairing.revoke_token(token)
+    assert pairing.device_name_for_token(token) == "staff"
 
 
 def test_revoke_all(pairing: PairingService):

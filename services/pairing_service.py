@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import string
 import threading
@@ -80,6 +81,7 @@ class PairingService:
     def issue_join_code(self) -> str:
         """일회용 6자리 참가 코드를 발급한다."""
         with self._lock:
+            self._join_codes.clear()
             code = "".join(secrets.choice(string.digits) for _ in range(6))
             self._join_codes[code] = _JoinCode(
                 code=code, expires_at=time.time() + JOIN_CODE_TTL_SEC
@@ -152,18 +154,21 @@ class PairingService:
     def approve(self, pair_ticket: str) -> str:
         """PC 운영자 승인 → device_token 발급. 반환값은 토큰(실패 시 빈 문자열)."""
         with self._lock:
+            self._purge_expired()
             ticket = self._tickets.get(pair_ticket)
             if ticket is None or ticket.state != "pending":
                 return ""
             token = secrets.token_urlsafe(32)
+            updated = {**self._token_hashes, self._hash_token(token): ticket.device_name}
+            self._save_tokens(updated)
+            self._token_hashes = updated
             ticket.state = "approved"
             ticket.device_token = token
-            self._token_hashes[self._hash_token(token)] = ticket.device_name
-            self._save_tokens()
             return token
 
     def reject(self, pair_ticket: str) -> bool:
         with self._lock:
+            self._purge_expired()
             ticket = self._tickets.get(pair_ticket)
             if ticket is None or ticket.state != "pending":
                 return False
@@ -178,21 +183,29 @@ class PairingService:
         with self._lock:
             return self._token_hashes.get(self._hash_token(token or ""))
 
+    def device_id_for_token(self, token: str) -> str | None:
+        """표시 이름과 무관한 기기별 작업 소유 식별자를 반환한다."""
+        with self._lock:
+            token_hash = self._hash_token(token or "")
+            return token_hash if token_hash in self._token_hashes else None
+
     def revoke_token(self, token: str) -> bool:
         with self._lock:
             key = self._hash_token(token or "")
             if key not in self._token_hashes:
                 return False
-            del self._token_hashes[key]
-            self._save_tokens()
+            updated = {k: name for k, name in self._token_hashes.items() if k != key}
+            self._save_tokens(updated)
+            self._token_hashes = updated
             return True
 
     def revoke_all(self) -> int:
         """행사 종료 시 전체 토큰 폐기."""
         with self._lock:
             count = len(self._token_hashes)
-            self._token_hashes.clear()
-            self._save_tokens()
+            if count:
+                self._save_tokens({})
+                self._token_hashes.clear()
             return count
 
     # ------------------------------------------------------------------
@@ -216,20 +229,24 @@ class PairingService:
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def _save_tokens(self) -> None:
+    def _save_tokens(self, hashes: dict[str, str]) -> None:
+        self._token_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "devices": [
+                {"token_hash": key, "device_name": name}
+                for key, name in hashes.items()
+            ]
+        }
+        temp_path = self._token_path.with_name(
+            f"{self._token_path.name}.{secrets.token_hex(8)}.tmp"
+        )
         try:
-            self._token_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "devices": [
-                    {"token_hash": key, "device_name": name}
-                    for key, name in self._token_hashes.items()
-                ]
-            }
-            self._token_path.write_text(
+            temp_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        except OSError:
-            pass
+            os.replace(temp_path, self._token_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def _load_tokens(self) -> None:
         try:

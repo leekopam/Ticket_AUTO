@@ -71,9 +71,18 @@ def open_phone_link_dialog(
         pending_column.controls = rows
 
     def _approve(ticket: str) -> None:
-        service.approve(ticket)
+        try:
+            approved = service.approve(ticket)
+        except OSError:
+            status_text.value = "승인 실패: 기기 정보 저장에 실패했습니다."
+            logger.exception("폰 연결 승인 정보 저장 실패")
+        else:
+            status_text.value = (
+                "휴대폰 연결 승인 완료" if approved else "승인 실패: 요청이 만료되었습니다."
+            )
         rebuild_pending()
         safe_update(pending_column)
+        safe_update(status_text)
 
     def _reject(ticket: str) -> None:
         service.reject(ticket)

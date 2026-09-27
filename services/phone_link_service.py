@@ -86,10 +86,9 @@ class PhoneLinkService:
                 return []
             return self._pairing.pending_approvals()
 
-    def approve(self, pair_ticket: str) -> None:
+    def approve(self, pair_ticket: str) -> bool:
         with self._lock:
-            if self._pairing is not None:
-                self._pairing.approve(pair_ticket)
+            return bool(self._pairing and self._pairing.approve(pair_ticket))
 
     def reject(self, pair_ticket: str) -> None:
         with self._lock:

@@ -56,6 +56,10 @@ def test_unauthorized(env):
     assert res.status_code == 401
 
 
+def test_api_schema_is_not_exposed_on_lan(env):
+    assert env["client"].get("/openapi.json").status_code == 404
+
+
 def test_pair_and_status(env):
     token = _pair_device(env)
     res = env["client"].get("/v1/status", headers=_auth(token))
@@ -118,6 +122,9 @@ def test_phone_scan_runs_pc_handler_once_and_reports_verified_result(tmp_path: P
     assert env["client"].post("/v1/scan", json=payload, headers=_auth(token)).json()["state"] == "succeeded"
     assert calls == [qr_url]
     assert excel.find_order("AAAA1111_BBBB2222").is_received
+    other = _pair_device(env)
+    assert env["client"].get(f"/v1/actions/{request_id}", headers=_auth(other)).status_code == 404
+    assert env["client"].post("/v1/scan", json=payload, headers=_auth(other)).status_code == 404
     bad = env["client"].post(
         "/v1/scan",
         json={"request_id": str(uuid.uuid4()), "qr_url": "https://witchform.com.evil.test/qrcode_link.php"},
@@ -160,6 +167,29 @@ def test_action_receipt_flow_and_xlsx_write(env):
     # 종결 후 같은 request_id는 저장된 결과를 그대로 반환
     replay = env["client"].get(f"/v1/actions/{request_id}", headers=_auth(token))
     assert replay.json()["state"] == "succeeded"
+
+
+def test_action_is_scoped_to_issuing_token_even_with_same_device_name(env):
+    owner = _pair_device(env)
+    other = _pair_device(env)
+    request_id = str(uuid.uuid4())
+    action = {
+        "request_id": request_id,
+        "order_id": "AAAA1111_BBBB2222",
+        "action": "receipt",
+        "dataset_generation": "",
+    }
+    assert env["client"].post("/v1/actions", json=action, headers=_auth(owner)).json()["state"] == "accepted"
+
+    assert env["client"].get(f"/v1/actions/{request_id}", headers=_auth(other)).status_code == 404
+    assert env["client"].post("/v1/actions", json=action, headers=_auth(other)).status_code == 404
+    assert env["client"].post(
+        f"/v1/actions/{request_id}/result",
+        json={"state": "succeeded"},
+        headers=_auth(other),
+    ).status_code == 404
+    assert not env["excel"].find_order(action["order_id"]).is_received
+    assert env["client"].get(f"/v1/actions/{request_id}", headers=_auth(owner)).status_code == 200
 
 
 def test_duplicate_in_progress_rejected(env):
@@ -230,7 +260,8 @@ def test_registry_restores_interrupted_ops(env, tmp_path: Path):
 
 def test_pause_blocks_new_actions(env):
     token = _pair_device(env)
-    env["client"].post("/v1/admin/pause?paused=true", headers=_auth(token))
+    assert env["client"].post("/v1/admin/pause?paused=true", headers=_auth(token)).status_code == 404
+    env["client"].app.state.paused = True
     res = env["client"].post("/v1/actions", json={
         "request_id": str(uuid.uuid4()), "order_id": "AAAA1111_BBBB2222",
         "action": "receipt", "dataset_generation": "",
@@ -243,6 +274,16 @@ def test_oversized_body_rejected(env):
     res = env["client"].post(
         "/v1/actions",
         content=b"x" * (40 * 1024),
+        headers={**_auth(token), "Content-Type": "application/json"},
+    )
+    assert res.status_code == 413
+
+
+def test_streamed_oversized_body_without_content_length_rejected(env):
+    token = _pair_device(env)
+    res = env["client"].post(
+        "/v1/actions",
+        content=iter([b"x" * (16 * 1024)] * 3),
         headers={**_auth(token), "Content-Type": "application/json"},
     )
     assert res.status_code == 413
