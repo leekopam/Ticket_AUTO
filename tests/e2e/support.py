@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -155,6 +156,7 @@ def build_offline_app(
     app._status_listener = None
     app._stop_requested = False
     app._relogin_requested = False
+    app._phone_scans = queue.Queue()
     return app, browser_service, scanner_view, sound_service
 
 
