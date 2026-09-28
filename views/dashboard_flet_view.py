@@ -2677,10 +2677,10 @@ class DashboardFletView:
             icon=ICONS.SMARTPHONE_ROUNDED,
             key="dashboard_phone_link_button",
         )
-        btn_phone_server_stop = ft.OutlinedButton(
-            "서버 중지",
-            icon=ICONS.STOP_CIRCLE_ROUNDED,
-            key="dashboard_phone_server_stop_button",
+        btn_phone_server_toggle = ft.OutlinedButton(
+            "서버 시작",
+            icon=ICONS.PLAY_ARROW_ROUNDED,
+            key="dashboard_phone_server_toggle_button",
         )
         btn_cert_regen = ft.OutlinedButton(
             "인증서 재생성",
@@ -2790,7 +2790,7 @@ class DashboardFletView:
 
         network_controls = build_network_panel(
             link_button=btn_phone_link,
-            stop_button=btn_phone_server_stop,
+            server_toggle_button=btn_phone_server_toggle,
             regen_cert_button=btn_cert_regen,
             revoke_all_button=btn_revoke_all,
         )
@@ -2818,6 +2818,11 @@ class DashboardFletView:
                 logger.error("네트워크 관리 정보 조회 실패: %s", exc, exc_info=True)
                 _show_dashboard_warning("기기 목록을 불러오지 못했습니다.")
                 return
+            running = phone_link_service.running
+            btn_phone_server_toggle.text = "서버 중지" if running else "서버 시작"
+            btn_phone_server_toggle.icon = (
+                ICONS.STOP_CIRCLE_ROUNDED if running else ICONS.PLAY_ARROW_ROUNDED
+            )
             apply_network_view_state(
                 network_controls,
                 state,
@@ -2990,6 +2995,10 @@ class DashboardFletView:
             threading.Thread(target=_open, daemon=True).start()
 
         def _on_phone_link(_e: ft.ControlEvent) -> None:
+            if not phone_link_service.running:
+                _show_dashboard_warning("먼저 '서버 시작' 버튼으로 휴대폰 연결 서버를 켜주세요.")
+                return
+
             def _start_and_open() -> None:
                 def _open_dialog() -> None:
                     try:
@@ -2999,9 +3008,11 @@ class DashboardFletView:
                             safe_update=lambda c: safe_page_update(c, search_refresh_stop),
                             call_from_thread=lambda cb: call_page_from_thread(page, cb, search_refresh_stop),
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.warning("휴대폰 연결 다이얼로그 생성 실패", exc_info=True)
-                        _show_dashboard_warning("휴대폰 연결 서버를 시작하지 못했습니다.")
+                        _show_dashboard_warning(
+                            f"휴대폰 연결 서버를 시작하지 못했습니다.\n{exc}"
+                        )
 
                 call_page_from_thread(page, _open_dialog, search_refresh_stop)
 
@@ -3039,24 +3050,51 @@ class DashboardFletView:
             page.dialog.open = True
             safe_page_update(page, search_refresh_stop)
 
-        def _on_server_stop(_e: ft.ControlEvent) -> None:
-            online = sum(
-                1
-                for d in phone_link_service.list_devices()
-                if presence_state(d, time.time()) == PRESENCE_ONLINE
-            )
-            detail = f"현재 연결된 기기가 {online}대 있습니다. " if online else ""
-            _confirm_network_action(
-                title="서버 중지",
-                body=f"{detail}서버를 중지하면 모든 폰의 연결과 페어링이 끊깁니다.",
-                confirm_label="중지",
-                danger=False,
-                on_confirm=lambda: (
-                    phone_link_service.stop(),
-                    refresh_network_panel(push_update=False),
-                    _network_snackbar("휴대폰 연결 서버를 중지했습니다.", success=True),
-                ),
-            )
+        def _on_server_toggle(_e: ft.ControlEvent) -> None:
+            if phone_link_service.running:
+                online = sum(
+                    1
+                    for d in phone_link_service.list_devices()
+                    if presence_state(d, time.time()) == PRESENCE_ONLINE
+                )
+                detail = f"현재 연결된 기기가 {online}대 있습니다. " if online else ""
+                _confirm_network_action(
+                    title="서버 중지",
+                    body=f"{detail}서버를 중지하면 모든 폰의 연결과 페어링이 끊깁니다.",
+                    confirm_label="중지",
+                    danger=False,
+                    on_confirm=lambda: (
+                        phone_link_service.stop(),
+                        refresh_network_panel(push_update=False),
+                        _network_snackbar("휴대폰 연결 서버를 중지했습니다.", success=True),
+                    ),
+                )
+                return
+
+            def _work() -> None:
+                try:
+                    phone_link_service.start()
+                except Exception as exc:
+                    logger.warning("휴대폰 연결 서버 시작 실패: %s", exc, exc_info=True)
+                    call_page_from_thread(
+                        page,
+                        lambda: _show_dashboard_warning(
+                            f"휴대폰 연결 서버를 시작하지 못했습니다.\n{exc}"
+                        ),
+                        search_refresh_stop,
+                    )
+                    return
+
+                def _done() -> None:
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar(
+                        "휴대폰 연결 서버를 시작했습니다. '휴대폰 연결' 버튼으로 연결 QR을 확인하세요.",
+                        success=True,
+                    )
+
+                call_page_from_thread(page, _done, search_refresh_stop)
+
+            threading.Thread(target=_work, daemon=True).start()
 
         def _on_cert_regen(_e: ft.ControlEvent) -> None:
             def _work() -> None:
@@ -3463,15 +3501,6 @@ class DashboardFletView:
                 push_update=True,
             )
             self._runtime_manager.start()
-            # 휴대폰 스캔 경로가 시작과 동시에 열리도록 LAN API 서버도 함께 기동한다.
-            # 이미 실행 중이면 start()가 기존 페이로드를 재사용한다.
-            def _start_phone_link() -> None:
-                try:
-                    phone_link_service.start()
-                except Exception:
-                    logger.warning("휴대폰 연결 서버 자동 기동 실패", exc_info=True)
-
-            threading.Thread(target=_start_phone_link, daemon=True).start()
 
         def on_stop(_: ft.ControlEvent) -> None:
             dispatch_runtime_status_refresh(
@@ -3504,7 +3533,7 @@ class DashboardFletView:
         btn_relogin.on_click = on_relogin
         btn_open_witchform.on_click = _on_open_witchform
         btn_phone_link.on_click = _on_phone_link
-        btn_phone_server_stop.on_click = _on_server_stop
+        btn_phone_server_toggle.on_click = _on_server_toggle
         btn_cert_regen.on_click = _on_cert_regen
         btn_revoke_all.on_click = _on_revoke_all
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")

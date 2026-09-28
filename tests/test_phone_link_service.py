@@ -167,3 +167,25 @@ def test_revoke_all_blocks_every_token(service):
         service.approve(pending["pair_ticket"])
     assert service.revoke_all() == 2
     assert all(d.revoked for d in service.list_devices())
+
+
+def test_start_fails_clearly_without_lan_ip(service, monkeypatch):
+    """LAN IP를 못 찾으면 IndexError가 아니라 원인 있는 RuntimeError로 실패한다."""
+    monkeypatch.setattr("services.phone_link_service.detect_lan_ips", lambda: [])
+    with pytest.raises(RuntimeError, match="LAN 주소"):
+        service.start()
+    assert not service.running
+
+
+def test_start_fails_clearly_when_port_occupied(service):
+    """포트를 다른 프로세스가 점유하면 조용히 죽지 않고 RuntimeError가 난다."""
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("0.0.0.0", service._port))
+    blocker.listen(1)
+    try:
+        with pytest.raises(RuntimeError, match="포트"):
+            service.start()
+        assert not service.running
+    finally:
+        blocker.close()

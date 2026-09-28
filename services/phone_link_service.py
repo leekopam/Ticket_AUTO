@@ -69,12 +69,23 @@ class PhoneLinkService:
                 scan_handler=self._scan_handler,
                 cert_dir=self._cert_dir,
             )
+
+            server.start()
+            if not server.wait_started(timeout=5.0):
+                server.stop()
+                raise RuntimeError(
+                    f"포트 {self._port}를 열 수 없습니다. "
+                    "다른 프로그램이 이 포트를 사용 중이거나 방화벽이 차단했을 수 있습니다."
+                )
+            ips = detect_lan_ips()
+            if not ips:
+                server.stop()
+                raise RuntimeError("LAN 주소를 찾지 못했습니다. 네트워크 연결 상태를 확인해주세요.")
+
             join_code = self._pairing.issue_join_code()
             generation, _ = DatasetTracker(excel).current()
-
-            addr = f"https://{detect_lan_ips()[0]}:{self._port}"
+            addr = f"https://{ips[0]}:{self._port}"
             self._payload = build_pairing_qr_payload(addr, fingerprint, join_code, generation)
-            server.start()
             self._server = server
             return self._payload
 

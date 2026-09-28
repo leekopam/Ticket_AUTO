@@ -124,8 +124,8 @@ def test_network_tab_pair_pending_approve_rename(page, flet_server):
     _device_row(page, "입구1번").first.wait_for(state="visible", timeout=_POLL_MS)
 
 
-def test_phone_server_starts_with_runtime_start(page, flet_server):
-    """'티켓 확인 시작'을 누르면 LAN API 서버도 함께 기동돼야 한다."""
+def test_ticket_start_does_not_start_phone_server(page, flet_server):
+    """'티켓 확인 시작'은 런타임만 켠다 — LAN API 서버는 명시적 버튼으로만 기동된다."""
     # 세션 공유: 앞 테스트에서 서버가 이미 켜져 있을 수 있으므로 강제로 내린다.
     send_control_command(flet_server["control_url"], {"cmd": "phone_link_stop"})
     _open_network_tab(page)
@@ -137,11 +137,14 @@ def test_phone_server_starts_with_runtime_start(page, flet_server):
     wait_for_button(page, "티켓 확인 시작", timeout_ms=_TIMEOUT_MS).click()
     wait_for_button(page, "중지", timeout_ms=_TIMEOUT_MS)
 
-    # 네트워크 탭 주기 갱신(3초)으로 서버 주소가 표시된다
+    # 런타임은 켜졌지만 폰 서버는 여전히 꺼져 있어야 한다
     _open_network_tab(page)
-    page.get_by_text("서버 주소: https://").first.wait_for(
-        state="visible", timeout=_POLL_MS
+    page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
     )
+    # 런타임 정리
+    wait_for_button(page, "티켓 확인", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "중지", timeout_ms=_TIMEOUT_MS).click()
 
 
 def test_network_tab_processed_count_and_processor_name(page, flet_server):
@@ -202,21 +205,30 @@ def test_network_tab_processed_count_and_processor_name(page, flet_server):
         create_test_workbook(data_path)
 
 
-def test_network_tab_server_stop_button(page, flet_server):
-    """네트워크 탭의 서버 중지 버튼이 LAN API 서버를 내린다 (확인 다이얼로그 포함)."""
+def test_network_tab_server_toggle_button(page, flet_server):
+    """서버 시작/중지 토글 버튼이 LAN API 서버를 명시적으로 켜고 끈다."""
     control_url = flet_server["control_url"]
 
-    send_control_command(control_url, {"cmd": "phone_link_start"})
+    send_control_command(control_url, {"cmd": "phone_link_stop"})
     _open_network_tab(page)
+    page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+
+    # 시작: 토글 클릭 → 서버 주소 표시 + 버튼이 "서버 중지"로 바뀐다
+    wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS).click()
     page.get_by_text("서버 주소: https://").first.wait_for(
         state="visible", timeout=_POLL_MS
     )
+    wait_for_button(page, "서버 중지", timeout_ms=_TIMEOUT_MS)
 
+    # 중지: 토글 클릭 → 확인 다이얼로그 → 꺼짐 표시 + 버튼이 "서버 시작"으로 돌아간다
     wait_for_button(page, "서버 중지", timeout_ms=_TIMEOUT_MS).click()
     wait_for_button(page, "중지", timeout_ms=_TIMEOUT_MS).click()  # 확인 다이얼로그
     page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
         state="visible", timeout=_POLL_MS
     )
+    wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS)
 
     # 세션 공유 서버라 뒤 테스트를 위해 다시 기동해 둔다
     send_control_command(control_url, {"cmd": "phone_link_start"})

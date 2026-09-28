@@ -33,7 +33,7 @@ class ServerCertInfo:
 
 
 def detect_lan_ips() -> list[str]:
-    """로컬 LAN IPv4 후보를 수집한다 (실패 시 localhost만)."""
+    """로컬 LAN IPv4 후보를 수집한다 (실패 시 빈 리스트)."""
     ips: list[str] = []
     try:
         hostname = socket.gethostname()
@@ -43,6 +43,17 @@ def detect_lan_ips() -> list[str]:
                 ips.append(ip)
     except OSError:
         pass
+    if not ips:
+        # UDP connect는 패킷을 보내지 않고 라우팅 테이블로 기본 출발 NIC의 IP만 알아낸다.
+        # 호스트명 해석이 안 되는 환경(VPN/특수 어댑터만 있는 PC)의 폴백.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("192.0.2.1", 80))  # TEST-NET-1 — 실제 전송 없음
+                ip = probe.getsockname()[0]
+                if not ip.startswith("127."):
+                    ips.append(ip)
+        except OSError:
+            pass
     return ips
 
 

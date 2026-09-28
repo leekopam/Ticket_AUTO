@@ -597,6 +597,17 @@ class LanApiServer:
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()
 
+    def wait_started(self, timeout: float = 5.0) -> bool:
+        """바인드 완료까지 기다린다. 포트 점유·인증서 오류 등으로 스레드가 죽으면 False."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if getattr(self._server, "started", False):
+                return True
+            if self._thread is not None and not self._thread.is_alive():
+                return False
+            time.sleep(0.05)
+        return False
+
     def stop(self) -> None:
         self._server.should_exit = True
         if self._thread:

@@ -290,13 +290,13 @@ def _build_device_row(
 
 def build_network_panel(
     link_button: ft.Control | None = None,
-    stop_button: ft.Control | None = None,
+    server_toggle_button: ft.Control | None = None,
     regen_cert_button: ft.Control | None = None,
     revoke_all_button: ft.Control | None = None,
 ) -> dict[str, ft.Control]:
     """네트워크 관리 패널 컨트롤 묶음을 만든다. 내용은 apply_*로 채운다.
 
-    link/stop/regen_cert_button: 서버 상태 카드 오른쪽에 놓는 버튼 (호출부가 주입).
+    link/server_toggle/regen_cert_button: 서버 상태 카드 오른쪽에 놓는 버튼 (호출부가 주입).
     revoke_all_button: "등록된 휴대폰" 제목 줄 오른쪽에 놓는 버튼.
     """
     server_status_text = ft.Text("", size=13, color="#333333")
@@ -336,7 +336,7 @@ def build_network_panel(
                             ft.Row(
                                 controls=[
                                     b
-                                    for b in (link_button, stop_button, regen_cert_button)
+                                    for b in (link_button, server_toggle_button, regen_cert_button)
                                     if b is not None
                                 ],
                                 spacing=8,

@@ -59,11 +59,12 @@
 | 교차 기기 404, 멱등성, STALE_DATASET, PAUSED, 자동 일시정지 | `tests/test_api_v1_server.py` |
 | 잠금/만료/마이그레이션/손상 파일/별칭/재페어링 병합 | `tests/test_pairing_service.py` |
 | 재페어링 표시(known_device) | `tests/test_pairing_service.py`, 뷰 단위 테스트 |
-| 탭 UI(승인·이름 변경·처리 건수) + 티켓 시작 시 서버 자동 기동 | `tests/e2e_ui/test_network_tab_ui.py` |
+| 탭 UI(승인·이름 변경·처리 건수) + 서버 시작/중지 토글(명시적 기동만) | `tests/e2e_ui/test_network_tab_ui.py` |
 | 만료 토큰 401, 슬라이딩 연장, 재페어링 복구, 영속화 | `test_pairing_service.py` 5건 + e2e `test_expired_token_rejected_over_tls` |
 | 인증서 재생성(지문 교체 + 재기동) | `test_phone_link_service.py` 2건 |
 | 전체 차단 | `test_phone_link_service.py::test_revoke_all_blocks_every_token` |
-| 탭의 서버 중지 버튼 + 확인 다이얼로그 | `test_network_tab_ui.py::test_network_tab_server_stop_button` |
+| 탭의 서버 시작/중지 토글 + 확인 다이얼로그 | `test_network_tab_ui.py::test_network_tab_server_toggle_button` |
+| 서버 기동 실패 경로(포트 점유·LAN IP 없음 → 명확한 오류) | `test_phone_link_service.py` 2건 |
 
 ## 6. 미검증 항목 (수동 확인 필요)
 
