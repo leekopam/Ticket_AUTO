@@ -34,14 +34,22 @@
 ### POST /v1/pair
 
 ```json
-→ 요청:  { "join_code": "482913", "device_name": "staff-phone-1" }
+→ 요청:  { "join_code": "482913", "device_name": "staff-phone-1", "device_uid": "550e8400-..." }
 ← 승인 전: { "state": "pending_approval" }   (폰은 폴링)
 ← 승인 후: { "state": "approved", "device_token": "...", "dataset_generation": 3 }
 ← 거절/만료: { "state": "rejected" } / 오류 코드 EXPIRED_JOIN_CODE
 ```
 
+- `device_name`: 실 기기 이름 — `Settings.Global.DEVICE_NAME`, 없으면 `Build.MODEL`
+- `device_uid`: 앱이 최초 실행 시 생성한 UUID v4, 보안 저장소에 보관. 재페어링 시 같은 값을내면 PC는 같은 기기로 인식해 별칭·이력을 이어간다 (선택 필드 — 구버전 앱은 생략 가능)
 - `device_token`은 행사 종료까지 유효, PC에서 기기별 폐기 가능
 - 토큰은 `flutter_secure_storage`(Keystore)에만 저장. 로그 출력 금지
+
+### 연결 상태 (presence)
+
+- 폰은 앱이 포그라운드일 때만 15초 간격으로 `GET /v1/status`를 호출한다 (별도 하트비트 엔드포인트 없음)
+- PC는 인증된 요청마다 `last_seen`을 갱신하고, 45초 이상 활동이 없으면 네트워크 관리 탭에서 "연결 끊김"으로 표시한다
+- 백그라운드/종료 시 폰은 하트비트를 멈추므로 끊김 표시는 정상 동작이다
 
 ## 3. 엔드포인트
 

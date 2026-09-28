@@ -130,3 +130,47 @@ def test_tls_pairing_token_lifecycle_and_masked_order(link):
 
     assert pairing.revoke_token(token)
     assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 401
+
+
+def test_device_registry_presence_rename_and_repair(link):
+    """device_uid 기반 재페어링·별칭 유지·활동 기록·차단을 실제 TLS로 검증한다."""
+    port, fingerprint, pairing = link
+    uid = "550e8400-e29b-41d4-a716-446655440000"
+
+    def _pair() -> str:
+        code = pairing.issue_join_code()
+        _, pending = _pinned_json(
+            port, fingerprint, "POST", "/v1/pair",
+            body={"join_code": code, "device_name": "staff-phone", "device_uid": uid},
+        )
+        assert pairing.approve(pending["pair_ticket"])
+        return _pinned_json(
+            port, fingerprint, "POST", "/v1/pair",
+            body={"pair_ticket": pending["pair_ticket"]},
+        )[1]["device_token"]
+
+    token = _pair()
+    # 인증된 호출이 last_seen을 갱신한다 (폰 하트비트 역할)
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 200
+    devices = pairing.list_devices()
+    assert len(devices) == 1
+    record = devices[0]
+    assert record.reported_name == "staff-phone"
+    assert record.device_uid == uid
+    assert record.last_seen_at  # 활동 기록됨 → 온라인 판정 기준
+
+    # 별칭 설정 후 토큰 폐기 → 같은 device_uid 재페어링이면 별칭 유지
+    assert pairing.rename_device(record.record_id, "입구1번")
+    assert pairing.revoke_token(token)
+    token2 = _pair()
+    devices = pairing.list_devices()
+    assert len(devices) == 1
+    assert devices[0].record_id == record.record_id
+    assert devices[0].custom_name == "입구1번"
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token2)[0] == 200
+
+    # 기기 차단은 레코드를 지우지 않고 인증만 거절한다
+    assert pairing.revoke_device(record.record_id)
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token2)[0] == 401
+    kept = pairing.list_devices()
+    assert len(kept) == 1 and kept[0].revoked and kept[0].custom_name == "입구1번"
