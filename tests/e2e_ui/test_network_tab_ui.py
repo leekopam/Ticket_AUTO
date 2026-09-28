@@ -232,3 +232,27 @@ def test_network_tab_server_toggle_button(page, flet_server):
 
     # 세션 공유 서버라 뒤 테스트를 위해 다시 기동해 둔다
     send_control_command(control_url, {"cmd": "phone_link_start"})
+
+
+def test_phone_link_dialog_opens_with_qr(page, flet_server):
+    """'휴대폰 연결' 버튼이 연결 QR 다이얼로그를 연다 (ft.Colors 회귀 포함)."""
+    control_url = flet_server["control_url"]
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    _open_network_tab(page)
+    page.get_by_text("서버 주소: https://").first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    wait_for_button(page, "휴대폰 연결", timeout_ms=_TIMEOUT_MS).click()
+    # 모달 내부 텍스트는 flutter web semantics에 라벨이 안 붙으므로 role 구조로 확인한다.
+    # 다이얼로그 = role=dialog 노드 + 액션 버튼 3개(QR 재발급/서버 중지/닫기)
+    dialog = page.locator("flt-semantics[role='dialog']")
+    dialog.first.wait_for(state="attached", timeout=_POLL_MS)
+    buttons = dialog.locator("flt-semantics[role='button']")
+    buttons.first.wait_for(state="attached", timeout=_POLL_MS)
+    assert buttons.count() == 3
+
+    # actions 순서상 마지막 버튼이 "닫기" — 클릭 후 다이얼로그가 사라져야 한다
+    buttons.last.evaluate("e => e.click()")
+    page.wait_for_timeout(500)
+    assert dialog.count() == 0

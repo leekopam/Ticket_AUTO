@@ -44,9 +44,9 @@ def open_phone_link_dialog(
 
     qr_image = ft.Image(src_base64=_qr_png_base64(payload), width=280, height=280, fit=ft.ImageFit.CONTAIN)
     addr_text = ft.Text(f"서버 주소: {payload['addr']}", selectable=True, size=12)
-    status_text = ft.Text("휴대폰 연결 서버 실행 중", size=12, color=ft.Colors.GREEN_700)
+    status_text = ft.Text("휴대폰 연결 서버 실행 중", size=12, color=ft.colors.GREEN_700)
     pending_column = ft.Column(spacing=6)
-    empty_pending = ft.Text("승인 대기 중인 폰이 없습니다", size=12, color=ft.Colors.GREY_600)
+    empty_pending = ft.Text("승인 대기 중인 폰이 없습니다", size=12, color=ft.colors.GREY_600)
 
     closing = threading.Event()
     dialog: ft.AlertDialog | None = None
