@@ -1,6 +1,7 @@
 """Legacy scanner camera and preview contract tests."""
 from __future__ import annotations
 
+import base64
 import unittest
 import time
 from types import SimpleNamespace
@@ -883,6 +884,106 @@ class ScannerCameraBackendContractTest(unittest.TestCase):
         scanner.set_scanning_enabled(True)
 
         self.assertEqual(fake_cap.set_calls, [])
+
+
+def _jpeg_brightness(b64_str: str) -> float:
+    """방출된 JPEG 프레임의 평균 밝기(0~255)를 계산한다."""
+    raw = base64.b64decode(b64_str)
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+    return float(image.mean())
+
+
+class CameraFlickerContractTest(unittest.TestCase):
+    """실물 카메라가 간헐적 검은 프레임을 보내는 플리커 상황의 미리보기 계약.
+
+    사용자 보고 증상: PC에 카메라 연결 시 미리보기가 "꺼졌다 켜지듯" 깜빡이고
+    QR 스캔이 저하된다. 검은 프레임(읽기 실패가 아닌 ret=True+검은 화면)이
+    미리보기에 그대로 출력되면 이 증상이 재현된다.
+    """
+
+    def _run_loop(self, cap, *, stop_after_emitted: int) -> tuple[list[str], ScannerView]:
+        emitted: list[str] = []
+        scanner = ScannerView()
+
+        def _on_frame(b64: str) -> None:
+            emitted.append(b64)
+            if len(emitted) >= stop_after_emitted:
+                scanner._is_running = False
+
+        scanner.on_frame_ready = _on_frame
+        scanner._cap = cap
+        scanner._is_running = True
+        scanner.set_auth_ready(True)
+        scanner.set_scanning_enabled(False)
+        with patch("views.scanner_view.decode", return_value=[]):
+            scanner._capture_loop()
+        return emitted, scanner
+
+    # 프레임이 너무 작으면 상단 상태 바가 평균 밝기를 지배하므로 실제 크기를 쓴다.
+    _GOOD_FRAME = np.full((480, 640, 3), 200, dtype=np.uint8)
+    _BLACK_FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def test_transient_black_frames_are_not_emitted_to_preview(self) -> None:
+        """간헐적 검은 프레임(1~2연속)은 미리보기에 출력하지 않는다."""
+        cap = _FakeCapture(frames=[
+            self._GOOD_FRAME, self._BLACK_FRAME, self._BLACK_FRAME,
+            self._GOOD_FRAME, self._BLACK_FRAME, self._GOOD_FRAME,
+        ])
+
+        emitted, _ = self._run_loop(cap, stop_after_emitted=3)
+
+        self.assertEqual(len(emitted), 3)
+        for value in [_jpeg_brightness(frame) for frame in emitted]:
+            self.assertGreater(
+                value, 60.0, "검은 프레임이 미리보기에 출력돼 화면이 깜빡인다"
+            )
+
+    def test_sustained_black_frames_are_still_emitted(self) -> None:
+        """검은 프레임이 임계 횟수 이상 지속되면 실제 어두운 장면으로 출력한다."""
+        cap = _FakeCapture(frames=[
+            self._GOOD_FRAME,
+            self._BLACK_FRAME, self._BLACK_FRAME,
+            self._BLACK_FRAME, self._BLACK_FRAME,
+        ])
+
+        emitted, _ = self._run_loop(cap, stop_after_emitted=2)
+
+        self.assertLess(
+            _jpeg_brightness(emitted[-1]), 60.0,
+            "지속된 검은 화면은 미리보기에 반영돼야 한다",
+        )
+
+    def test_qr_is_decoded_after_transient_black_frames(self) -> None:
+        """검은 프레임 사이에 들어온 QR이 누락 없이 디코드된다 (스캔 저하 회귀)."""
+        cap = _FakeCapture(frames=[
+            self._BLACK_FRAME, self._BLACK_FRAME, self._GOOD_FRAME,
+        ])
+
+        emitted: list[str] = []
+        scanner = ScannerView(on_frame_ready=lambda b64: emitted.append(b64))
+        scanner._cap = cap
+        scanner._is_running = True
+        scanner.set_auth_ready(True)
+
+        def _decode(frame):
+            if float(frame.mean()) < 20.0:
+                return []
+            return [SimpleNamespace(data=b"qr://flicker-survivor")]
+
+        with patch("views.scanner_view.decode", side_effect=_decode):
+            deadline = time.monotonic() + 10.0
+            import threading
+            loop_thread = threading.Thread(target=scanner._capture_loop, daemon=True)
+            loop_thread.start()
+            qr = None
+            while time.monotonic() < deadline:
+                qr = scanner.get_next_qr(timeout_sec=0.2)
+                if qr is not None:
+                    break
+            scanner._is_running = False
+            loop_thread.join(timeout=5)
+
+        self.assertEqual(qr, "qr://flicker-survivor")
 
 
 if __name__ == "__main__":

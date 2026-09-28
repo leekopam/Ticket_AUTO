@@ -42,6 +42,10 @@ _STATUS_PROCESSING = "처리 중..."
 _STATUS_CAMERA_READ_FAIL = "카메라 프레임 읽기 실패"
 _STATUS_CAMERA_RECONNECTING = "카메라 재연결 중"
 _CAMERA_REOPEN_COOLDOWN_SEC = 1.0
+# 카메라가 간헐적으로보내는 검은 프레임(ret=True+검은 화면)이 미리보기를
+# 깜빡이게 하는 것을 막기 위한 판정값. 연속 임계 이상이면 실제 어두운 장면으로 출력한다.
+_DARK_PREVIEW_MEAN = 20.0
+_DARK_PREVIEW_EMIT_AFTER = 4
 _CAMERA_READ_RETRY_SEC = 0.05
 _CAMERA_READ_LOG_INTERVAL_SEC = 5.0
 _CAMERA_READ_FAILURE_REOPEN_THRESHOLD = 6
@@ -324,6 +328,7 @@ class ScannerView:
         self._camera_first_frame_timing_logged = True
         self._active_exposure_mode = "default"
         self._applied_exposure_mode = "default"
+        self._consecutive_dark_preview = 0
         self._focus_mode: FocusMode = "manual" if focus_mode == "manual" and manual_focus_value is not None else "auto"
         self._manual_focus_value: float | None = None if manual_focus_value is None else float(manual_focus_value)
         self._focus_capability: FocusCapability | None = None
@@ -648,6 +653,19 @@ class ScannerView:
                         self.set_status_message(_STATUS_PROCESSING)
                 else:
                     self._record_missing_qr_frame()
+
+            # 간헐적 검은 프레임은 미리보기를 갱신하지 않아 이전 프레임을 유지한다.
+            # QR 디코드와 읽기 실패 카운터는 위에서 이미 처리했다.
+            if preview_frame.size and float(preview_frame.mean()) < _DARK_PREVIEW_MEAN:
+                self._consecutive_dark_preview += 1
+            else:
+                self._consecutive_dark_preview = 0
+            suppress = (
+                self._consecutive_dark_preview > 0
+                and self._consecutive_dark_preview < _DARK_PREVIEW_EMIT_AFTER
+            )
+            if suppress:
+                continue
 
             with self._lock:
                 status_message = self._current_status_message_locked()
