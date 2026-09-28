@@ -55,7 +55,10 @@ def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
     page.get_by_text("처리 1건").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
-    page.get_by_text("수령완료").first.wait_for(
+    # 상태 컬럼은 제거됨 — 수령완료 배지가 나오면 안 된다
+    assert page.get_by_text("수령완료").count() == 0
+    # 티켓/상품 이름은 클릭 없이 목록 행에 바로 표시된다
+    page.get_by_text("테스트 상품 x1").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
 

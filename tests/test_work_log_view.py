@@ -90,7 +90,8 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         ops_index = {"A9": {"order_id": "A9", "updated_at": "2026-04-26 12:00:00", "device_id": "phone-1"}}
         state = build_work_log_view_state(orders, ops_index, [])
         self.assertEqual(state.rows[0].order_number, "A9")
-        self.assertEqual(state.rows[0].badge_text, RECONCILE_STATUS)
+        self.assertTrue(state.rows[0].needs_check)
+        self.assertFalse(state.rows[1].needs_check)
         self.assertIn("확인필요 1건", state.count_text)
 
     def test_selection_produces_detail(self) -> None:
@@ -107,6 +108,14 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         self.assertEqual(state.detail.ticket_items, ("입장권 x1",))
         self.assertEqual(state.detail.goods_items, ("아메리카노 x2",))
         self.assertTrue(state.rows[0].is_selected)
+
+    def test_row_summary_shows_actual_item_names(self) -> None:
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00", goods=["입장권 x1", "아메리카노 x2"]),
+        ]
+        state = build_work_log_view_state(orders, {}, {"입장권"})
+        self.assertIn("입장권 x1", state.rows[0].summary_text)
+        self.assertIn("아메리카노 x2", state.rows[0].summary_text)
 
     def test_missing_selection_leaves_detail_hidden(self) -> None:
         orders = [_order("A1", received_at="2026-04-26 10:00:00")]

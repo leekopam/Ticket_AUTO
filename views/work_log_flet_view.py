@@ -29,10 +29,6 @@ from views.dashboard_flet_view import (
 # api_v1_server.RECONCILE_MARKER와 동일 값 — 주문 시트 주문상태에 기록되는 표기.
 RECONCILE_STATUS = "확인필요"
 
-SUCCESS_BADGE_TEXT = "수령완료"
-SUCCESS_BADGE_BG = "#D8F4E3"
-SUCCESS_BADGE_COLOR = "#1E6B45"
-
 
 @dataclass(frozen=True)
 class WorkLogRowState:
@@ -43,12 +39,10 @@ class WorkLogRowState:
     name: str
     phone: str
     time_text: str
-    badge_text: str
-    badge_bgcolor: str
-    badge_color: str
     summary_text: str
     row_bgcolor: str
     is_selected: bool
+    needs_check: bool
 
 
 @dataclass(frozen=True)
@@ -163,23 +157,19 @@ def build_work_log_view_state(
         general_goods, ticket_goods = split_order_goods(order.goods, ticket_names)
         badge_text, badge_bg, badge_color = _resolve_badge(order)
         is_selected = bool(selected_upper) and order.order_number.upper() == selected_upper
-        summary_parts = []
-        if ticket_goods:
-            summary_parts.append(f"티켓 {len(ticket_goods)}종")
-        if general_goods:
-            summary_parts.append(f"상품 {len(general_goods)}종")
+        needs_check = (order.order_status or "").strip() == RECONCILE_STATUS
+        # 목록에서 누르지 않아도 티켓/상품 이름이 바로 보이게 실제 품목명을 나열한다.
+        summary_text = " · ".join(ticket_goods + general_goods) or "-"
         rows.append(WorkLogRowState(
             order_number=order.order_number,
             seq=total - display_index,
             name=order.name,
             phone=order.phone,
             time_text=format_work_time(_work_log_time_key(order, ops_index)),
-            badge_text=badge_text,
-            badge_bgcolor=badge_bg,
-            badge_color=badge_color,
-            summary_text=" · ".join(summary_parts) or "-",
+            summary_text=summary_text,
             row_bgcolor=ACCENT_PRIMARY_SOFT if is_selected else ("#FFFFFF" if display_index % 2 == 0 else "#FAFAFA"),
             is_selected=is_selected,
+            needs_check=needs_check,
         ))
         if is_selected:
             record = ops_index.get(order.order_number.upper())
@@ -240,7 +230,12 @@ def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> f
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            ft.Text(row.name or "-", size=14, weight=ft.FontWeight.W_600, color="#1F1F1F"),
+                            ft.Text(
+                                (row.name or "-") + ("  [확인필요]" if row.needs_check else ""),
+                                size=14,
+                                weight=ft.FontWeight.W_600,
+                                color=STATUS_WARNING_TEXT if row.needs_check else "#1F1F1F",
+                            ),
                             ft.Text(row.summary_text, size=12, color="#6B7787"),
                         ],
                         spacing=2,
@@ -255,10 +250,6 @@ def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> f
                 ft.Container(
                     content=ft.Text(row.time_text, size=12, color="#333333"),
                     width=110,
-                ),
-                ft.Container(
-                    content=_build_badge(row.badge_text, row.badge_bgcolor, row.badge_color),
-                    width=76,
                 ),
             ],
             spacing=10,
@@ -400,7 +391,6 @@ def build_work_log_panel(
                             ),
                             _build_header_cell("연락처", 130),
                             _build_header_cell("처리시간", 110),
-                            _build_header_cell("상태", 76),
                         ],
                         spacing=10,
                     ),
