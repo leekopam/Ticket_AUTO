@@ -165,6 +165,7 @@ def main() -> int:
         port=find_free_port(),
         scan_handler=runtime_manager.process_phone_qr,
         token_store_path=str(runtime_dir / ".runtime" / "api_devices.json"),
+        cert_dir=str(runtime_dir / ".runtime" / "api_cert"),
     )
     run_control_server(
         lambda: current_app["value"], control_port, printer=fake_printer,

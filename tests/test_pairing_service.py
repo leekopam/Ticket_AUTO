@@ -295,3 +295,65 @@ def test_expired_pair_ticket_poll_fails(pairing: PairingService):
     assert pairing.request_pair(pair_ticket=pending.pair_ticket).state == "error"
     # 만료된 티켓은 승인해도 토큰이 나오지 않는다
     assert not pairing.approve(pending.pair_ticket)
+
+
+def test_expired_token_rejected(tmp_path: Path):
+    """만료된 토큰은 차단과 동일하게 인증 거절된다."""
+    pairing = PairingService(str(tmp_path / "d.json"), token_ttl_sec=100.0)
+    token = _approve_one(pairing)
+    assert pairing.device_id_for_token(token)
+    record = next(iter(pairing._records.values()))
+    assert record.token_expires_at > time.time()
+    record.token_expires_at = time.time() - 1
+    assert pairing.device_id_for_token(token) is None
+
+
+def test_activity_extends_token_expiry(tmp_path: Path):
+    """인증 활동이 있을 때마다 토큰 만료가 연장된다 (슬라이딩)."""
+    pairing = PairingService(str(tmp_path / "d.json"), token_ttl_sec=100.0)
+    token = _approve_one(pairing)
+    record = next(iter(pairing._records.values()))
+    record.token_expires_at = time.time() + 50
+    before = record.token_expires_at
+    pairing.record_activity(pairing.device_id_for_token(token))
+    assert record.token_expires_at > before
+
+
+def test_token_expiry_persists_across_reload(tmp_path: Path):
+    """만료 시각은 디스크에 저장돼 재기동 후에도 적용된다."""
+    path = tmp_path / "d.json"
+    pairing = PairingService(str(path), token_ttl_sec=100.0)
+    token = _approve_one(pairing)
+
+    reloaded = PairingService(str(path), token_ttl_sec=100.0)
+    record = next(iter(reloaded._records.values()))
+    assert record.token_expires_at > time.time()
+    record.token_expires_at = time.time() - 1
+    assert reloaded.device_id_for_token(token) is None
+
+
+def test_v2_record_without_expiry_never_expires(tmp_path: Path):
+    """이전 버전이 저장한 레코드(token_expires_at 없음)는 만료 없이 계속 동작한다."""
+    path = tmp_path / "d.json"
+    path.write_text(
+        '{"devices": [{"token_hash": "abc123", "device_name": "old-phone"}]}',
+        encoding="utf-8",
+    )
+    pairing = PairingService(str(path), token_ttl_sec=100.0)
+    record = next(iter(pairing._records.values()))
+    assert record.token_expires_at == 0.0
+
+
+def test_repair_refreshes_expired_token(tmp_path: Path):
+    """재페어링 승인은 새 토큰과 새 만료 시각을 부여한다."""
+    uid = "550e8400-e29b-41d4-a716-446655440000"
+    pairing = PairingService(str(tmp_path / "d.json"), token_ttl_sec=100.0)
+    old_token = _approve_one(pairing, "p1", uid)
+    record = next(iter(pairing._records.values()))
+    record.token_expires_at = time.time() - 1
+    assert pairing.device_id_for_token(old_token) is None
+
+    new_token = _approve_one(pairing, "p1", uid)
+    assert pairing.device_id_for_token(new_token)
+    refreshed = next(iter(pairing._records.values()))
+    assert refreshed.token_expires_at > time.time()

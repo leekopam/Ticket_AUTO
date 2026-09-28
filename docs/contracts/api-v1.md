@@ -42,7 +42,7 @@
 
 - `device_name`: 실 기기 이름 — `Settings.Global.DEVICE_NAME`, 없으면 `Build.MODEL`. 서버는 제어문자를 제거하고 64자로 자른다 (UI 표시용이므로)
 - `device_uid`: 앱이 최초 실행 시 생성한 UUID v4, 보안 저장소에 보관. 재페어링 시 같은 값을내면 PC는 같은 기기로 인식해 별칭·이력을 이어간다 (선택 필드 — 구버전 앱은 생략 가능)
-- `device_token`은 행사 종료까지 유효, PC에서 기기별 폐기 가능
+- `device_token`은 마지막 인증 활동부터 24시간 유효(슬라이딩). 방치·만료 시 401이며 재페어링으로 복구. PC에서 기기별/전체 폐기 가능
 - 토큰은 `flutter_secure_storage`(Keystore)에만 저장. 로그 출력 금지
 
 ### 연결 상태 (presence)

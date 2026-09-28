@@ -27,6 +27,7 @@ from project_paths import (
     ensure_managed_data_file,
     resolve_project_path,
 )
+from services.device_presence import PRESENCE_ONLINE, presence_state
 from services.excel_service import ExcelService
 from services.phone_link_service import PhoneLinkService
 from services.receipt_print_pipeline import print_order_receipt, render_receipt_preview_base64
@@ -2676,6 +2677,20 @@ class DashboardFletView:
             icon=ICONS.SMARTPHONE_ROUNDED,
             key="dashboard_phone_link_button",
         )
+        btn_phone_server_stop = ft.OutlinedButton(
+            "서버 중지",
+            icon=ICONS.STOP_CIRCLE_ROUNDED,
+            key="dashboard_phone_server_stop_button",
+        )
+        btn_cert_regen = ft.OutlinedButton(
+            "인증서 재생성",
+            icon=ICONS.VPN_KEY_ROUNDED,
+            key="dashboard_cert_regen_button",
+        )
+        btn_revoke_all = ft.TextButton(
+            "전체 차단",
+            key="dashboard_revoke_all_button",
+        )
         phone_link_service = self._phone_link_service or PhoneLinkService(
             scan_handler=self._runtime_manager.process_phone_qr
         )
@@ -2773,7 +2788,12 @@ class DashboardFletView:
             build_network_view_state,
         )
 
-        network_controls = build_network_panel(link_button=btn_phone_link)
+        network_controls = build_network_panel(
+            link_button=btn_phone_link,
+            stop_button=btn_phone_server_stop,
+            regen_cert_button=btn_cert_regen,
+            revoke_all_button=btn_revoke_all,
+        )
         network_panel = network_controls["panel"]
         network_selection: dict[str, str | None] = {"value": None}
         network_ops_cache: dict[str, list[dict[str, str]]] = {"ops": []}
@@ -2986,6 +3006,112 @@ class DashboardFletView:
                 call_page_from_thread(page, _open_dialog, search_refresh_stop)
 
             threading.Thread(target=_start_and_open, daemon=True).start()
+
+        def _confirm_network_action(
+            *, title: str, body: str, confirm_label: str, danger: bool, on_confirm: Callable[[], None]
+        ) -> None:
+            """네트워크 관리의 파괴적 동작 확인 다이얼로그."""
+            def _ok(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                on_confirm()
+
+            def _cancel(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text(title),
+                content=ft.Text(body),
+                actions=[
+                    ft.TextButton("취소", on_click=_cancel),
+                    ft.FilledButton(
+                        confirm_label,
+                        on_click=_ok,
+                        style=(
+                            ft.ButtonStyle(bgcolor="#A12622", color="#FFFFFF")
+                            if danger
+                            else None
+                        ),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_server_stop(_e: ft.ControlEvent) -> None:
+            online = sum(
+                1
+                for d in phone_link_service.list_devices()
+                if presence_state(d, time.time()) == PRESENCE_ONLINE
+            )
+            detail = f"현재 연결된 기기가 {online}대 있습니다. " if online else ""
+            _confirm_network_action(
+                title="서버 중지",
+                body=f"{detail}서버를 중지하면 모든 폰의 연결과 페어링이 끊깁니다.",
+                confirm_label="중지",
+                danger=False,
+                on_confirm=lambda: (
+                    phone_link_service.stop(),
+                    refresh_network_panel(push_update=False),
+                    _network_snackbar("휴대폰 연결 서버를 중지했습니다.", success=True),
+                ),
+            )
+
+        def _on_cert_regen(_e: ft.ControlEvent) -> None:
+            def _work() -> None:
+                try:
+                    phone_link_service.regenerate_cert()
+                except Exception:
+                    logger.warning("인증서 재생성 실패", exc_info=True)
+                    call_page_from_thread(
+                        page,
+                        lambda: _show_dashboard_warning("인증서 재생성에 실패했습니다."),
+                        search_refresh_stop,
+                    )
+                    return
+
+                def _done() -> None:
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar(
+                        "인증서를 재생성했습니다. 모든 폰은 QR 재스캔으로 다시 페어링해야 합니다.",
+                        success=True,
+                    )
+
+                call_page_from_thread(page, _done, search_refresh_stop)
+
+            _confirm_network_action(
+                title="인증서 재생성",
+                body=(
+                    "인증서를 재생성하면 지문이 바뀌어 모든 폰의 연결이 끊기고, "
+                    "연결 QR을 다시 스캔해 재페어링해야 합니다."
+                ),
+                confirm_label="재생성",
+                danger=True,
+                on_confirm=lambda: threading.Thread(target=_work, daemon=True).start(),
+            )
+
+        def _on_revoke_all(_e: ft.ControlEvent) -> None:
+            active = [d for d in phone_link_service.list_devices() if not d.revoked]
+            if not active:
+                _network_snackbar("차단할 기기가 없습니다.", success=False)
+                return
+            _confirm_network_action(
+                title="전체 기기 차단",
+                body=(
+                    f"{len(active)}대 기기의 접근을 모두 차단합니다. "
+                    "기록과 이름은 유지되며 다시 쓰려면 재페어링이 필요합니다."
+                ),
+                confirm_label="전체 차단",
+                danger=True,
+                on_confirm=lambda: (
+                    phone_link_service.revoke_all(),
+                    refresh_network_panel(push_update=False),
+                    _network_snackbar(
+                        f"{len(active)}대 기기를 차단했습니다.", success=True
+                    ),
+                ),
+            )
 
         def refresh_print_controls(*, search_blocked: bool = False) -> None:
             btn_buyer_print.disabled = compute_print_button_disabled(
@@ -3378,6 +3504,9 @@ class DashboardFletView:
         btn_relogin.on_click = on_relogin
         btn_open_witchform.on_click = _on_open_witchform
         btn_phone_link.on_click = _on_phone_link
+        btn_phone_server_stop.on_click = _on_server_stop
+        btn_cert_regen.on_click = _on_cert_regen
+        btn_revoke_all.on_click = _on_revoke_all
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_work_tab.on_click = lambda _: set_tab("work")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")

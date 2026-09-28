@@ -288,10 +288,16 @@ def _build_device_row(
     )
 
 
-def build_network_panel(link_button: ft.Control | None = None) -> dict[str, ft.Control]:
+def build_network_panel(
+    link_button: ft.Control | None = None,
+    stop_button: ft.Control | None = None,
+    regen_cert_button: ft.Control | None = None,
+    revoke_all_button: ft.Control | None = None,
+) -> dict[str, ft.Control]:
     """네트워크 관리 패널 컨트롤 묶음을 만든다. 내용은 apply_*로 채운다.
 
-    link_button: 서버 상태 카드 오른쪽에 놓을 휴대폰 연결 버튼 (호출부가 주입).
+    link/stop/regen_cert_button: 서버 상태 카드 오른쪽에 놓는 버튼 (호출부가 주입).
+    revoke_all_button: "등록된 휴대폰" 제목 줄 오른쪽에 놓는 버튼.
     """
     server_status_text = ft.Text("", size=13, color="#333333")
     counts_text = ft.Text("", size=12, color="#6B7787")
@@ -325,7 +331,19 @@ def build_network_panel(link_button: ft.Control | None = None) -> dict[str, ft.C
                 ),
                 ft.Container(
                     content=ft.Row(
-                        controls=[server_status_text, *([link_button] if link_button else [])],
+                        controls=[
+                            server_status_text,
+                            ft.Row(
+                                controls=[
+                                    b
+                                    for b in (link_button, stop_button, regen_cert_button)
+                                    if b is not None
+                                ],
+                                spacing=8,
+                                tight=True,
+                                wrap=True,
+                            ),
+                        ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
@@ -334,7 +352,13 @@ def build_network_panel(link_button: ft.Control | None = None) -> dict[str, ft.C
                     padding=12,
                 ),
                 pending_section,
-                ft.Text("등록된 휴대폰", size=14, weight=ft.FontWeight.W_600),
+                ft.Row(
+                    controls=[
+                        ft.Text("등록된 휴대폰", size=14, weight=ft.FontWeight.W_600),
+                        *([revoke_all_button] if revoke_all_button else []),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
                 ft.Container(
                     content=device_list,
                     bgcolor="#FFFFFF",

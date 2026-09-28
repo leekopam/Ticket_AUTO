@@ -36,6 +36,7 @@ def service(tmp_path: Path):
         port=_free_port(),
         data_path=data,
         token_store_path=str(tmp_path / "devices.json"),
+        cert_dir=str(tmp_path / "api_cert"),
     )
     yield svc
     svc.stop()
@@ -123,3 +124,46 @@ def test_forget_device_removes_record(service):
     record_id = service.list_devices()[0].record_id
     assert service.forget_device(record_id)
     assert service.list_devices() == []
+
+
+def test_regenerate_cert_rotates_fingerprint_and_keeps_serving(service):
+    """인증서 재생성은 지문을 바꾸고 서버를 같은 포트로 재기동한다."""
+    payload = service.start()
+    old_fp = payload["cert_sha256"]
+    addr = f"https://127.0.0.1:{payload['addr'].rsplit(':', 1)[1]}"
+
+    new_payload = service.regenerate_cert()
+    assert service.running
+    assert new_payload is not None
+    assert new_payload["cert_sha256"] != old_fp
+    assert new_payload["addr"] == payload["addr"]
+    # 새 지문으로도 실제 TLS 요청이 동작한다
+    res = _https_post(addr, "/v1/pair", {"join_code": "000000"})
+    assert res["error"]["code"] == "EXPIRED_JOIN_CODE"
+
+
+def test_regenerate_cert_while_stopped(service):
+    """서버가 꺼져 있으면 인증서 파일만 지우고 다음 기동에서 새 인증서가 만들어진다."""
+    from services.cert_service import cert_sha256_fingerprint
+
+    payload = service.start()
+    old_fp = payload["cert_sha256"]
+    service.stop()
+    assert service.regenerate_cert() is None
+    assert not service.running
+
+    new_payload = service.start()
+    assert new_payload["cert_sha256"] != old_fp
+
+
+def test_revoke_all_blocks_every_token(service):
+    """전체 차단은 모든 토큰을 무효화하고 레코드는 보존한다."""
+    payload = service.start()
+    addr = f"https://127.0.0.1:{payload['addr'].rsplit(':', 1)[1]}"
+    for name in ("폰A", "폰B"):
+        service.reissue_join_code()
+        code = service.payload["join_code"]
+        pending = _https_post(addr, "/v1/pair", {"join_code": code, "device_name": name})
+        service.approve(pending["pair_ticket"])
+    assert service.revoke_all() == 2
+    assert all(d.revoked for d in service.list_devices())

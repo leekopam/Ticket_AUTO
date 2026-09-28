@@ -31,18 +31,21 @@
 | 3 | `/v1/scan` 무제한 스레드 → 폭주 시 PC 마비 | `BoundedSemaphore(4)`, 초과 시 `SERVER_BUSY`(429) | `api_v1_server.py` |
 | 4 | 승인 UI가 새 기기/재페어링 구분 불가 → `device_uid` 위장 승인 못 알아봄 | `PendingApproval.known_device` + "(등록된 기기 재페어링)" 표시 | `pairing_service.py`, 두 뷰 |
 | 5 | 승인/거절/차단/잠금 이벤트 감사 로그 없음 | `logger.info` 추가 (토큰 원문 미기록) | `pairing_service.py` |
+| 6 | 토큰 무기한 유효 — 분실 폰이 계속 접근 가능 | 슬라이딩 만료 24h (마지막 인증 활동부터 연장), `revoke_all` UI 노출 | `pairing_service.py`, `network_management_view.py` |
+| 7 | 서버 중지 UI가 다이얼로그 안쪽에만 있어 발견 어려움 | 네트워크 탭 서버 카드에 "서버 중지" 버튼 + 확인 다이얼로그 | `network_management_view.py`, `dashboard_flet_view.py` |
+| 8 | 인증서/개인키 교체가 수동 파일 삭제 | 네트워크 탭 "인증서 재생성" 버튼 (서버 재기동 + 새 지문 QR) | `cert_service.py`, `phone_link_service.py` |
 
 ## 4. 잔여 위험 (수용 + 운영 지침)
 
 | 위험 | 수준 | 이유/대응 |
 |---|---|---|
-| 토큰 무기한 유효 | 중 | 행사 당일 도구 특성상 세션 토큰 도입 비용 > 이득. 폰 분실·이탈 시 네트워크 관리 탭 "차단"으로 즉시 무효화 가능 |
+| ~~토큰 무기한 유효~~ → 해소 | — | 슬라이딩 24h 만료 + 탭에서 개별/전체 차단 가능 |
 | 참가 QR 어깨너머 촬영 → 코드 선점 | 낮음~중 | 승인 게이트가 토큰 발급을 막음. QR 화면은 필요할 때만 열고, 의심 시 "QR 재발급"으로 코드 무효화 |
 | `device_uid` 자기선언 → 다른 폰 uid 위장 시 레코드 병합 | 낮음 | uid는 UUID v4라 추측 불가. 유출 + QR + 승인이 모두 필요. 재페어링 표시로 운영자가 인지 가능 |
 | 0.0.0.0 바인드 → LAN 전체 노출 | 낮음 | 폰 연결에 필요. 인증서 핀+토큰+승인으로 인증 없는 접근은 거절됨. 공용망에서는 PC 방화벽으로 인바운드 제한 권장 |
 | 서버 개인키 `.runtime/api_cert/server.key` 평문 | 낮음 | PC 파일 접근권 탈취 시 MITM 가능. 대응: `.runtime/api_cert/` 삭제 후 재기동하면 지문이 바뀌어 전 기기 재페어링 필요 |
-| 인증서 370일 고정·로테이션 절차 없음 | 낮음 | 재생성 = 재페어링 강제라 안전한 실패 방향. 만료 임박 시 위와 동일 절차 |
-| `티켓 확인 중지` 후에도 API 서버 유지 | 설계 | 기기 목록/별칭 조회와 폰 재접속을 위해 의도된 동작. 연결 다이얼로그 "서버 중지"로 명시 종료 가능, 탭에 주소 표시됨 |
+| ~~인증서 로테이션 절차 없음~~ → 해소 | — | 네트워크 탭 "인증서 재생성" 버튼 (전체 재페어링 필요 경고 포함) |
+| `티켓 확인 중지` 후에도 API 서버 유지 | 설계 | 기기 목록/별칭 조회와 폰 재접속을 위해 의도된 동작. 탭 "서버 중지" 버튼으로 명시 종료 가능, 주소 표시됨 |
 
 ## 5. 테스트 커버리지
 
@@ -57,10 +60,14 @@
 | 잠금/만료/마이그레이션/손상 파일/별칭/재페어링 병합 | `tests/test_pairing_service.py` |
 | 재페어링 표시(known_device) | `tests/test_pairing_service.py`, 뷰 단위 테스트 |
 | 탭 UI(승인·이름 변경·처리 건수) + 티켓 시작 시 서버 자동 기동 | `tests/e2e_ui/test_network_tab_ui.py` |
+| 만료 토큰 401, 슬라이딩 연장, 재페어링 복구, 영속화 | `test_pairing_service.py` 5건 + e2e `test_expired_token_rejected_over_tls` |
+| 인증서 재생성(지문 교체 + 재기동) | `test_phone_link_service.py` 2건 |
+| 전체 차단 | `test_phone_link_service.py::test_revoke_all_blocks_every_token` |
+| 탭의 서버 중지 버튼 + 확인 다이얼로그 | `test_network_tab_ui.py::test_network_tab_server_stop_button` |
 
 ## 6. 미검증 항목 (수동 확인 필요)
 
 - 실기기: PC↔Android LAN 페어링, 백그라운드 45초 끊김 판정, 재연결 복원
 - PC 방화벽이 `18765` 인바운드를 LAN 범위로 제한했는지 행사 환경에서 확인
 - 공용망(카페/행사장 게스트 Wi-Fi)에서의 실제 노출 범위
-- 인증서 만료(370일) 전 교체 절차 리허설
+- 인증서 만료(370일) 전 "인증서 재생성" 버튼 동작 리허설

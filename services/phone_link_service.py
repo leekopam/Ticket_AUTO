@@ -18,7 +18,7 @@ from services.api_v1_server import (
     create_api_v1_app,
     create_server,
 )
-from services.cert_service import detect_lan_ips
+from services.cert_service import detect_lan_ips, remove_server_cert
 from services.excel_service import ExcelService
 from services.pairing_service import DeviceInfo, PairingService, PendingApproval
 
@@ -34,10 +34,12 @@ class PhoneLinkService:
         data_path: Path | None = None,
         scan_handler: Callable[[str], dict[str, str]] | None = None,
         token_store_path: str | None = None,
+        cert_dir: str | None = None,
     ):
         self._port = port
         self._data_path = data_path
         self._scan_handler = scan_handler
+        self._cert_dir = cert_dir
         self._lock = threading.RLock()
         self._server: LanApiServer | None = None
         # 기기 레지스트리는 서버 수명과 무관하게 상시 유지한다 (네트워크 관리 탭이 조회)
@@ -65,6 +67,7 @@ class PhoneLinkService:
                 port=self._port,
                 pairing=self._pairing,
                 scan_handler=self._scan_handler,
+                cert_dir=self._cert_dir,
             )
             join_code = self._pairing.issue_join_code()
             generation, _ = DatasetTracker(excel).current()
@@ -111,6 +114,28 @@ class PhoneLinkService:
 
     def revoke_device(self, record_id: str) -> bool:
         return self._pairing.revoke_device(record_id)
+
+    def revoke_all(self) -> int:
+        """모든 기기 토큰을 폐기한다 — 행사 종료 정리용. 레코드는 보존한다."""
+        return self._pairing.revoke_all()
+
+    def regenerate_cert(self) -> dict | None:
+        """인증서·개인키를 재생성한다.
+
+        지문이 바뀌므로 모든 폰의 재페어링이 필요하다.
+        서버 실행 중이면 새 인증서로 재기동하고 새 페이로드를 반환한다.
+        꺼져 있으면 파일만 지우고 None을 반환한다 (다음 start()에서 생성).
+        """
+        with self._lock:
+            running = self._server is not None
+            if running:
+                self._server.stop()
+                self._server = None
+                self._payload = None
+            remove_server_cert(self._cert_dir)
+            if not running:
+                return None
+            return self.start()
 
     def forget_device(self, record_id: str) -> bool:
         return self._pairing.forget_device(record_id)

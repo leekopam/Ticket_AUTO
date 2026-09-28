@@ -239,3 +239,23 @@ def test_malformed_and_oversized_requests_over_tls(link):
         conn2.close()
     finally:
         conn.close()
+
+
+def test_expired_token_rejected_over_tls(link):
+    """만료된 토큰은 실 TLS 경로에서 401을 받고 재페어링으로 복구된다."""
+    port, fingerprint, pairing = link
+    code = pairing.issue_join_code()
+    _, pending = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": code, "device_name": "staff-phone"},
+    )
+    assert pairing.approve(pending["pair_ticket"])
+    token = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair", body={"pair_ticket": pending["pair_ticket"]}
+    )[1]["device_token"]
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 200
+
+    # 토큰 만료 시각을 과거로 이동 (레지스트리 내부 상태 조작)
+    record = next(iter(pairing._records.values()))
+    record.token_expires_at = time.time() - 1
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 401

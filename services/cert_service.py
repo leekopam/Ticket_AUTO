@@ -67,6 +67,13 @@ def ensure_server_cert(
     )
 
 
+def remove_server_cert(cert_dir: str | None = None) -> None:
+    """인증서·개인키를 삭제한다 — 다음 ensure_server_cert 호출 시 새로 생성된다."""
+    directory = resolve_project_path(cert_dir or CERT_DIR)
+    for name in (_CERT_FILE, _KEY_FILE):
+        (directory / name).unlink(missing_ok=True)
+
+
 def cert_sha256_fingerprint(cert_path: str | Path) -> str:
     """인증서 DER의 SHA-256 지문을 'AA:BB:...' 형식으로 반환한다."""
     data = Path(cert_path).read_bytes()

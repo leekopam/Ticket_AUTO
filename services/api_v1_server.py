@@ -628,13 +628,14 @@ def create_server(
     pairing: PairingService | None = None,
     auth_status_provider: Callable[[], bool] | None = None,
     scan_handler: Callable[[str], dict[str, str]] | None = None,
+    cert_dir: str | None = None,
 ) -> tuple[LanApiServer, PairingService, str]:
     """서버+페어링 서비스+인증서 지문을 준비한다 (Flet 앱/단독 실행 공용)."""
     from services.cert_service import ensure_server_cert
 
     excel = excel or ExcelService()
     pairing = pairing or PairingService()
-    cert = ensure_server_cert()
+    cert = ensure_server_cert(cert_dir=cert_dir)
     app = create_api_v1_app(excel, pairing, auth_status_provider=auth_status_provider, scan_handler=scan_handler)
     server = LanApiServer(app, host, port, cert.cert_path, cert.key_path)
     return server, pairing, cert.sha256_fingerprint

@@ -200,3 +200,23 @@ def test_network_tab_processed_count_and_processor_name(page, flet_server):
         )
     finally:
         create_test_workbook(data_path)
+
+
+def test_network_tab_server_stop_button(page, flet_server):
+    """네트워크 탭의 서버 중지 버튼이 LAN API 서버를 내린다 (확인 다이얼로그 포함)."""
+    control_url = flet_server["control_url"]
+
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    _open_network_tab(page)
+    page.get_by_text("서버 주소: https://").first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    wait_for_button(page, "서버 중지", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "중지", timeout_ms=_TIMEOUT_MS).click()  # 확인 다이얼로그
+    page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    # 세션 공유 서버라 뒤 테스트를 위해 다시 기동해 둔다
+    send_control_command(control_url, {"cmd": "phone_link_start"})

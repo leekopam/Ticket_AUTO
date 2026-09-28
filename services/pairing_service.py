@@ -42,6 +42,8 @@ ALIAS_MAX_LENGTH = 20
 REPORTED_NAME_MAX_LENGTH = 64
 # last_seen 디스크 반영 간격 — 매 요청 쓰기는 불필요한 I/O라 스로틀한다
 ACTIVITY_SAVE_INTERVAL_SEC = 60.0
+# 토큰 슬라이딩 만료 — 마지막 인증 활동부터 24시간. 방치·분실 폰이 계속 유효하지 않게 한다
+TOKEN_TTL_SEC = 24 * 3600.0
 _DEVICE_UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -85,6 +87,7 @@ class _DeviceRecord:
 
     record_id: str  # "uid:<device_uid>" 또는 uid가 없으면 "hash:<token_hash>"
     token_hash: str = ""
+    token_expires_at: float = 0.0  # 0 = 만료 없음 (이전 버전에서 발급된 토큰)
     previous_token_hashes: list[str] = field(default_factory=list)
     device_uid: str = ""
     reported_name: str = ""
@@ -127,8 +130,9 @@ def _now_str() -> str:
 class PairingService:
     """페어링 코드/승인/토큰 수명주기와 기기 레지스트리를 관리한다 (스레드 안전)."""
 
-    def __init__(self, token_store_path: str | None = None):
+    def __init__(self, token_store_path: str | None = None, *, token_ttl_sec: float = TOKEN_TTL_SEC):
         self._lock = threading.RLock()
+        self._token_ttl_sec = float(token_ttl_sec)
         self._join_codes: dict[str, _JoinCode] = {}
         self._tickets: dict[str, _PairTicket] = {}
         self._consecutive_failures = 0
@@ -263,6 +267,9 @@ class PairingService:
                 if record.token_hash and record.token_hash != token_hash:
                     record.previous_token_hashes.append(record.token_hash)
             record.token_hash = token_hash
+            record.token_expires_at = (
+                time.time() + self._token_ttl_sec if self._token_ttl_sec > 0 else 0.0
+            )
             record.device_uid = ticket.device_uid or record.device_uid
             record.reported_name = ticket.device_name or record.reported_name
             record.last_seen_at = now
@@ -290,11 +297,14 @@ class PairingService:
     # ------------------------------------------------------------------
 
     def _find_by_token_hash(self, token_hash: str) -> _DeviceRecord | None:
+        now = time.time()
         for record in self._records.values():
             # 상수 시간 비교 — 토큰 해시 부분 일치 정보 유출 방지
             if not record.revoked and hmac.compare_digest(
                 record.token_hash, token_hash
             ):
+                if record.token_expires_at and record.token_expires_at <= now:
+                    return None  # 만료된 토큰은 차단과 동일하게 거절
                 return record
         return None
 
@@ -335,6 +345,9 @@ class PairingService:
                 return
             record.last_seen_at = _now_str()
             now = time.time()
+            # 슬라이딩 만료 — 활동 중인 기기의 토큰 수명을 연장한다
+            if self._token_ttl_sec > 0:
+                record.token_expires_at = now + self._token_ttl_sec
             if force_save or now - self._last_persisted >= ACTIVITY_SAVE_INTERVAL_SEC:
                 try:
                     self._save_tokens(self._records)
@@ -507,6 +520,7 @@ class PairingService:
                 {
                     # v1 호환: 구 버전 로더는 token_hash/device_name만 읽는다
                     "token_hash": record.token_hash,
+                    "token_expires_at": record.token_expires_at,
                     "device_name": record.reported_name,
                     "device_uid": record.device_uid,
                     "previous_token_hashes": list(record.previous_token_hashes),
@@ -527,6 +541,7 @@ class PairingService:
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             os.replace(temp_path, self._token_path)
+            self._last_persisted = time.time()
         finally:
             temp_path.unlink(missing_ok=True)
 
@@ -552,9 +567,14 @@ class PairingService:
             if not _DEVICE_UID_PATTERN.match(device_uid):
                 device_uid = ""
             record_id = f"uid:{device_uid}" if device_uid else f"hash:{token_hash}"
+            try:
+                token_expires_at = float(item.get("token_expires_at") or 0.0)
+            except (TypeError, ValueError):
+                token_expires_at = 0.0
             record = _DeviceRecord(
                 record_id=record_id,
                 token_hash=token_hash,
+                token_expires_at=token_expires_at,
                 previous_token_hashes=[
                     str(v) for v in item.get("previous_token_hashes", []) if str(v)
                 ],
