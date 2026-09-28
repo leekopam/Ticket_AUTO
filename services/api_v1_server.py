@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 from typing_extensions import Annotated
 
+from services.device_presence import display_names, parse_seen_at, presence_state, signal_level
 from services.excel_service import ExcelService
 from services.pairing_service import PairingService
 
@@ -364,6 +365,33 @@ def create_api_v1_app(
         """
         pairing.mark_disconnected(device)
         return {"ok": True}
+
+    @app.get("/v1/devices")
+    def list_paired_devices(device: str = Depends(require_device)):
+        """페어링된 전체 기기의 연결 상태·신호를 반환한다 (모바일 모니터용).
+
+        인메모리 레지스트리만 읽으므로 xlsx 재파싱 없이 폴링 가능.
+        노출은 이름/상태/시각뿐 — device_uid·토큰 해시·주문 정보는 포함하지 않는다.
+        """
+        now = time.time()
+        devices = pairing.list_devices()
+        names = display_names(list(devices))
+        items = []
+        for info in devices:
+            seen = parse_seen_at(info.last_seen_at)
+            presence = presence_state(info, now)
+            items.append(
+                {
+                    "id": info.record_id,
+                    "name": names.get(id(info)) or info.reported_name or "휴대폰",
+                    "self": device in info.device_ids,
+                    "presence": presence,
+                    # 차단된 기기만 신호 0 — offline도 45~120초 구간은 "불안정"으로 구분한다
+                    "signal_level": 0 if presence == "revoked" else signal_level(info.last_seen_at, now),
+                    "last_seen_sec": max(0, int(now - seen)) if seen is not None else -1,
+                }
+            )
+        return {"devices": items}
 
     # ------------------------------ orders ------------------------------
 

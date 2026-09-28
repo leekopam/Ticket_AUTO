@@ -11,6 +11,11 @@ from typing import Callable, Mapping, Protocol
 # 하트비트 15초의 3회 미스 허용치
 ONLINE_THRESHOLD_SEC = 45.0
 
+# 연결 신호 단계 경계(초) — 하트비트 주기 대비 마지막 관측 경과시간
+SIGNAL_GOOD_SEC = 20.0
+SIGNAL_FAIR_SEC = ONLINE_THRESHOLD_SEC
+SIGNAL_STALE_SEC = 120.0
+
 PRESENCE_ONLINE = "online"
 PRESENCE_OFFLINE = "offline"
 PRESENCE_REVOKED = "revoked"
@@ -53,6 +58,24 @@ def presence_state(
     if seen is not None and now - seen < threshold_sec:
         return PRESENCE_ONLINE
     return PRESENCE_OFFLINE
+
+
+def signal_level(last_seen_at: str, now: float) -> int:
+    """연결 신호 0~3단계 — 하트비트(15초) 대비 마지막 관측 경과시간 기준.
+
+    3=양호(<20초), 2=보통(<45초, 연결됨 판정과 동일 경계), 1=불안정(<120초), 0=끊김.
+    """
+    seen = parse_seen_at(last_seen_at)
+    if seen is None:
+        return 0
+    age = now - seen
+    if age < SIGNAL_GOOD_SEC:
+        return 3
+    if age < SIGNAL_FAIR_SEC:
+        return 2
+    if age < SIGNAL_STALE_SEC:
+        return 1
+    return 0
 
 
 def display_name(device: DeviceLike, duplicate_ordinal: int | None = None) -> str:

@@ -402,6 +402,61 @@ def test_disconnect_requires_auth(env):
     assert env["client"].post("/v1/disconnect").status_code == 401
 
 
+def test_devices_requires_auth(env):
+    assert env["client"].get("/v1/devices").status_code == 401
+
+
+def test_devices_lists_self_and_peers_with_signal(env):
+    """모바일 모니터용 기기 목록 — self 표시, presence, 신호 단계, 경과시간."""
+    token_a = _pair_device(env)
+    token_b = _pair_device(env)
+    res = env["client"].get("/v1/devices", headers=_auth(token_a))
+    assert res.status_code == 200
+    devices = res.json()["devices"]
+    assert len(devices) == 2
+
+    self_dev = next(d for d in devices if d["self"])
+    peer_dev = next(d for d in devices if not d["self"])
+    assert self_dev["id"] != peer_dev["id"]
+    assert self_dev["presence"] == "online"
+    assert self_dev["signal_level"] == 3  # 방금 인증 활동 → 양호
+    assert 0 <= self_dev["last_seen_sec"] <= 20
+    # 노출 필드는 이름/상태/시각뿐 — 내부 식별자는 보내지 않는다
+    assert "device_uid" not in self_dev
+    assert "token" not in self_dev
+
+
+def test_devices_offline_peer_shows_low_signal(env):
+    """끊긴 기기는 presence=offline + 낮은 신호 단계로 표시된다."""
+    token = _pair_device(env)
+    env["client"].get("/v1/status", headers=_auth(token))
+    env["client"].post("/v1/disconnect", headers=_auth(token))
+
+    res = env["client"].get("/v1/devices", headers=_auth(token))
+    # disconnect 직후 본 요청이 record_activity로 last_seen을 다시 채우므로
+    # 자기 자신은 online 복귀 — 대신 피어 기준으로 보려면 두 번째 기기로 확인
+    token_b = _pair_device(env)
+    env["client"].post("/v1/disconnect", headers=_auth(token_b))
+    devices = env["client"].get("/v1/devices", headers=_auth(token)).json()["devices"]
+    peer = next(d for d in devices if not d["self"])
+    assert peer["presence"] == "offline"
+    assert peer["signal_level"] == 0
+    assert peer["last_seen_sec"] == -1
+
+
+def test_devices_revoked_shows_revoked_presence(env):
+    token_a = _pair_device(env)
+    token_b = _pair_device(env)
+    pairing = env["pairing"]
+    device_b = pairing.record_for_device_id(pairing.device_id_for_token(token_b))
+    assert pairing.revoke_device(device_b.record_id)
+
+    devices = env["client"].get("/v1/devices", headers=_auth(token_a)).json()["devices"]
+    revoked = next(d for d in devices if d["id"] == device_b.record_id)
+    assert revoked["presence"] == "revoked"
+    assert revoked["signal_level"] == 0
+
+
 def _mark_received(env, order_number: str) -> None:
     assert env["excel"].mark_order_received(order_number, "2026-09-28 12:00:00")
 
