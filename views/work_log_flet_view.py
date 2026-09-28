@@ -15,6 +15,7 @@ from typing import Callable
 import flet as ft
 
 from models.order_model import Order
+from services.device_presence import operator_label
 from views.dashboard_flet_view import (
     ACCENT_PRIMARY_BORDER,
     ACCENT_PRIMARY_DEEP,
@@ -143,6 +144,7 @@ def build_work_log_view_state(
     ticket_names: list[str] | set[str],
     *,
     selected_order_number: str | None = None,
+    device_lookup: Callable[[str], object] | None = None,
 ) -> WorkLogViewState:
     """주문 목록에서 티켓 업무 탭의 표시 상태를 계산한다. 최신 건이 맨 위."""
     candidates = filter_work_log_orders(orders)
@@ -180,13 +182,18 @@ def build_work_log_view_state(
         ))
         if is_selected:
             record = ops_index.get(order.order_number.upper())
+            device_text = operator_label(
+                record,
+                device_lookup or (lambda _d: None),
+                order_received=order.is_received,
+            )
             detail = WorkLogDetailState(
                 order_number=order.order_number,
                 name=order.name,
                 phone=order.phone,
                 seat=order.seat or "-",
                 time_text=format_work_time(_work_log_time_key(order, ops_index)),
-                device_text=str(record.get("device_id") or "").strip() if record else "",
+                device_text=device_text,
                 badge_text=badge_text,
                 badge_bgcolor=badge_bg,
                 badge_color=badge_color,

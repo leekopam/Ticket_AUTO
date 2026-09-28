@@ -1,6 +1,7 @@
 """티켓 업무 탭 뷰 상태 계산 단위 테스트."""
 
 import unittest
+from types import SimpleNamespace
 
 from models.order_model import Order
 from views.work_log_flet_view import (
@@ -108,11 +109,16 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
             _order("A1", received_at="2026-04-26 10:00:00", goods=["입장권 x1", "아메리카노 x2"]),
         ]
         ops_index = {"A1": {"order_id": "A1", "device_id": "phone-7", "updated_at": "2026-04-26 10:00:05"}}
+        info = SimpleNamespace(
+            reported_name="staff-phone", custom_name="입구1번", last_seen_at="", revoked=False
+        )
         state = build_work_log_view_state(
             orders, ops_index, {"입장권"}, selected_order_number="A1",
+            device_lookup=lambda _device_id: info,
         )
         self.assertIsNotNone(state.detail)
-        self.assertEqual(state.detail.device_text, "phone-7")
+        # 레지스트리 별칭이 해시/보고 이름보다 우선한다
+        self.assertEqual(state.detail.device_text, "입구1번")
         self.assertEqual(state.detail.ticket_items, ("입장권 x1",))
         self.assertEqual(state.detail.goods_items, ("아메리카노 x2",))
         self.assertTrue(state.rows[0].is_selected)
@@ -122,6 +128,22 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         state = build_work_log_view_state(orders, {}, [], selected_order_number="ZZ9")
         self.assertIsNone(state.detail)
         self.assertFalse(state.rows[0].is_selected)
+
+    def test_pc_processed_order_shows_pc_label(self) -> None:
+        """_operations에 없는 PC 본체 처리 건은 처리 단말이 'PC'로 표시된다."""
+        orders = [_order("A1", received_at="2026-04-26 10:00:00")]
+        state = build_work_log_view_state(
+            orders, {}, [], selected_order_number="A1", device_lookup=lambda _d: None
+        )
+        self.assertEqual(state.detail.device_text, "PC")
+
+    def test_unknown_device_shows_short_hash(self) -> None:
+        orders = [_order("A1", received_at="2026-04-26 10:00:00")]
+        ops_index = {"A1": {"order_id": "A1", "device_id": "abcdef0123", "device_name": ""}}
+        state = build_work_log_view_state(
+            orders, ops_index, [], selected_order_number="A1", device_lookup=lambda _d: None
+        )
+        self.assertIn("abcdef", state.detail.device_text)
 
     def test_empty_state_message(self) -> None:
         state = build_work_log_view_state([], {}, [])
