@@ -58,7 +58,7 @@
 |---|---|---|
 | GET | `/v1/status` | `server_id`, `dataset_generation`, `data_version`, 윗치폼 로그인 여부, 처리 중 건수 |
 | POST | `/v1/disconnect` | 명시적 연결 해제 통지 → PC presence를 즉시 끊김으로. 멱등·토큰 유효 유지 |
-| GET | `/v1/devices` | 페어링된 전체 기기의 연결 상태 목록 — 모바일 연결 모니터용 |
+| GET | `/v1/devices` | 호출 기기 자신의 연결 상태·신호 — 모바일 상태 표시용 (타 기기는 미노출, 전체 현황은 PC 네트워크 관리 탭) |
 | GET | `/v1/orders/{order_id}` | 주문 상세 + 현재 상태 |
 | GET | `/v1/orders?since={data_version}` | 변경분 조회(ETag 대응). 전체 재조회는 since 생략 |
 | GET | `/v1/orders/search?q=` | 이름/주문번호 검색 — **200건 제한 없는 전체 조회 경로** (기존 `search_orders`와 분리) |
@@ -71,7 +71,7 @@
 - 현재 Android 앱은 `/v1/scan`을 사용한다. PC의 티켓 확인과 윗치폼 로그인이 먼저 준비되어야 한다.
 - `/v1/scan` 결과는 `GET /v1/actions/{request_id}`로 조회한다. 종결 응답의 `order_id`와 `result.message`를 화면에 표시한다.
 - `/v1/work-log` 아이템: `{ order_number, name, phone*, seat, goods, status("수령완료"|"확인필요"), processed_at, device_name, last_action_state }` — 이름은 원문(페어링된 운영 단말 전용), 연락처는 마스킹. `device_name`은 기기 별칭 또는 `"PC"`(로컬 처리), `processed_at`은 수령 시각(없으면 작업 기록 시각). `_operations`는 기기·상태 조인용이며 그대로 노출하지 않는다.
-- `/v1/devices` 아이템: `{ id, name, self, presence, signal_level, last_seen_sec }` — `presence`는 `online|offline|revoked`(네트워크 관리 탭과 같은 판정), `signal_level`은 0~3(마지막 활동 <20초=3, <45초=2, <120초=1, 그 외 0; 차단 기기는 항상 0), `last_seen_sec`는 마지막 관측 후 경과 초(기록 없음=-1), `self`는 요청 기기 자신. 이름·상태·시각만 노출하고 device_uid·토큰 해시는 보내지 않는다. 인메모리 레지스트리만 읽어 xlsx 재파싱 없이 폴링 가능.
+- `/v1/devices` 아이템: `{ id, name, self, presence, signal_level, last_seen_sec }` — 요청 기기 자신의 레코드만 반환한다(최대 1건, `self`는 항상 true). `presence`는 `online|offline|revoked`(네트워크 관리 탭과 같은 판정), `signal_level`은 0~3(마지막 활동 <20초=3, <45초=2, <120초=1, 그 외 0; 차단 기기는 항상 0), `last_seen_sec`는 마지막 관측 후 경과 초(기록 없음=-1). 이름·상태·시각만 노출하고 device_uid·토큰 해시·타 기기 정보는 보내지 않는다. 인메모리 레지스트리만 읽어 xlsx 재파싱 없이 폴링 가능.
 - `action` v1 값: `"receipt"` (향후 폰 자체 윗치폼 처리 경로용)
 - 응답 공통: `{ "state": ..., "data_version": ..., "error": { "code": ..., "message": ... }? }`
 

@@ -368,9 +368,10 @@ def create_api_v1_app(
 
     @app.get("/v1/devices")
     def list_paired_devices(device: str = Depends(require_device)):
-        """페어링된 전체 기기의 연결 상태·신호를 반환한다 (모바일 모니터용).
+        """호출한 기기 자신의 연결 상태·신호를 반환한다 (모바일 상태 표시용).
 
-        인메모리 레지스트리만 읽으므로 xlsx 재파싱 없이 폴링 가능.
+        타 기기 정보는 폰에 노출하지 않는다 — 전체 기기 모니터링은 PC 네트워크
+        관리 탭이 담당한다. 인메모리 레지스트리만 읽으므로 폴링 가능.
         노출은 이름/상태/시각뿐 — device_uid·토큰 해시·주문 정보는 포함하지 않는다.
         """
         now = time.time()
@@ -378,13 +379,15 @@ def create_api_v1_app(
         names = display_names(list(devices))
         items = []
         for info in devices:
+            if device not in info.device_ids:
+                continue
             seen = parse_seen_at(info.last_seen_at)
             presence = presence_state(info, now)
             items.append(
                 {
                     "id": info.record_id,
                     "name": names.get(id(info)) or info.reported_name or "휴대폰",
-                    "self": device in info.device_ids,
+                    "self": True,
                     "presence": presence,
                     # 차단된 기기만 신호 0 — offline도 45~120초 구간은 "불안정"으로 구분한다
                     "signal_level": 0 if presence == "revoked" else signal_level(info.last_seen_at, now),

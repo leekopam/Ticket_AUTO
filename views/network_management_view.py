@@ -20,6 +20,7 @@ from services.device_presence import (
     display_names,
     parse_seen_at,
     presence_state,
+    signal_level,
 )
 from services.pairing_service import DeviceInfo, PendingApproval
 from views.work_log_flet_view import _ops_record_order_id
@@ -52,6 +53,7 @@ class DeviceRowState:
     status_text: str
     status_bgcolor: str
     status_color: str
+    signal_level: int
     last_seen_text: str
     processed_text: str
     can_revoke: bool
@@ -151,6 +153,8 @@ def build_network_view_state(
                 status_text=badge_text,
                 status_bgcolor=badge_bg,
                 status_color=badge_color,
+                # 차단 기기는 신호 0 — 나머지는 마지막 활동 경과시간으로 단계 산출
+                signal_level=0 if state == PRESENCE_REVOKED else signal_level(info.last_seen_at, now),
                 last_seen_text=_format_last_seen(info.last_seen_at, now),
                 processed_text=f"처리 {processed}건",
                 can_revoke=not info.revoked,
@@ -198,6 +202,39 @@ def _build_status_badge(text: str, bgcolor: str, color: str) -> ft.Container:
         bgcolor=bgcolor,
         border_radius=8,
         padding=ft.padding.symmetric(horizontal=8, vertical=3),
+    )
+
+
+_SIGNAL_COLORS = ("#BDBDBD", "#FB8C00", "#F9A825", "#43A047")
+_SIGNAL_LABELS = ("끊김", "불안정", "보통", "양호")
+
+
+def _build_signal_bars(level: int) -> ft.Control:
+    """연결 신호 0~3단계를 4개 막대로 표시한다 (level+1개 채움, 0단계는 첫 막대만)."""
+    level = max(0, min(3, level))
+    color = _SIGNAL_COLORS[level]
+    return ft.Column(
+        controls=[
+            ft.Row(
+                controls=[
+                    ft.Container(
+                        width=5,
+                        height=6 + i * 4,
+                        bgcolor=color if i <= level else f"{color}40",
+                        border_radius=1.5,
+                    )
+                    for i in range(4)
+                ],
+                spacing=2,
+                tight=True,
+                alignment=ft.MainAxisAlignment.END,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            ),
+            ft.Text(_SIGNAL_LABELS[level], size=10, color=color),
+        ],
+        spacing=2,
+        tight=True,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
 
@@ -275,6 +312,11 @@ def _build_device_row(
                     expand=True,
                 ),
                 ft.Container(content=ft.Text(row.processed_text, size=12, color="#333333"), width=76),
+                ft.Container(
+                    content=_build_signal_bars(row.signal_level),
+                    width=52,
+                    tooltip="연결 신호 (마지막 활동 기준)",
+                ),
                 ft.Container(
                     content=_build_status_badge(row.status_text, row.status_bgcolor, row.status_color),
                     width=76,

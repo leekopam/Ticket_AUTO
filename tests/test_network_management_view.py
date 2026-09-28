@@ -101,6 +101,19 @@ class NetworkViewStateTest(unittest.TestCase):
         self.assertIn("연결됨 1", state.counts_text)
         self.assertFalse(state.device_rows[2].can_revoke)
 
+    def test_signal_level_reflects_last_seen(self) -> None:
+        """기기 행의 신호 단계는 마지막 활동 경과시간으로 산출된다."""
+        now = time.time()
+        devices = [
+            _device("uid:a", last_seen_at=_seen_ago(5)),                       # 양호 3
+            _device("uid:b", device_uid="b", last_seen_at=_seen_ago(30)),      # 보통 2
+            _device("uid:c", device_uid="c", last_seen_at=_seen_ago(90)),      # 불안정 1
+            _device("uid:d", device_uid="d", last_seen_at=_seen_ago(600)),     # 끊김 0
+            _device("uid:e", device_uid="e", revoked=True, last_seen_at=_seen_ago(5)),  # 차단 → 0
+        ]
+        state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now)
+        self.assertEqual([r.signal_level for r in state.device_rows], [3, 2, 1, 0, 0])
+
     def test_pending_rows(self) -> None:
         pending = [PendingApproval(pair_ticket="t1", device_name="Fold", requested_at=time.time())]
         state = build_network_view_state([], pending, [], server_running=True, server_addr="", now=time.time())
