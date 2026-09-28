@@ -2690,7 +2690,6 @@ class DashboardFletView:
                 work_log_cache["ops_index"],
                 work_log_cache["ticket_names"],
                 selected_order_number=work_log_selection["value"],
-                device_lookup=phone_link_service.pairing.record_for_device_id,
             )
             apply_work_log_view_state(
                 work_log_panel,
