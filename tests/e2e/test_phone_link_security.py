@@ -174,3 +174,68 @@ def test_device_registry_presence_rename_and_repair(link):
     assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token2)[0] == 401
     kept = pairing.list_devices()
     assert len(kept) == 1 and kept[0].revoked and kept[0].custom_name == "입구1번"
+
+
+def test_reject_lockout_and_sanitized_name_over_tls(link):
+    """실 TLS로 거절 흐름·무차별 잠금·기기 이름 정제를 검증한다."""
+    port, fingerprint, pairing = link
+
+    # 운영자 거절 → 폰 폴링이 rejected → 티켓 소진
+    code = pairing.issue_join_code()
+    _, pending = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": code, "device_name": "stranger"},
+    )
+    assert pairing.reject(pending["pair_ticket"])
+    assert _pinned_json(
+        port, fingerprint, "POST", "/v1/pair", body={"pair_ticket": pending["pair_ticket"]}
+    )[1]["state"] == "rejected"
+    assert _pinned_json(
+        port, fingerprint, "POST", "/v1/pair", body={"pair_ticket": pending["pair_ticket"]}
+    )[1]["error"]["code"] == "EXPIRED_JOIN_CODE"
+
+    # 잘못된 코드 연속 제출 → 잠금, 잠금 중에는 올바른 코드도 거절된다
+    for _ in range(10):
+        _pinned_json(port, fingerprint, "POST", "/v1/pair", body={"join_code": "000000"})
+    fresh = pairing.issue_join_code()
+    locked = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": fresh, "device_name": "staff"},
+    )[1]
+    assert locked["error"]["code"] == "PAIRING_LOCKED"
+
+    # 제어문자가 든 기기 이름은 정제되어 레지스트리에 저장된다
+    pairing._lockout_until = 0.0  # 잠금 해제 (테스트 격리)
+    code2 = pairing.issue_join_code()
+    _, pending2 = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": code2, "device_name": "evil\x1b[31m\nphone\x00"},
+    )
+    assert pairing.approve(pending2["pair_ticket"])
+    record = pairing.list_devices()[0]
+    assert record.reported_name == "evil[31mphone"
+
+
+def test_malformed_and_oversized_requests_over_tls(link):
+    """깨진 JSON과 대용량 본문을 실 TLS 경로에서 거절한다."""
+    port, fingerprint, _ = link
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=3)
+    try:
+        for _ in range(30):
+            try:
+                conn.connect()
+                break
+            except ConnectionRefusedError:
+                time.sleep(0.05)
+        conn.request("POST", "/v1/pair", body=b'{"join_code": ', headers={"Content-Type": "application/json"})
+        assert conn.getresponse().status == 422
+        big = b"x" * (40 * 1024)
+        conn2 = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=3)
+        conn2.request("POST", "/v1/pair", body=big, headers={"Content-Type": "application/json"})
+        assert conn2.getresponse().status == 413
+        conn2.close()
+    finally:
+        conn.close()

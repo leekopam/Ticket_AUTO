@@ -13,6 +13,7 @@ v2: 기기 레지스트리(별칭·접속 시각·차단 상태·device_uid)를 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -37,6 +38,8 @@ FAILURE_LOCKOUT_THRESHOLD = 10
 FAILURE_LOCKOUT_SEC = 60.0
 # 별칭 입력 제한
 ALIAS_MAX_LENGTH = 20
+# 폰이 보고한 기기 이름 제한 — 별칭보다 길게 받되 제어문자는 걸러낸다
+REPORTED_NAME_MAX_LENGTH = 64
 # last_seen 디스크 반영 간격 — 매 요청 쓰기는 불필요한 I/O라 스로틀한다
 ACTIVITY_SAVE_INTERVAL_SEC = 60.0
 _DEVICE_UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -72,6 +75,8 @@ class PendingApproval:
     pair_ticket: str
     device_name: str
     requested_at: float
+    # 같은 device_uid 레코드가 이미 있으면 True — 운영자가 위장 재페어링을 구분하게 한다
+    known_device: bool = False
 
 
 @dataclass
@@ -107,6 +112,12 @@ def sanitize_alias(value: str) -> str:
     """별칭 입력을 정규화한다: 공백 트림 + 제어문자 제거 + 길이 제한."""
     text = "".join(ch for ch in str(value or "").strip() if ch.isprintable())
     return text[:ALIAS_MAX_LENGTH]
+
+
+def sanitize_reported_name(value: str) -> str:
+    """폰이 보낸 기기 이름을 정규화한다 — UI 표시되므로 제어문자를 걸러낸다."""
+    text = "".join(ch for ch in str(value or "").strip() if ch.isprintable())
+    return text[:REPORTED_NAME_MAX_LENGTH]
 
 
 def _now_str() -> str:
@@ -177,6 +188,7 @@ class PairingService:
                 if self._consecutive_failures >= FAILURE_LOCKOUT_THRESHOLD:
                     self._lockout_until = time.time() + FAILURE_LOCKOUT_SEC
                     self._consecutive_failures = 0
+                    logger.warning("참가 코드 연속 실패 — %d초 잠금", int(FAILURE_LOCKOUT_SEC))
                 return PairRequestResult(state="error", error_code="EXPIRED_JOIN_CODE")
 
             self._consecutive_failures = 0
@@ -187,7 +199,7 @@ class PairingService:
                 uid = ""
             self._tickets[ticket] = _PairTicket(
                 ticket=ticket,
-                device_name=(device_name or "")[:64],
+                device_name=sanitize_reported_name(device_name),
                 device_uid=uid,
                 expires_at=time.time() + PAIR_TICKET_TTL_SEC,
             )
@@ -214,6 +226,10 @@ class PairingService:
                     pair_ticket=t.ticket,
                     device_name=t.device_name,
                     requested_at=t.expires_at - PAIR_TICKET_TTL_SEC,
+                    known_device=bool(
+                        t.device_uid
+                        and self._find_by_uid(self._records.values(), t.device_uid)
+                    ),
                 )
                 for t in self._tickets.values()
                 if t.state == "pending"
@@ -256,6 +272,7 @@ class PairingService:
             self._records = records
             ticket.state = "approved"
             ticket.device_token = token
+            logger.info("기기 페어링 승인: %s (%s)", record.record_id, record.reported_name)
             return token
 
     def reject(self, pair_ticket: str) -> bool:
@@ -265,6 +282,7 @@ class PairingService:
             if ticket is None or ticket.state != "pending":
                 return False
             ticket.state = "rejected"
+            logger.info("기기 페어링 거절: %s", ticket.device_name)
             return True
 
     # ------------------------------------------------------------------
@@ -273,7 +291,10 @@ class PairingService:
 
     def _find_by_token_hash(self, token_hash: str) -> _DeviceRecord | None:
         for record in self._records.values():
-            if not record.revoked and record.token_hash == token_hash:
+            # 상수 시간 비교 — 토큰 해시 부분 일치 정보 유출 방지
+            if not record.revoked and hmac.compare_digest(
+                record.token_hash, token_hash
+            ):
                 return record
         return None
 
@@ -357,6 +378,7 @@ class PairingService:
             records[record.record_id] = record
             self._save_tokens(records)
             self._records = records
+            logger.info("기기 토큰 폐기: %s", record.record_id)
             return True
 
     def revoke_device(self, record_id: str) -> bool:
@@ -376,6 +398,7 @@ class PairingService:
             records[record.record_id] = record
             self._save_tokens(records)
             self._records = records
+            logger.info("기기 차단: %s", record_id)
             return True
 
     def revoke_all(self) -> int:
@@ -399,6 +422,7 @@ class PairingService:
                 records[record.record_id] = record
             self._save_tokens(records)
             self._records = records
+            logger.info("전체 기기 차단: %d대", len(active))
             return len(active)
 
     # ------------------------------------------------------------------

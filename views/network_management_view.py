@@ -41,6 +41,7 @@ STATUS_BADGE = {
 class PendingRowState:
     pair_ticket: str
     device_name: str
+    known_device: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,11 @@ def build_network_view_state(
     counts = build_ops_device_counts(operations)
     names = display_names(list(devices))
     pending_rows = tuple(
-        PendingRowState(pair_ticket=p.pair_ticket, device_name=p.device_name or "알 수 없음")
+        PendingRowState(
+            pair_ticket=p.pair_ticket,
+            device_name=p.device_name or "알 수 없음",
+            known_device=p.known_device,
+        )
         for p in pending
     )
 
@@ -199,7 +204,11 @@ def _build_pending_row(
     return ft.Container(
         content=ft.Row(
             controls=[
-                ft.Text(row.device_name, size=14, expand=True),
+                ft.Text(
+                    f"{row.device_name} (등록된 기기 재페어링)" if row.known_device else row.device_name,
+                    size=14,
+                    expand=True,
+                ),
                 ft.FilledButton(
                     "승인",
                     on_click=lambda _e, t=row.pair_ticket: on_approve(t),

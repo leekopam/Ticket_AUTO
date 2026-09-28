@@ -260,3 +260,38 @@ def test_forget_device_removes_record(pairing: PairingService):
     assert pairing.forget_device(record_id)
     assert pairing.list_devices() == []
     assert pairing.device_id_for_token(token) is None
+
+
+def test_reported_name_is_sanitized(pairing: PairingService):
+    """폰이 보낸 기기 이름의 제어문자는 저장 전 제거된다 (UI 주입 방지)."""
+    token = _approve_one(pairing, "evil\x1b[31m\nphone\x00")
+    record = pairing.list_devices()[0]
+    assert record.reported_name == "evil[31mphone"
+    assert pairing.device_id_for_token(token)
+
+
+def test_pending_approval_marks_known_device(pairing: PairingService):
+    """같은 device_uid의 재페어링 요청은 승인 대기 목록에서 구분 표시된다."""
+    uid = "550e8400-e29b-41d4-a716-446655440000"
+    _approve_one(pairing, "staff-1", uid)
+    pairing.revoke_all()
+
+    known = pairing.request_pair(join_code=pairing.issue_join_code(), device_name="staff-1", device_uid=uid)
+    assert known.state == "pending_approval"
+    pending = pairing.pending_approvals()
+    assert len(pending) == 1 and pending[0].known_device is True
+
+    pairing.reject(pending[0].pair_ticket)
+    unknown = pairing.request_pair(join_code=pairing.issue_join_code(), device_name="new", device_uid="other-uid")
+    assert unknown.state == "pending_approval"
+    assert pairing.pending_approvals()[0].known_device is False
+
+
+def test_expired_pair_ticket_poll_fails(pairing: PairingService):
+    """승인 유효기간이 지난 티켓 폴링은 토큰 없이 실패한다."""
+    pending = pairing.request_pair(join_code=pairing.issue_join_code(), device_name="late")
+    assert pending.state == "pending_approval"
+    pairing._tickets[pending.pair_ticket].expires_at = time.time() - 1
+    assert pairing.request_pair(pair_ticket=pending.pair_ticket).state == "error"
+    # 만료된 티켓은 승인해도 토큰이 나오지 않는다
+    assert not pairing.approve(pending.pair_ticket)

@@ -40,7 +40,7 @@
 ← 거절/만료: { "state": "rejected" } / 오류 코드 EXPIRED_JOIN_CODE
 ```
 
-- `device_name`: 실 기기 이름 — `Settings.Global.DEVICE_NAME`, 없으면 `Build.MODEL`
+- `device_name`: 실 기기 이름 — `Settings.Global.DEVICE_NAME`, 없으면 `Build.MODEL`. 서버는 제어문자를 제거하고 64자로 자른다 (UI 표시용이므로)
 - `device_uid`: 앱이 최초 실행 시 생성한 UUID v4, 보안 저장소에 보관. 재페어링 시 같은 값을내면 PC는 같은 기기로 인식해 별칭·이력을 이어간다 (선택 필드 — 구버전 앱은 생략 가능)
 - `device_token`은 행사 종료까지 유효, PC에서 기기별 폐기 가능
 - 토큰은 `flutter_secure_storage`(Keystore)에만 저장. 로그 출력 금지
@@ -108,6 +108,8 @@
 | `DUPLICATE_IN_PROGRESS` | 다른 기기/요청이 같은 주문 처리 중 |
 | `INVALID_REQUEST` | 필드 누락/형식 오류 |
 | `EXPIRED_JOIN_CODE` | 페어링 코드 만료/사용됨 |
+| `PAIRING_LOCKED` | 참가 코드 연속 실패로 60초 잠금 — 잠시 후 재시도 |
+| `SERVER_BUSY` | 동시 스캔 상한 초과 (HTTP 429) — 잠시 후 재시도 |
 | `UNAUTHORIZED` | 토큰 없음/폐기됨 |
 
 ## 7. 불변 규칙 (계약 수준)

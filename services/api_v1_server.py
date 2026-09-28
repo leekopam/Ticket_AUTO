@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 SERVER_ID = "ticket-auto-pc"
 MAX_BODY_BYTES = 32 * 1024
 AUTO_PAUSE_FAILURE_STREAK = 5
+# 동시 스캔 스레드 상한 — 폰 버그나 탈취 토큰의 폭주가 PC를 마비시키지 않게 한다
+SCAN_IN_FLIGHT_MAX = 4
 
 ACTION_RECEIPT = "receipt"
 ACTION_SCAN_RECEIPT = "scan_receipt"
@@ -276,6 +278,7 @@ def create_api_v1_app(
     app = FastAPI(title="Ticket_AUTO LAN API", version="v1", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.paused = False
     scan_dispatch_lock = threading.Lock()
+    scan_slots = threading.BoundedSemaphore(SCAN_IN_FLIGHT_MAX)
 
     @app.middleware("http")
     async def limit_body_size(request: Request, call_next):
@@ -448,7 +451,13 @@ def create_api_v1_app(
                 )
             if app.state.paused:
                 return _error("rejected", "PAUSED", "처리가 일시정지 상태입니다. PC에서 재개해주세요.")
-            registry.register(body.request_id, "", ACTION_SCAN_RECEIPT, device)
+            if not scan_slots.acquire(blocking=False):
+                return _error("rejected", "SERVER_BUSY", "처리 중인 스캔이 많습니다. 잠시 후 다시 시도해주세요.", status_code=429)
+            try:
+                registry.register(body.request_id, "", ACTION_SCAN_RECEIPT, device)
+            except Exception:
+                scan_slots.release()
+                raise
 
         def run_scan() -> None:
             try:
@@ -460,6 +469,8 @@ def create_api_v1_app(
                 logger.exception("휴대폰 QR 처리 중 예외")
                 state = "needs_reconciliation"
                 result = {"message": "PC에서 처리 상태를 확인해주세요."}
+            finally:
+                scan_slots.release()
             registry.transition(body.request_id, state, result)
 
         threading.Thread(target=run_scan, daemon=True).start()

@@ -324,3 +324,54 @@ def test_orders_since_returns_changed_flag(env):
     assert first["changed"] is True
     second = env["client"].get("/v1/orders", params={"since": first["data_version"]}, headers=_auth(token)).json()
     assert second["changed"] is False
+
+
+def test_scan_saturated_slots_rejected(tmp_path: Path):
+    """동시 스캔이 상한에 닿으면 새 요청은 429로 거절되고 풀리면 다시 받는다."""
+    import threading
+
+    data = tmp_path / "data.xlsx"
+    _make_orders_xlsx(data)
+    excel = ExcelService(str(data))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+    started = threading.Event()
+    release = threading.Event()
+    in_flight = 0
+
+    def handle_scan(qr_url: str) -> dict[str, str]:
+        nonlocal in_flight
+        in_flight += 1
+        if in_flight >= 4:
+            started.set()
+        release.wait(5)
+        return {"state": "succeeded", "order_id": "AAAA1111_BBBB2222"}
+
+    client = TestClient(create_api_v1_app(excel, pairing, scan_handler=handle_scan))
+    env = {"client": client, "pairing": pairing}
+    token = _pair_device(env)
+    payload = lambda: {
+        "request_id": str(uuid.uuid4()),
+        "qr_url": "https://witchform.com/qrcode_link.php?opaque=abc",
+    }
+    for _ in range(4):
+        assert client.post("/v1/scan", json=payload(), headers=_auth(token)).status_code == 200
+    assert started.wait(5)
+    busy = client.post("/v1/scan", json=payload(), headers=_auth(token))
+    assert busy.status_code == 429
+    assert busy.json()["error"]["code"] == "SERVER_BUSY"
+
+    release.set()
+    time.sleep(0.1)
+    again = client.post("/v1/scan", json=payload(), headers=_auth(token))
+    assert again.status_code == 200
+
+
+def test_malformed_json_body_rejected(env):
+    """깨진 JSON 본문은 422로 거절된다 (경계 검증)."""
+    token = _pair_device(env)
+    res = env["client"].post(
+        "/v1/actions",
+        content=b'{"request_id": ',
+        headers={**_auth(token), "Content-Type": "application/json"},
+    )
+    assert res.status_code == 422

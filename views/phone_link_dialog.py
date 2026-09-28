@@ -58,10 +58,15 @@ def open_phone_link_dialog(
             return
         rows: list[ft.Control] = []
         for item in pending:
+            label = (
+                f"{item.device_name} (등록된 기기 재페어링)"
+                if item.known_device
+                else item.device_name
+            )
             rows.append(
                 ft.Row(
                     controls=[
-                        ft.Text(item.device_name, expand=True, size=13),
+                        ft.Text(label, expand=True, size=13),
                         ft.FilledButton("승인", on_click=lambda e, t=item.pair_ticket: _approve(t)),
                         ft.OutlinedButton("거절", on_click=lambda e, t=item.pair_ticket: _reject(t)),
                     ],
