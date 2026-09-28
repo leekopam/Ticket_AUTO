@@ -113,8 +113,13 @@ class DatasetTracker:
 class ActionRegistry:
     """작업 요청/결과를 기록하고 request_id 멱등성과 주문별 직렬화를 보장한다."""
 
-    def __init__(self, excel: ExcelService):
+    def __init__(
+        self,
+        excel: ExcelService,
+        device_name_resolver: Callable[[str], str] | None = None,
+    ):
         self._excel = excel
+        self._device_name_resolver = device_name_resolver or (lambda _device_id: "")
         self._lock = threading.RLock()
         self._records: dict[str, dict[str, Any]] = {}
         self._order_locks: dict[str, str] = {}  # order_id -> request_id
@@ -190,6 +195,7 @@ class ActionRegistry:
                 "order_id": record["order_id"],
                 "action": record["action"],
                 "device_id": record["device_id"],
+                "device_name": self._device_name_resolver(record["device_id"]),
                 "state": record["state"],
                 "result_json": json.dumps(record["result"], ensure_ascii=False),
                 "created_at": record["created_at"],
@@ -221,6 +227,10 @@ class ActionRegistry:
         updates = {"state": state, "result_json": json.dumps(record["result"], ensure_ascii=False)}
         if record.get("order_id"):
             updates["order_id"] = record["order_id"]
+        # 처리 시점 기기 이름 스냅샷 (이후 이름 변경과 무관하게 감사 추적용)
+        name = self._device_name_resolver(record.get("device_id", ""))
+        if name:
+            updates["device_name"] = name
         self._excel.update_operation(request_id, updates)
         return record
 
@@ -257,7 +267,12 @@ def create_api_v1_app(
     scan_handler: Callable[[str], dict[str, str]] | None = None,
 ) -> FastAPI:
     tracker = DatasetTracker(excel)
-    registry = ActionRegistry(excel)
+
+    def _resolve_device_name(device_id: str) -> str:
+        info = pairing.record_for_device_id(device_id) if pairing else None
+        return (info.custom_name or info.reported_name) if info else ""
+
+    registry = ActionRegistry(excel, device_name_resolver=_resolve_device_name)
     app = FastAPI(title="Ticket_AUTO LAN API", version="v1", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.paused = False
     scan_dispatch_lock = threading.Lock()
@@ -288,6 +303,8 @@ def create_api_v1_app(
                 status_code=401,
                 detail={"code": "UNAUTHORIZED", "message": "기기 인증이 필요합니다."},
             )
+        # 인증 성공 = 기기 활동 신호 (스캔·조회·하트비트 모두 포함)
+        pairing.record_activity(device_id)
         return device_id
 
     def owned_action(request_id: str, device_id: str) -> dict[str, Any] | None:

@@ -36,6 +36,8 @@ OPERATION_HEADERS = (
     "result_json",
     "created_at",
     "updated_at",
+    # 기존 파일과의 열 정렬을 위해 새 열은 항상 맨 뒤에 추가한다
+    "device_name",
 )
 META_DATASET_ID_KEY = "dataset_id"
 META_CREATED_AT_KEY = "created_at"
@@ -715,10 +717,16 @@ class ExcelService:
             try:
                 workbook = load_workbook(self._file_path)
                 ws = self._ensure_operations_sheet(workbook)
+                # 헤더명 기준으로 열을 맞춘다 — 스키마 확장 시 기존 파일과 어긋나지 않게
+                headers = self._read_headers(ws)
+                for header in OPERATION_HEADERS:
+                    if header not in headers:
+                        headers[header] = (max(headers.values()) if headers else 0) + 1
+                        ws.cell(row=1, column=headers[header], value=header)
                 row_idx = ws.max_row + 1
-                values = [record.get(header, "") for header in OPERATION_HEADERS]
-                for col_idx, value in enumerate(values, start=1):
-                    ws.cell(row=row_idx, column=col_idx, value=str(value or ""))
+                for header, col_idx in headers.items():
+                    if header in OPERATION_HEADERS:
+                        ws.cell(row=row_idx, column=col_idx, value=str(record.get(header) or ""))
                 self._save_atomic(workbook)
                 return True
             except (PermissionError, OSError):

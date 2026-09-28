@@ -158,6 +158,8 @@ def test_phone_scan_records_order_id_in_operations(tmp_path: Path):
         time.sleep(0.02)
     assert ops[-1]["order_id"] == "AAAA1111_BBBB2222"
     assert ops[-1]["device_id"]
+    # 처리 시점 기기 이름 스냅샷이 기록되어야 한다 (페어링 이름 t1)
+    assert ops[-1]["device_name"] == "t1"
 
 
 def test_action_receipt_flow_and_xlsx_write(env):

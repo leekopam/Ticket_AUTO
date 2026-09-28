@@ -125,3 +125,22 @@ def test_data_file_signature_changes_on_write(excel: ExcelService):
     excel.mark_order_received("AAAA1111_BBBB2222", "2026-01-01 10:00:00")
     after = excel.data_file_signature()
     assert before and after and before != after
+
+
+def test_operations_sheet_backfills_missing_headers(excel: ExcelService, tmp_path: Path):
+    """기존 파일에 device_name 열이 없어도 새 열을 헤더 끝에 추가해 기록한다."""
+    # 구 버전 헤더(device_name 없음)로 _operations 시트를 만든다
+    data = tmp_path / "data.xlsx"
+    wb = load_workbook(data)
+    ws = wb.create_sheet(OPERATIONS_SHEET)
+    ws.sheet_state = "hidden"
+    old_headers = ["request_id", "order_id", "action", "device_id", "state", "result_json", "created_at", "updated_at"]
+    for col_idx, header in enumerate(old_headers, start=1):
+        ws.cell(row=1, column=col_idx, value=header)
+    wb.save(data)
+    wb.close()
+
+    assert excel.append_operation({"request_id": "r9", "device_name": "입구1번", "state": "succeeded"})
+    ops = excel.list_operations()
+    assert ops[-1]["device_name"] == "입구1번"
+    assert ops[-1]["state"] == "succeeded"
