@@ -133,6 +133,33 @@ def test_phone_scan_runs_pc_handler_once_and_reports_verified_result(tmp_path: P
     assert bad["error"]["code"] == "INVALID_QR"
 
 
+def test_phone_scan_records_order_id_in_operations(tmp_path: Path):
+    """스캔 작업 종결 시 result의 주문번호가 _operations.order_id에도 기록되어야 한다."""
+    data = tmp_path / "data.xlsx"
+    _make_orders_xlsx(data)
+    excel = ExcelService(str(data))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+
+    def handle_scan(qr_url: str) -> dict[str, str]:
+        return {"state": "succeeded", "order_id": "AAAA1111_BBBB2222", "message": "수령 완료"}
+
+    env = {"client": TestClient(create_api_v1_app(excel, pairing, scan_handler=handle_scan)), "pairing": pairing}
+    token = _pair_device(env)
+    request_id = str(uuid.uuid4())
+    env["client"].post(
+        "/v1/scan",
+        json={"request_id": request_id, "qr_url": "https://witchform.com/qrcode_link.php?opaque=abc"},
+        headers=_auth(token),
+    )
+    for _ in range(50):
+        ops = excel.list_operations()
+        if ops and ops[-1].get("state") == "succeeded":
+            break
+        time.sleep(0.02)
+    assert ops[-1]["order_id"] == "AAAA1111_BBBB2222"
+    assert ops[-1]["device_id"]
+
+
 def test_action_receipt_flow_and_xlsx_write(env):
     token = _pair_device(env)
     env["excel"].ensure_dataset_id()

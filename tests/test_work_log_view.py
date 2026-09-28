@@ -68,6 +68,16 @@ class BuildOpsIndexTest(unittest.TestCase):
     def test_missing_order_id_skipped(self) -> None:
         self.assertEqual(build_ops_index([{"order_id": ""}, {}]), {})
 
+    def test_result_json_order_id_fallback(self) -> None:
+        """스캔 작업은 order_id 열이 비어 result_json에만 주문번호가 들어간다."""
+        ops = [{"order_id": "", "device_id": "phone-1", "result_json": '{"order_id": "A1"}'}]
+        index = build_ops_index(ops)
+        self.assertEqual(index["A1"]["device_id"], "phone-1")
+
+    def test_result_json_fallback_ignored_when_order_id_present(self) -> None:
+        ops = [{"order_id": "A1", "device_id": "d", "result_json": '{"order_id": "B2"}'}]
+        self.assertIn("A1", build_ops_index(ops))
+
 
 class BuildWorkLogViewStateTest(unittest.TestCase):
     def test_newest_first_and_seq_descending(self) -> None:

@@ -177,7 +177,8 @@ class ActionRegistry:
         }
         with self._lock:
             self._records[request_id] = record
-            self._order_locks[order_id] = request_id
+            if order_id:
+                self._order_locks[order_id] = request_id
         self._persist_new(record)
 
     def _persist_new(self, record: dict[str, Any]) -> None:
@@ -203,6 +204,9 @@ class ActionRegistry:
             record["state"] = state
             if result is not None:
                 record["result"] = result
+                # 폰 스캔은 접수 시 주문번호를 모르므로 종결 결과에서 역기입한다.
+                if not record.get("order_id") and result.get("order_id"):
+                    record["order_id"] = str(result["order_id"])
             record["updated_at"] = self._now()
             if state in TERMINAL_STATES:
                 order_id = record.get("order_id", "")
@@ -212,10 +216,10 @@ class ActionRegistry:
                     self._consecutive_failures += 1
                 elif state == "succeeded":
                     self._consecutive_failures = 0
-        self._excel.update_operation(
-            request_id,
-            {"state": state, "result_json": json.dumps(record["result"], ensure_ascii=False)},
-        )
+        updates = {"state": state, "result_json": json.dumps(record["result"], ensure_ascii=False)}
+        if record.get("order_id"):
+            updates["order_id"] = record["order_id"]
+        self._excel.update_operation(request_id, updates)
         return record
 
     @property
