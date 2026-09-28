@@ -389,6 +389,10 @@ def _handle_phone_command(phone_link, payload: dict) -> dict:
             "state": approved.get("state", ""),
         }
 
+    if cmd == "phone_link_stop":
+        phone_link.stop()
+        return {"stopped": True}
+
     if cmd == "phone_status":
         state = _phone_state(phone_link)
         status, body = _pinned_request(

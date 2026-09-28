@@ -122,6 +122,26 @@ def test_network_tab_pair_pending_approve_rename(page, flet_server):
     _device_row(page, "입구1번").first.wait_for(state="visible", timeout=_POLL_MS)
 
 
+def test_phone_server_starts_with_runtime_start(page, flet_server):
+    """'티켓 확인 시작'을 누르면 LAN API 서버도 함께 기동돼야 한다."""
+    # 세션 공유: 앞 테스트에서 서버가 이미 켜져 있을 수 있으므로 강제로 내린다.
+    send_control_command(flet_server["control_url"], {"cmd": "phone_link_stop"})
+    _open_network_tab(page)
+    page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+
+    wait_for_button(page, "티켓 확인", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "티켓 확인 시작", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "중지", timeout_ms=_TIMEOUT_MS)
+
+    # 네트워크 탭 주기 갱신(3초)으로 서버 주소가 표시된다
+    _open_network_tab(page)
+    page.get_by_text("서버 주소: https://").first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+
 def test_network_tab_processed_count_and_processor_name(page, flet_server):
     control_url = flet_server["control_url"]
     # 세션 공유 워크북을 오염시키지 않도록 테스트 종료 시 시드 상태로 복원한다.

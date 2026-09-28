@@ -3337,6 +3337,15 @@ class DashboardFletView:
                 push_update=True,
             )
             self._runtime_manager.start()
+            # 휴대폰 스캔 경로가 시작과 동시에 열리도록 LAN API 서버도 함께 기동한다.
+            # 이미 실행 중이면 start()가 기존 페이로드를 재사용한다.
+            def _start_phone_link() -> None:
+                try:
+                    phone_link_service.start()
+                except Exception:
+                    logger.warning("휴대폰 연결 서버 자동 기동 실패", exc_info=True)
+
+            threading.Thread(target=_start_phone_link, daemon=True).start()
 
         def on_stop(_: ft.ControlEvent) -> None:
             dispatch_runtime_status_refresh(
