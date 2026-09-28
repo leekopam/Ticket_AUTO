@@ -14,7 +14,7 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 from typing_extensions import Annotated
@@ -35,6 +35,8 @@ ACTION_SCAN_RECEIPT = "scan_receipt"
 TERMINAL_STATES = {"succeeded", "already_processed", "failed", "needs_reconciliation", "rejected"}
 CANCELLED_MARKERS = ("주문취소", "자동주문취소", "취소")
 RECONCILE_MARKER = "확인필요"
+WORK_LOG_DEFAULT_LIMIT = 200
+WORK_LOG_MAX_LIMIT = 500
 
 
 # ----------------------------------------------------------------------
@@ -427,6 +429,92 @@ def create_api_v1_app(
             "dataset_generation": dataset_generation,
             "data_version": data_version,
             "orders": [_order_payload(o) for o in orders],
+        }
+
+    # ------------------------------ work log ------------------------------
+
+    def _ops_order_id(record: dict[str, str]) -> str:
+        """작업 레코드의 주문번호 — 구형 기록은 result_json에만 남아 있다."""
+        order_id = str(record.get("order_id") or "").strip()
+        if order_id:
+            return order_id.upper()
+        try:
+            result = json.loads(str(record.get("result_json") or "{}"))
+        except (ValueError, TypeError):
+            return ""
+        return str(result.get("order_id") or "").strip().upper()
+
+    @app.get("/v1/work-log")
+    def work_log(
+        device: str = Depends(require_device),
+        limit: Annotated[int, Query(ge=1, le=WORK_LOG_MAX_LIMIT)] = WORK_LOG_DEFAULT_LIMIT,
+        since: str = "",
+    ):
+        """티켓 업무 목록 — 수령완료/확인필요 주문을 최신순으로 반환한다.
+
+        since=data_version이면 변경 없음으로 즉시 반환한다 (파일 시그니처만 확인).
+        개인정보는 orders와 같은 규칙으로 마스킹한다.
+        """
+        generation, data_version = tracker.current()
+        if since and since == data_version:
+            return {
+                "state": "ok",
+                "changed": False,
+                "dataset_generation": generation,
+                "data_version": data_version,
+            }
+
+        ops_index: dict[str, dict[str, str]] = {}
+        for record in excel.list_operations(limit=limit):
+            order_id = _ops_order_id(record)
+            if order_id:
+                ops_index[order_id] = record
+
+        items: list[dict[str, Any]] = []
+        reconcile_count = 0
+        for order in excel.search_orders_all(""):
+            status_text = (order.order_status or "").strip()
+            needs_reconcile = status_text == RECONCILE_MARKER
+            if not order.is_received and not needs_reconcile:
+                continue
+            oid = (order.order_number or "").strip().upper()
+            record = ops_index.get(oid)
+            device_label = ""
+            if record is not None:
+                device_id = str(record.get("device_id") or "").strip()
+                if device_id:
+                    device_label = _resolve_device_name(device_id)
+                if not device_label:
+                    device_label = str(record.get("device_name") or "").strip() or "알 수 없는 기기"
+            else:
+                # _operations에 없는 수령 완료 = PC 본체에서 처리한 건
+                device_label = "PC"
+            if needs_reconcile:
+                reconcile_count += 1
+            items.append(
+                {
+                    "order_number": order.order_number,
+                    "name": _mask_name(order.name),
+                    "phone": _mask_phone(order.phone),
+                    "seat": order.seat,
+                    "status": RECONCILE_MARKER if needs_reconcile else "수령완료",
+                    "received_at": order.received_at or "",
+                    "processed_at": order.received_at
+                    or (str(record.get("updated_at") or "") if record else ""),
+                    "device_name": device_label,
+                    "last_action_state": str(record.get("state") or "") if record else "",
+                }
+            )
+
+        items.sort(key=lambda i: i["processed_at"], reverse=True)
+        return {
+            "state": "ok",
+            "changed": True,
+            "dataset_generation": generation,
+            "data_version": data_version,
+            "total": len(items),
+            "needs_reconciliation": reconcile_count,
+            "items": items[:limit],
         }
 
     # ------------------------------ actions ------------------------------

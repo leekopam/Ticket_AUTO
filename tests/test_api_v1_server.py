@@ -400,3 +400,67 @@ def test_disconnect_marks_device_offline_immediately(env):
 
 def test_disconnect_requires_auth(env):
     assert env["client"].post("/v1/disconnect").status_code == 401
+
+
+def _mark_received(env, order_number: str) -> None:
+    assert env["excel"].mark_order_received(order_number, "2026-09-28 12:00:00")
+
+
+def test_work_log_requires_auth(env):
+    assert env["client"].get("/v1/work-log").status_code == 401
+
+
+def test_work_log_lists_only_processed_with_masking(env):
+    token = _pair_device(env)
+    _mark_received(env, "AAAA1111_BBBB2222")  # 홍길동
+    res = env["client"].get("/v1/work-log", headers=_auth(token))
+    assert res.status_code == 200
+    body = res.json()
+    assert body["changed"] is True
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["order_number"] == "AAAA1111_BBBB2222"
+    assert item["name"] == "홍*동"          # 마스킹 규칙 재사용
+    assert item["phone"] == "010-****-5678"
+    assert item["status"] == "수령완료"
+    assert item["device_name"] == "PC"      # _operations 없는 건 = PC 처리
+    # 미수령 주문은 목록에 나오지 않는다
+    assert all(i["order_number"] != "EEEE5555_FFFF6666" for i in body["items"])
+
+
+def test_work_log_since_shortcircuits_unchanged(env):
+    token = _pair_device(env)
+    first = env["client"].get("/v1/work-log", headers=_auth(token)).json()
+    res = env["client"].get(
+        "/v1/work-log", headers=_auth(token), params={"since": first["data_version"]}
+    )
+    body = res.json()
+    assert body["changed"] is False
+    assert "items" not in body
+
+
+def test_work_log_limit_bounds(env):
+    token = _pair_device(env)
+    assert env["client"].get("/v1/work-log", headers=_auth(token), params={"limit": 0}).status_code == 422
+    assert env["client"].get("/v1/work-log", headers=_auth(token), params={"limit": 999}).status_code == 422
+
+
+def test_work_log_device_name_from_ops(env):
+    """_operations에 기록된 건은 기기 별칭으로 표시된다."""
+    token = _pair_device(env)
+    record_id = env["pairing"].list_devices()[0].record_id
+    env["pairing"].rename_device(record_id, "매표소폰")
+    _mark_received(env, "AAAA1111_BBBB2222")
+    # 폰이 처리한 것처럼 _operations에 기록
+    device_id = env["pairing"].device_id_for_token(token)
+    env["excel"].append_operation({
+        "request_id": "req-1",
+        "order_id": "AAAA1111_BBBB2222",
+        "action": "receipt",
+        "state": "succeeded",
+        "device_id": device_id,
+        "updated_at": "2026-09-28 12:00:00",
+    })
+    body = env["client"].get("/v1/work-log", headers=_auth(token)).json()
+    item = body["items"][0]
+    assert item["device_name"] == "매표소폰"

@@ -61,6 +61,7 @@
 | GET | `/v1/orders/{order_id}` | 주문 상세 + 현재 상태 |
 | GET | `/v1/orders?since={data_version}` | 변경분 조회(ETag 대응). 전체 재조회는 since 생략 |
 | GET | `/v1/orders/search?q=` | 이름/주문번호 검색 — **200건 제한 없는 전체 조회 경로** (기존 `search_orders`와 분리) |
+| GET | `/v1/work-log?since=&limit=` | 티켓 업무 목록 — 수령완료/확인필요 주문을 최신순으로. `limit` 1~500(기본 200), `since=data_version`이면 `changed:false`만 반환 |
 | POST | `/v1/scan` | `{ request_id, qr_url }` → PC 티켓 확인 런타임에서 QR 해석·윗치폼 수령·XLSX 기록을 비동기로 실행 |
 | POST | `/v1/actions` | `{ request_id, order_id, action, dataset_generation }` → 작업 접수. 즉시 `accepted` 또는 기존 결과 반환 |
 | GET | `/v1/actions/{request_id}` | 결과 재조회 — 응답 유실·재연결 복구용 |
@@ -68,6 +69,7 @@
 
 - 현재 Android 앱은 `/v1/scan`을 사용한다. PC의 티켓 확인과 윗치폼 로그인이 먼저 준비되어야 한다.
 - `/v1/scan` 결과는 `GET /v1/actions/{request_id}`로 조회한다. 종결 응답의 `order_id`와 `result.message`를 화면에 표시한다.
+- `/v1/work-log` 아이템: `{ order_number, name*, phone*, seat, status("수령완료"|"확인필요"), received_at, processed_at, device_name, last_action_state }` — 이름·연락처는 마스킹, `device_name`은 기기 별칭 또는 `"PC"`(로컬 처리). `_operations`는 기기·상태 조인용이며 그대로 노출하지 않는다.
 - `action` v1 값: `"receipt"` (향후 폰 자체 윗치폼 처리 경로용)
 - 응답 공통: `{ "state": ..., "data_version": ..., "error": { "code": ..., "message": ... }? }`
 
