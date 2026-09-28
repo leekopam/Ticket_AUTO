@@ -50,6 +50,8 @@ class PairRequestBody(BaseModel):
     join_code: _ShortStr = ""
     pair_ticket: _ShortStr = ""
     device_name: _DeviceName = ""
+    # 재페어링 후에도 같은 기기로 인식하기 위한 앱 설치 식별자 (선택)
+    device_uid: _ShortStr = ""
 
 
 class ActionRequestBody(BaseModel):
@@ -300,6 +302,7 @@ def create_api_v1_app(
             join_code=body.join_code,
             pair_ticket=body.pair_ticket,
             device_name=body.device_name,
+            device_uid=body.device_uid,
         )
         dataset_generation, _ = tracker.current()
         if result.state == "approved":
