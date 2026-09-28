@@ -8,12 +8,14 @@ _operations에 기록되지 않으므로 목록 소스로 쓰면 PC 처리 건�
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
 import flet as ft
 
 from models.order_model import Order
+from services.device_presence import DeviceLike, operator_label
 from views.dashboard_flet_view import (
     ACCENT_PRIMARY_BORDER,
     ACCENT_PRIMARY_DEEP,
@@ -77,11 +79,23 @@ class WorkLogViewState:
     empty_text: str
 
 
+def _ops_record_order_id(record: Mapping[str, str]) -> str:
+    """작업 레코드의 주문번호를 읽는다 — 구형 기록은 result_json에만 남아 있다."""
+    order_id = str(record.get("order_id") or "").strip()
+    if order_id:
+        return order_id.upper()
+    try:
+        result = json.loads(str(record.get("result_json") or "{}"))
+    except (ValueError, TypeError):
+        return ""
+    return str(result.get("order_id") or "").strip().upper()
+
+
 def build_ops_index(operations: list[dict[str, str]] | None) -> dict[str, dict[str, str]]:
     """order_id → 최근 작업 레코드 인덱스를 만든다 (입력은 오래된 순)."""
     index: dict[str, dict[str, str]] = {}
     for record in operations or []:
-        order_id = str(record.get("order_id") or "").strip().upper()
+        order_id = _ops_record_order_id(record)
         if order_id:
             index[order_id] = record
     return index
@@ -130,6 +144,7 @@ def build_work_log_view_state(
     ticket_names: list[str] | set[str],
     *,
     selected_order_number: str | None = None,
+    device_lookup: Callable[[str], DeviceLike | None] | None = None,
 ) -> WorkLogViewState:
     """주문 목록에서 티켓 업무 탭의 표시 상태를 계산한다. 최신 건이 맨 위."""
     candidates = filter_work_log_orders(orders)
@@ -173,7 +188,11 @@ def build_work_log_view_state(
                 phone=order.phone,
                 seat=order.seat or "-",
                 time_text=format_work_time(_work_log_time_key(order, ops_index)),
-                device_text=str(record.get("device_id") or "").strip() if record else "",
+                device_text=operator_label(
+                    record,
+                    device_lookup or (lambda _device_id: None),
+                    order_received=order.is_received,
+                ),
                 badge_text=badge_text,
                 badge_bgcolor=badge_bg,
                 badge_color=badge_color,

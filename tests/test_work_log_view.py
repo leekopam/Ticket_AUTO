@@ -102,7 +102,8 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
             orders, ops_index, {"입장권"}, selected_order_number="A1",
         )
         self.assertIsNotNone(state.detail)
-        self.assertEqual(state.detail.device_text, "phone-7")
+        # 레지스트리에 없는 해시는 단축 표기로 떨어진다
+        self.assertEqual(state.detail.device_text, "알 수 없는 기기 (phone-)")
         self.assertEqual(state.detail.ticket_items, ("입장권 x1",))
         self.assertEqual(state.detail.goods_items, ("아메리카노 x2",))
         self.assertTrue(state.rows[0].is_selected)

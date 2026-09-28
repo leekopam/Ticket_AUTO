@@ -115,6 +115,10 @@ class PhoneLinkService:
     def forget_device(self, record_id: str) -> bool:
         return self._pairing.forget_device(record_id)
 
+    def device_for_device_id(self, device_id: str) -> DeviceInfo | None:
+        """작업 이력의 device_id(과거 해시 포함)로 기기 레코드를 찾는다."""
+        return self._pairing.record_for_device_id(device_id)
+
     def stop(self) -> None:
         with self._lock:
             if self._server is not None:

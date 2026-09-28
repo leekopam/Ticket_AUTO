@@ -100,6 +100,7 @@ class DeviceInfo:
     first_seen_at: str
     last_seen_at: str
     revoked: bool
+    device_ids: tuple[str, ...] = ()  # 현재+과거 토큰 해시 — 작업 이력 집계용
 
 
 def sanitize_alias(value: str) -> str:
@@ -469,6 +470,9 @@ class PairingService:
             first_seen_at=record.first_seen_at,
             last_seen_at=record.last_seen_at,
             revoked=record.revoked,
+            device_ids=tuple(
+                h for h in [record.token_hash, *record.previous_token_hashes] if h
+            ),
         )
 
     def _save_tokens(self, records: dict[str, _DeviceRecord]) -> None:
