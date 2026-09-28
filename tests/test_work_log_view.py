@@ -117,6 +117,22 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         self.assertIn("입장권 x1", state.rows[0].ticket_text)
         self.assertNotIn("아메리카노", state.rows[0].ticket_text)
         self.assertIn("아메리카노 x2", state.rows[0].goods_text)
+
+    def test_row_shows_operator_device(self) -> None:
+        """행에도 처리 단말이 표시된다 — 상세를 열지 않아도 누가 처리했는지 보인다."""
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00"),
+            _order("A2", received_at="2026-04-26 11:00:00"),
+        ]
+        ops_index = {
+            "A1": {"order_id": "A1", "device_id": "uid-9", "device_name": "민기의 S24"},
+        }
+        state = build_work_log_view_state(orders, ops_index, [])
+        by_order = {r.order_number: r for r in state.rows}
+        # _operations에 없는 PC 본체 처리는 "PC"
+        self.assertEqual(by_order["A2"].device_text, "PC")
+        # 스냅샷 device_name 폴백
+        self.assertEqual(by_order["A1"].device_text, "민기의 S24")
         self.assertNotIn("입장권", state.rows[0].goods_text)
 
     def test_missing_selection_leaves_detail_hidden(self) -> None:

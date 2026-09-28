@@ -41,6 +41,7 @@ class WorkLogRowState:
     time_text: str
     ticket_text: str
     goods_text: str
+    device_text: str
     row_bgcolor: str
     is_selected: bool
     needs_check: bool
@@ -162,6 +163,7 @@ def build_work_log_view_state(
         # 목록에서 누르지 않아도 티켓/상품 이름이 바로 보이게 실제 품목명을 나열한다.
         ticket_text = " · ".join(ticket_goods) or "-"
         goods_text = " · ".join(general_goods) or "-"
+        record = ops_index.get(order.order_number.upper())
         rows.append(WorkLogRowState(
             order_number=order.order_number,
             seq=total - display_index,
@@ -170,12 +172,16 @@ def build_work_log_view_state(
             time_text=format_work_time(_work_log_time_key(order, ops_index)),
             ticket_text=ticket_text,
             goods_text=goods_text,
+            device_text=operator_label(
+                record,
+                device_lookup or (lambda _device_id: None),
+                order_received=order.is_received,
+            ),
             row_bgcolor=ACCENT_PRIMARY_SOFT if is_selected else ("#FFFFFF" if display_index % 2 == 0 else "#FAFAFA"),
             is_selected=is_selected,
             needs_check=needs_check,
         ))
         if is_selected:
-            record = ops_index.get(order.order_number.upper())
             detail = WorkLogDetailState(
                 order_number=order.order_number,
                 name=order.name,
@@ -221,6 +227,20 @@ def _build_badge(text: str, bgcolor: str, color: str) -> ft.Container:
     )
 
 
+def _build_device_chip(text: str) -> ft.Control:
+    """처리 단말 칩 — PC는 회색, 휴대폰은 강조색으로 구분한다."""
+    if not text:
+        return ft.Container(width=0, height=0)
+    is_pc = text == "PC"
+    return ft.Container(
+        content=ft.Text(text, size=11, weight=ft.FontWeight.W_600,
+                        color="#4B5A6E" if is_pc else ACCENT_PRIMARY_DEEP),
+        bgcolor="#EEF1F4" if is_pc else ACCENT_PRIMARY_SOFT,
+        border_radius=8,
+        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+    )
+
+
 def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> ft.Container:
     return ft.Container(
         content=ft.Row(
@@ -257,6 +277,11 @@ def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> f
                 ft.Container(
                     content=ft.Text(row.time_text, size=12, color="#333333"),
                     width=110,
+                ),
+                ft.Container(
+                    content=_build_device_chip(row.device_text),
+                    width=110,
+                    alignment=ft.alignment.center_left,
                 ),
             ],
             spacing=10,
@@ -404,6 +429,7 @@ def build_work_log_panel(
                             ),
                             _build_header_cell("연락처", 130),
                             _build_header_cell("처리시간", 110),
+                            _build_header_cell("처리", 110),
                         ],
                         spacing=10,
                     ),

@@ -59,13 +59,25 @@ class OpsRecordOrderIdTest(unittest.TestCase):
 class OpsDeviceCountsTest(unittest.TestCase):
     def test_counts_per_device_id(self) -> None:
         ops = [
-            {"device_id": "h1"},
-            {"device_id": "h1"},
-            {"device_id": "h2"},
-            {"device_id": ""},
+            {"device_id": "h1", "state": "succeeded"},
+            {"device_id": "h1", "state": "already_processed"},
+            {"device_id": "h2", "state": "succeeded"},
+            {"device_id": "", "state": "succeeded"},
             {},
         ]
         self.assertEqual(build_ops_device_counts(ops), {"h1": 2, "h2": 1})
+
+    def test_only_completed_states_counted(self) -> None:
+        """스캔 접수만으로는 건수가 증가하지 않는다 — 완료 상태만 집계."""
+        ops = [
+            {"device_id": "h1", "state": "succeeded"},
+            {"device_id": "h1", "state": "accepted"},
+            {"device_id": "h1", "state": "failed"},
+            {"device_id": "h1", "state": "rejected"},
+            {"device_id": "h1", "state": "needs_reconciliation"},
+            {"device_id": "h1"},  # 구형/누락 상태
+        ]
+        self.assertEqual(build_ops_device_counts(ops), {"h1": 1})
 
 
 class NetworkViewStateTest(unittest.TestCase):
@@ -97,7 +109,11 @@ class NetworkViewStateTest(unittest.TestCase):
 
     def test_processed_count_uses_all_hashes(self) -> None:
         device = _device(device_ids=("cur", "old"))
-        ops = [{"device_id": "cur"}, {"device_id": "old"}, {"device_id": "other"}]
+        ops = [
+            {"device_id": "cur", "state": "succeeded"},
+            {"device_id": "old", "state": "already_processed"},
+            {"device_id": "other", "state": "succeeded"},
+        ]
         state = build_network_view_state([device], [], ops, server_running=True, server_addr="", now=time.time())
         self.assertEqual(state.device_rows[0].processed_text, "처리 2건")
 

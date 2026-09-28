@@ -97,12 +97,17 @@ def _device_hashes(info: DeviceInfo) -> set[str]:
     return set(getattr(info, "device_ids", ()) or ())
 
 
+# 처리 완료로 간주하는 작업 종결 상태 — 접수/실패/확인필요는 건수에서 제외한다.
+_COUNTED_OP_STATES = {"succeeded", "already_processed"}
+
+
 def build_ops_device_counts(operations: list[dict[str, str]]) -> dict[str, int]:
-    """작업 이력의 device_id별 처리 건수를 계산한다."""
+    """작업 이력의 device_id별 처리 건수를 계산한다 — 완료된 작업만 집계."""
     counts: dict[str, int] = {}
     for record in operations or []:
         device_id = str(record.get("device_id") or "").strip()
-        if device_id:
+        state = str(record.get("state") or "").strip()
+        if device_id and state in _COUNTED_OP_STATES:
             counts[device_id] = counts.get(device_id, 0) + 1
     return counts
 

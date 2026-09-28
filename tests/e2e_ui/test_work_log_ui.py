@@ -61,6 +61,11 @@ def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
     page.get_by_text("테스트 상품 x1").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
+    # PC 본체 처리 건은 행 우측에 처리 단말 칩 "PC"가 표시된다
+    # (행이 클릭 가능 컨테이너라 자식 텍스트가 부모 노드로 병합되므로 부분 매칭)
+    page.get_by_text("PC").first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
 
     # 행 선택 → 우측 상세에 주문 정보와 전달 상품이 표시된다.
     row = page.get_by_text("테스트 사용자").first
