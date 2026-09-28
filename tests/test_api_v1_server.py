@@ -424,6 +424,8 @@ def test_work_log_lists_only_processed_with_masking(env):
     assert item["phone"] == "010-****-5678"
     assert item["status"] == "수령완료"
     assert item["device_name"] == "PC"      # _operations 없는 건 = PC 처리
+    assert item["goods"]                    # 티켓/상품 정보 포함
+    assert item["seat"] == "A-1"
     # 미수령 주문은 목록에 나오지 않는다
     assert all(i["order_number"] != "EEEE5555_FFFF6666" for i in body["items"])
 

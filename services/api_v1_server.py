@@ -497,8 +497,8 @@ def create_api_v1_app(
                     "name": _mask_name(order.name),
                     "phone": _mask_phone(order.phone),
                     "seat": order.seat,
+                    "goods": order.goods,
                     "status": RECONCILE_MARKER if needs_reconcile else "수령완료",
-                    "received_at": order.received_at or "",
                     "processed_at": order.received_at
                     or (str(record.get("updated_at") or "") if record else ""),
                     "device_name": device_label,
