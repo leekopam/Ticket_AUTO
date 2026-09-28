@@ -134,7 +134,8 @@ def _resolve_badge(order: Order) -> tuple[str, str, str]:
     if (order.order_status or "").strip() == RECONCILE_STATUS:
         return RECONCILE_STATUS, STATUS_WARNING_SOFT, STATUS_WARNING_TEXT
     if order.is_received:
-        return SUCCESS_BADGE_TEXT, SUCCESS_BADGE_BG, SUCCESS_BADGE_COLOR
+        # 수령 완료는 업무 탭의 기본 상태 — 별도 배지 없이 빈 칩으로 둔다
+        return "", "", ""
     return "처리중", "#E6EAFF", "#333F9E"
 
 
@@ -217,6 +218,8 @@ def _build_header_cell(text: str, width: float) -> ft.Container:
 
 
 def _build_badge(text: str, bgcolor: str, color: str) -> ft.Container:
+    if not text:
+        return ft.Container(width=0, height=0)
     return ft.Container(
         content=ft.Text(text, size=11, weight=ft.FontWeight.W_600, color=color),
         bgcolor=bgcolor,

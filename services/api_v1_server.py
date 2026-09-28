@@ -494,7 +494,7 @@ def create_api_v1_app(
             items.append(
                 {
                     "order_number": order.order_number,
-                    "name": _mask_name(order.name),
+                    "name": order.name,  # 페어링된 운영 단말용 — 이름은 원문 제공
                     "phone": _mask_phone(order.phone),
                     "seat": order.seat,
                     "goods": order.goods,

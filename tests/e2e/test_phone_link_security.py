@@ -303,4 +303,4 @@ def test_work_log_over_tls(link):
     assert body["state"] == "ok"
     assert isinstance(body["items"], list)
     if body["items"]:
-        assert "*" in body["items"][0]["name"]  # 이름 마스킹 유지
+        assert "*" in body["items"][0]["phone"]  # 연락처는 마스킹 유지

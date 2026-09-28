@@ -420,7 +420,7 @@ def test_work_log_lists_only_processed_with_masking(env):
     assert body["total"] == 1
     item = body["items"][0]
     assert item["order_number"] == "AAAA1111_BBBB2222"
-    assert item["name"] == "홍*동"          # 마스킹 규칙 재사용
+    assert item["name"] == "홍길동"          # 업무 목록은 이름 원문
     assert item["phone"] == "010-****-5678"
     assert item["status"] == "수령완료"
     assert item["device_name"] == "PC"      # _operations 없는 건 = PC 처리

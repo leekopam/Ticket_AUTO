@@ -69,7 +69,7 @@
 
 - 현재 Android 앱은 `/v1/scan`을 사용한다. PC의 티켓 확인과 윗치폼 로그인이 먼저 준비되어야 한다.
 - `/v1/scan` 결과는 `GET /v1/actions/{request_id}`로 조회한다. 종결 응답의 `order_id`와 `result.message`를 화면에 표시한다.
-- `/v1/work-log` 아이템: `{ order_number, name*, phone*, seat, goods, status("수령완료"|"확인필요"), processed_at, device_name, last_action_state }` — 이름·연락처는 마스킹, `device_name`은 기기 별칭 또는 `"PC"`(로컬 처리), `processed_at`은 수령 시각(없으면 작업 기록 시각). `_operations`는 기기·상태 조인용이며 그대로 노출하지 않는다.
+- `/v1/work-log` 아이템: `{ order_number, name, phone*, seat, goods, status("수령완료"|"확인필요"), processed_at, device_name, last_action_state }` — 이름은 원문(페어링된 운영 단말 전용), 연락처는 마스킹. `device_name`은 기기 별칭 또는 `"PC"`(로컬 처리), `processed_at`은 수령 시각(없으면 작업 기록 시각). `_operations`는 기기·상태 조인용이며 그대로 노출하지 않는다.
 - `action` v1 값: `"receipt"` (향후 폰 자체 윗치폼 처리 경로용)
 - 응답 공통: `{ "state": ..., "data_version": ..., "error": { "code": ..., "message": ... }? }`
 
