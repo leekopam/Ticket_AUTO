@@ -375,3 +375,28 @@ def test_malformed_json_body_rejected(env):
         headers={**_auth(token), "Content-Type": "application/json"},
     )
     assert res.status_code == 422
+
+
+def test_disconnect_marks_device_offline_immediately(env):
+    """명시 끊김 통지는 하트비트 타임아웃 없이 기기를 즉시 offline으로 바꾼다."""
+    from services.device_presence import PRESENCE_OFFLINE, PRESENCE_ONLINE, presence_state
+
+    token = _pair_device(env)
+    env["client"].get("/v1/status", headers=_auth(token))
+    device_id = env["pairing"].device_id_for_token(token)
+    record = env["pairing"].record_for_device_id(device_id)
+    assert presence_state(record, time.time()) == PRESENCE_ONLINE
+
+    res = env["client"].post("/v1/disconnect", headers=_auth(token))
+    assert res.status_code == 200
+    record = env["pairing"].record_for_device_id(device_id)
+    assert presence_state(record, time.time()) == PRESENCE_OFFLINE
+
+    # 토큰은 유효 — 다음 인증 활동이 오면 자동으로 온라인 복귀한다
+    assert env["client"].get("/v1/status", headers=_auth(token)).status_code == 200
+    record = env["pairing"].record_for_device_id(device_id)
+    assert presence_state(record, time.time()) == PRESENCE_ONLINE
+
+
+def test_disconnect_requires_auth(env):
+    assert env["client"].post("/v1/disconnect").status_code == 401

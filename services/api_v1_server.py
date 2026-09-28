@@ -352,6 +352,17 @@ def create_api_v1_app(
             "in_progress": registry.in_progress_count(),
         }
 
+    @app.post("/v1/disconnect")
+    def disconnect(device: str = Depends(require_device)):
+        """폰이 정상적으로 연결을 끊을 때의 명시 통지.
+
+        require_device가 활동 시각을 먼저 갱신하므로 여기서 비우면
+        하트비트 타임아웃(45초)을 기다리지 않고 즉시 끊김으로 표시된다.
+        멱등 — 토큰은 유효한 채로 남고 다음 인증 활동이 오면 자동 복귀한다.
+        """
+        pairing.mark_disconnected(device)
+        return {"ok": True}
+
     # ------------------------------ orders ------------------------------
 
     def _mask_name(value: str) -> str:

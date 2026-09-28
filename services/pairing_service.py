@@ -373,6 +373,30 @@ class PairingService:
                 self._dirty = False
                 self._last_persisted = time.time()
 
+    def mark_disconnected(self, device_id: str) -> bool:
+        """기기가 명시 통지로 연결을 끊었음을 기록한다 — presence를 즉시 끊김으로.
+
+        last_seen_at을 비우면 presence_state가 offline을 반환한다.
+        이후 인증 요청이 오면 record_activity가 다시 채워 자동 복귀한다.
+        """
+        with self._lock:
+            found = self._find_by_token_hash(device_id)
+            if found is None:
+                return False
+            records = dict(self._records)
+            record = replace(found, last_seen_at="")
+            records[record.record_id] = record
+            try:
+                self._save_tokens(records)
+            except OSError:
+                logger.warning("기기 끊김 상태 저장 실패", exc_info=True)
+                return False
+            self._records = records
+            self._last_persisted = time.time()
+            self._dirty = False
+            logger.info("기기 명시적 연결 해제: %s", record.record_id)
+            return True
+
     def revoke_token(self, token: str) -> bool:
         """토큰을 폐기한다. 레코드와 별칭은 revoked 상태로 보존한다."""
         with self._lock:

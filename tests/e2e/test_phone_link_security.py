@@ -259,3 +259,27 @@ def test_expired_token_rejected_over_tls(link):
     record = next(iter(pairing._records.values()))
     record.token_expires_at = time.time() - 1
     assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 401
+
+
+def test_explicit_disconnect_over_tls(link):
+    """명시 끊김 통지가 실 TLS 경로에서 기기를 즉시 끊김으로 만든다."""
+    from services.device_presence import PRESENCE_OFFLINE, PRESENCE_ONLINE, presence_state
+
+    port, fingerprint, pairing = link
+    code = pairing.issue_join_code()
+    _, pending = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": code, "device_name": "staff-phone"},
+    )
+    assert pairing.approve(pending["pair_ticket"])
+    token = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair", body={"pair_ticket": pending["pair_ticket"]}
+    )[1]["device_token"]
+
+    assert _pinned_json(port, fingerprint, "GET", "/v1/status", token=token)[0] == 200
+    device = pairing.list_devices()[0]
+    assert presence_state(device, time.time()) == PRESENCE_ONLINE
+
+    assert _pinned_json(port, fingerprint, "POST", "/v1/disconnect", token=token)[0] == 200
+    device = pairing.list_devices()[0]
+    assert presence_state(device, time.time()) == PRESENCE_OFFLINE

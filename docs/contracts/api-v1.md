@@ -49,6 +49,7 @@
 
 - 폰은 앱이 포그라운드일 때만 15초 간격으로 `GET /v1/status`를 호출한다 (별도 하트비트 엔드포인트 없음)
 - PC는 인증된 요청마다 `last_seen`을 갱신하고, 45초 이상 활동이 없으면 네트워크 관리 탭에서 "연결 끊김"으로 표시한다
+- 폰이 정상적으로 연결을 끊을 때 `POST /v1/disconnect`를 호출해 즉시 끊김으로 표시한다. 비정상 종료(앱 강제종료·네트워크 단절)는 45초 타임아웃이 감지한다
 - 백그라운드/종료 시 폰은 하트비트를 멈추므로 끊김 표시는 정상 동작이다
 
 ## 3. 엔드포인트
@@ -56,6 +57,7 @@
 | 메서드 | 경로 | 역할 |
 |---|---|---|
 | GET | `/v1/status` | `server_id`, `dataset_generation`, `data_version`, 윗치폼 로그인 여부, 처리 중 건수 |
+| POST | `/v1/disconnect` | 명시적 연결 해제 통지 → PC presence를 즉시 끊김으로. 멱등·토큰 유효 유지 |
 | GET | `/v1/orders/{order_id}` | 주문 상세 + 현재 상태 |
 | GET | `/v1/orders?since={data_version}` | 변경분 조회(ETag 대응). 전체 재조회는 since 생략 |
 | GET | `/v1/orders/search?q=` | 이름/주문번호 검색 — **200건 제한 없는 전체 조회 경로** (기존 `search_orders`와 분리) |
