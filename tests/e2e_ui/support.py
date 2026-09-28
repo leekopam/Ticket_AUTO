@@ -146,6 +146,7 @@ def run_control_server(
     app_getter: Callable[[], "FakeDashboardRuntimeApp | None"],
     port: int,
     printer: Any | None = None,
+    phone_link: Any | None = None,
 ) -> ThreadingHTTPServer:
     """테스트 프로세스→앱 프로세스 명령 주입용 최소 HTTP 서버를 기동한다.
 
@@ -196,6 +197,17 @@ def run_control_server(
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             except Exception:
                 self._send_json(400, {"ok": False, "error": "invalid json"})
+                return
+            if str(payload.get("cmd", "")).startswith("phone_"):
+                if phone_link is None:
+                    self._send_json(503, {"ok": False, "error": "phone link not wired"})
+                    return
+                try:
+                    result = _handle_phone_command(phone_link, payload)
+                except Exception as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, "result": result})
                 return
             app = app_getter()
             if app is None:
@@ -284,3 +296,157 @@ def wait_for_button(page, name: str, timeout_ms: int = 15000):
     button = page.get_by_role("button", name=name, exact=True)
     button.wait_for(state="visible", timeout=timeout_ms)
     return button
+
+
+# --- 스텁 폰: 제어 서버 안에서 실제 TLS 페어링/하트비트를 수행한다 ---
+
+
+def _pinned_request(
+    addr: str,
+    fingerprint: str,
+    method: str,
+    path: str,
+    *,
+    body: dict | None = None,
+    token: str = "",
+) -> tuple[int, dict]:
+    """인증서 지문을 확인한 뒤 LAN API로 JSON 요청을 보낸다 (실제 폰과 동일 경로)."""
+    import hashlib
+    import http.client
+    import ssl
+    from urllib.parse import urlparse
+
+    parsed = urlparse(addr)
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    connection = http.client.HTTPSConnection(
+        parsed.hostname, parsed.port, context=context, timeout=5
+    )
+    try:
+        connection.connect()
+        certificate = connection.sock.getpeercert(binary_form=True)
+        actual = hashlib.sha256(certificate).hexdigest().upper()
+        if actual != fingerprint.replace(":", "").upper():
+            raise ValueError("서버 인증서 지문 불일치")
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        connection.request(
+            method, path,
+            body=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers=headers,
+        )
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def _handle_phone_command(phone_link, payload: dict) -> dict:
+    """스텁 폰 명령을 실행한다. 앱 프로세스 안에서 실제 HTTPS 왕복을 만든다.
+
+    - phone_link_start: LAN API 서버 기동 → {"addr", "fingerprint"}
+    - phone_pair: join_code로 /v1/pair → (approve 시) 티켓 완료 → token 반환
+    - phone_status: Bearer 토큰으로 /v1/status (하트비트 역할, last_seen 갱신)
+    - phone_scan: /v1/scan → 종결까지 폴링해 결과 반환
+    - phone_revoke_self: revoke는 PC UI가 하므로 없음
+    """
+    cmd = str(payload.get("cmd"))
+    if cmd == "phone_link_start":
+        link_payload = phone_link.start()
+        return {
+            "addr": link_payload["addr"],
+            "fingerprint": link_payload["cert_sha256"],
+        }
+
+    if cmd == "phone_pair":
+        state = _phone_state(phone_link)
+        addr, fp = state["addr"], state["fingerprint"]
+        join_code = phone_link.pairing.issue_join_code()
+        _, pending = _pinned_request(
+            addr, fp, "POST", "/v1/pair",
+            body={
+                "join_code": join_code,
+                "device_name": str(payload.get("device_name", "stub-phone")),
+                "device_uid": str(payload.get("device_uid", "")),
+            },
+        )
+        ticket = str(pending.get("pair_ticket", ""))
+        if not payload.get("approve", True):
+            # 실제 폰처럼 승인 여부를 백그라운드에서 폴링한다.
+            # UI의 승인/거절 버튼이 결과를 결정하도록 즉시 반환한다.
+            _pair_waiter(phone_link, addr, fp, ticket)
+            return {"token": "", "pair_ticket": ticket, "state": pending.get("state", "")}
+        phone_link.approve(ticket)
+        status, approved = _pinned_request(
+            addr, fp, "POST", "/v1/pair", body={"pair_ticket": ticket}
+        )
+        if status != 200:
+            raise RuntimeError(f"pair 승인 완료 실패: {approved}")
+        return {
+            "token": approved.get("device_token", ""),
+            "state": approved.get("state", ""),
+        }
+
+    if cmd == "phone_status":
+        state = _phone_state(phone_link)
+        status, body = _pinned_request(
+            state["addr"], state["fingerprint"], "GET", "/v1/status",
+            token=str(payload.get("token", "")),
+        )
+        return {"http": status, "body": body}
+
+    if cmd == "phone_scan":
+        state = _phone_state(phone_link)
+        token = str(payload.get("token", ""))
+        request_id = str(payload.get("request_id", "e2e-scan-1"))
+        qr_url = str(payload.get("qr_url", ""))
+        _pinned_request(
+            state["addr"], state["fingerprint"], "POST", "/v1/scan",
+            body={"request_id": request_id, "qr_url": qr_url}, token=token,
+        )
+        import time as _time
+
+        deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < deadline:
+            status, action = _pinned_request(
+                state["addr"], state["fingerprint"], "GET",
+                f"/v1/actions/{request_id}", token=token,
+            )
+            if status == 200 and action.get("state") not in ("accepted", "in_progress"):
+                return action
+            _time.sleep(0.3)
+        raise RuntimeError("phone_scan 결과 대기 시간 초과")
+
+    raise ValueError(f"알 수 없는 폰 명령: {cmd}")
+
+
+def _pair_waiter(phone_link, addr: str, fingerprint: str, pair_ticket: str) -> None:
+    """승인 대기 중 티켓 교환을 백그라운드에서 마무리한다 (폰의 승인 폴링과 동일)."""
+    import time as _time
+
+    def _wait() -> None:
+        deadline = _time.monotonic() + 120.0
+        while _time.monotonic() < deadline:
+            _time.sleep(1.0)
+            try:
+                _, body = _pinned_request(
+                    addr, fingerprint, "POST", "/v1/pair",
+                    body={"pair_ticket": pair_ticket},
+                )
+            except Exception:
+                continue
+            if body.get("state") != "pending_approval":
+                return
+
+    threading.Thread(target=_wait, daemon=True).start()
+
+
+def _phone_state(phone_link) -> dict:
+    """기동 중인 LAN 서버의 addr/fingerprint를 꺼낸다. 꺼져 있으면 기동한다."""
+    link_payload = phone_link.payload or phone_link.start()
+    return {
+        "addr": link_payload["addr"],
+        "fingerprint": link_payload["cert_sha256"],
+    }

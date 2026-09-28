@@ -27,7 +27,11 @@ if str(TESTS_DIR) not in sys.path:
 
 import project_paths  # noqa: E402
 
-from e2e_ui.support import FakeDashboardRuntimeApp, run_control_server  # noqa: E402
+from e2e_ui.support import (  # noqa: E402
+    FakeDashboardRuntimeApp,
+    find_free_port,
+    run_control_server,
+)
 
 
 def _demo_console(control_url: str) -> None:
@@ -100,7 +104,6 @@ def main() -> int:
         import tempfile
 
         from e2e.support import create_test_workbook
-        from e2e_ui.support import find_free_port
 
         port = args.port or find_free_port()
         control_port = args.control_port or find_free_port()
@@ -153,8 +156,19 @@ def main() -> int:
         return current_app["value"]
 
     runtime_manager = TicketRuntimeManager(app_factory=_app_factory)
+
+    # 네트워크 관리 E2E: 실제 LAN API 서버를 테스트 전용 포트/저장소로 띄운다.
+    # 제어 서버의 phone_* 명령이 이 서비스에 스텁 폰 역할로 연결한다.
+    from services.phone_link_service import PhoneLinkService
+
+    phone_link = PhoneLinkService(
+        port=find_free_port(),
+        scan_handler=runtime_manager.process_phone_qr,
+        token_store_path=str(runtime_dir / ".runtime" / "api_devices.json"),
+    )
     run_control_server(
-        lambda: current_app["value"], control_port, printer=fake_printer
+        lambda: current_app["value"], control_port, printer=fake_printer,
+        phone_link=phone_link,
     )
 
     if args.demo:
@@ -169,6 +183,7 @@ def main() -> int:
     view = DashboardFletView(
         runtime_manager=runtime_manager,
         window_title=args.title or None,
+        phone_link_service=phone_link,
     )
     if args.native:
         view.run()

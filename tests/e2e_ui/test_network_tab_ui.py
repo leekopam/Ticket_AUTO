@@ -1,0 +1,180 @@
+"""네트워크 관리 탭 UI 시나리오 (Flet web + headless Playwright + 스텁 폰).
+
+제어 서버의 phone_* 명령이 앱 프로세스 안에서 실제 HTTPS로
+페어링·승인·하트비트(/v1/status)를 수행한다 — Android 앱과 같은 경로.
+
+검증: 빈 상태 → 승인 대기 → 승인 → 연결됨 배지 → 이름 변경 UI →
+_ops 기록과 기기 해시 조인으로 처리 건수·처리 단말 이름 표시.
+
+주의: 클릭 가능한 기기 행은 하위 텍스트가 role="group" 노드의
+aria-label로 병합되므로 get_by_text가 아니라 role/name 매칭을 쓴다.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+from pathlib import Path
+
+from openpyxl import load_workbook
+
+from e2e.support import TEST_ORDER_NUMBER, create_test_workbook
+from e2e_ui.support import send_control_command, wait_for_button
+
+_TIMEOUT_MS = 20000
+_POLL_MS = 20000  # 탭 내부 3초 주기 갱신 + 승인 왕복/semantics 반영 여유
+
+_DEVICE_UID = "e2e00000-1111-4222-8333-444455556666"
+# 세션 공유 서버라 테스트2는 별도 기기로 페어링한다(테스트1의 별칭과 무관).
+_DEVICE_UID_2 = "e2e00000-9999-4222-8333-444455556666"
+_DEVICE_NAME_2 = "테스트폰2"
+
+
+def _open_network_tab(page) -> None:
+    wait_for_button(page, "네트워크 관리", timeout_ms=_TIMEOUT_MS).click()
+
+
+def _device_row(page, name_pattern: str):
+    """기기 행의 병합 semantics 노드(role=group, aria-label=행 전체 텍스트)."""
+    return page.get_by_role("group", name=re.compile(name_pattern, re.S))
+
+
+def _write_ops_record(data_path: Path, *, order_number: str, device_hash: str) -> None:
+    """테스트 워크북의 _operations 시트에 폰 처리 기록을 한 건 넣는다."""
+    workbook = load_workbook(data_path)
+    try:
+        if "_operations" in workbook.sheetnames:
+            ws = workbook["_operations"]
+        else:
+            ws = workbook.create_sheet("_operations")
+            ws.append([
+                "request_id", "order_id", "action", "device_id", "state",
+                "result_json", "created_at", "updated_at", "device_name",
+            ])
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        ws.append([
+            "e2e-req-1", order_number, "scan_receipt", device_hash,
+            "succeeded", "{}", now, now, "",
+        ])
+        workbook.save(data_path)
+    finally:
+        workbook.close()
+
+
+def _mark_order_received(data_path: Path, order_number: str, timestamp: str) -> None:
+    workbook = load_workbook(data_path)
+    try:
+        ws = workbook.active
+        headers = {str(c.value or "").strip(): i for i, c in enumerate(ws[1], 1)}
+        order_col, received_col = headers.get("주문번호"), headers.get("수령확인")
+        assert order_col and received_col, "테스트 워크북에 필요한 헤더가 없습니다."
+        for row in range(2, ws.max_row + 1):
+            if str(ws.cell(row=row, column=order_col).value or "").strip() == order_number:
+                ws.cell(row=row, column=received_col, value=timestamp)
+                workbook.save(data_path)
+                return
+        raise AssertionError(f"테스트 워크북에 주문 {order_number}가 없습니다.")
+    finally:
+        workbook.close()
+
+
+def test_network_tab_pair_pending_approve_rename(page, flet_server):
+    control_url = flet_server["control_url"]
+
+    _open_network_tab(page)
+    page.get_by_text("아직 연결된 휴대폰이 없습니다.", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+
+    # LAN 서버 기동 → 서버 주소 카드 표시
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    page.get_by_text("서버 주소: https://").first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    # 스텁 폰이 실제 TLS로 pair 요청 → 승인 대기 섹션에 표시
+    send_control_command(
+        control_url,
+        {
+            "cmd": "phone_pair",
+            "device_name": "테스트폰",
+            "device_uid": _DEVICE_UID,
+            "approve": False,
+        },
+    )
+    page.get_by_text("승인 대기").first.wait_for(state="visible", timeout=_POLL_MS)
+    page.get_by_text("테스트폰").first.wait_for(state="visible", timeout=_POLL_MS)
+
+    # UI에서 승인 → 스텁 폰의 백그라운드 티켓 교환 완료 → 기기 목록에 연결됨
+    wait_for_button(page, "승인", timeout_ms=_POLL_MS).click()
+    _device_row(page, "테스트폰").first.wait_for(state="visible", timeout=_POLL_MS)
+    _device_row(page, "연결됨").first.wait_for(state="visible", timeout=_POLL_MS)
+    page.get_by_text("연결됨 1 / 전체 1", exact=True).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    # 이름 변경 다이얼로그 → 별칭 저장 → 목록에 별칭 표시
+    wait_for_button(page, "이름 변경", timeout_ms=_TIMEOUT_MS).click()
+    field = page.locator('input[aria-label="기기 이름"]')
+    field.wait_for(state="visible", timeout=_TIMEOUT_MS)
+    field.fill("입구1번")
+    wait_for_button(page, "저장", timeout_ms=_TIMEOUT_MS).click()
+    _device_row(page, "입구1번").first.wait_for(state="visible", timeout=_POLL_MS)
+
+
+def test_network_tab_processed_count_and_processor_name(page, flet_server):
+    control_url = flet_server["control_url"]
+    # 세션 공유 워크북을 오염시키지 않도록 테스트 종료 시 시드 상태로 복원한다.
+    data_path = Path(flet_server["runtime_dir"]) / "Resources" / "data" / "data.xlsx"
+
+    # 스텁 폰 페어링(자동 승인) → 토큰 확보
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    result = send_control_command(
+        control_url,
+        {
+            "cmd": "phone_pair",
+            "device_name": _DEVICE_NAME_2,
+            "device_uid": _DEVICE_UID_2,
+        },
+    )["result"]
+    token = result["token"]
+    assert token
+
+    # 하트비트 역할 — 인증 호출이 last_seen을 갱신한다
+    send_control_command(control_url, {"cmd": "phone_status", "token": token})
+
+    try:
+        # 폰이 처리한 것처럼 _operations에 기록 + 주문 수령 기록
+        device_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        _write_ops_record(data_path, order_number=TEST_ORDER_NUMBER, device_hash=device_hash)
+        _mark_order_received(data_path, TEST_ORDER_NUMBER, "2026-09-28 12:00:00")
+
+        # 네트워크 탭 — 기기 행에 처리 건수와 연결됨 표시 (병합 라벨 기준)
+        _open_network_tab(page)
+        row = _device_row(page, _DEVICE_NAME_2).first
+        row.wait_for(state="visible", timeout=_POLL_MS)
+        _device_row(page, f"{_DEVICE_NAME_2}.*연결됨").first.wait_for(
+            state="visible", timeout=_POLL_MS
+        )
+        _device_row(page, f"{_DEVICE_NAME_2}.*처리 1건").first.wait_for(
+            state="visible", timeout=_POLL_MS
+        )
+
+        # 기기 선택 → 최근 처리 목록에 주문번호 표시
+        # semantics 노드는 flutter-view 아래라 DOM click으로 탭을 전달한다.
+        row.evaluate("e => e.click()")
+        page.get_by_text(TEST_ORDER_NUMBER).first.wait_for(
+            state="visible", timeout=_TIMEOUT_MS
+        )
+
+        # 티켓 업무 탭 — 처리 단말이 기기 이름으로 조인된다
+        wait_for_button(page, "티켓 업무", timeout_ms=_TIMEOUT_MS).click()
+        page.get_by_text("테스트 사용자").first.wait_for(
+            state="visible", timeout=_TIMEOUT_MS
+        )
+        page.get_by_text("테스트 사용자").first.click()
+        page.get_by_text(f"처리 단말: {_DEVICE_NAME_2}").first.wait_for(
+            state="visible", timeout=_TIMEOUT_MS
+        )
+    finally:
+        create_test_workbook(data_path)

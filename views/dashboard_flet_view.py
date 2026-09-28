@@ -2423,6 +2423,7 @@ class DashboardFletView:
         self,
         runtime_manager: TicketRuntimeManager | None = None,
         window_title: str | None = None,
+        phone_link_service: PhoneLinkService | None = None,
     ):
         settings = ReceiptSettingsStore(".runtime/receipt_settings.json").load()
         # 주입된 매니저(테스트 스텁)면 시작 시 카메라 기반 실제 Application 팩토리로 덮어쓰지 않는다.
@@ -2432,6 +2433,8 @@ class DashboardFletView:
         )
         # UIA E2E 등에서 창 식별용으로 제목을 바꿀 수 있다(기본값은 기존과 동일).
         self._window_title = window_title or "Ticket_AUTO Control Center"
+        # E2E가 포트/저장소를 격리해 주입할 수 있다(기본값은 운영 서비스 생성).
+        self._phone_link_service = phone_link_service
 
     def run(self, web_port: int | None = None) -> None:
         # web_port 지정 시 브라우저 없이 web 서버 모드로만 기동한다(E2E 테스트용).
@@ -2673,7 +2676,9 @@ class DashboardFletView:
             icon=ICONS.SMARTPHONE_ROUNDED,
             key="dashboard_phone_link_button",
         )
-        phone_link_service = PhoneLinkService(scan_handler=self._runtime_manager.process_phone_qr)
+        phone_link_service = self._phone_link_service or PhoneLinkService(
+            scan_handler=self._runtime_manager.process_phone_qr
+        )
 
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
         btn_work_tab = ft.TextButton("티켓 업무", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")

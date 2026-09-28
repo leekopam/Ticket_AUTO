@@ -75,9 +75,9 @@ def flet_server(tmp_path_factory):
     log_file.close()
 
 
-@pytest.fixture
-def page(flet_server, request):
-    """semantics 접근성이 활성화된 Playwright 페이지를 제공한다."""
+@pytest.fixture(scope="session")
+def playwright_browser():
+    """테스트 간 공유하는 Chromium 인스턴스 (격리는 per-test context가 담당)."""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -87,40 +87,51 @@ def page(flet_server, request):
             headless=not headed,
             slow_mo=400 if headed else 0,
         )
-        context = browser.new_context(
-            viewport={"width": 1800, "height": 920},
-            permissions=["clipboard-read", "clipboard-write"],
-        )
-        pw_page = context.new_page()
-        # 실패 스크린샷 훅이 참조할 수 있도록 노드에 보관한다.
-        request.node._e2e_page = pw_page
-        pw_page.goto(flet_server["base_url"], wait_until="domcontentloaded")
-        # Flutter 접근성 트리를 활성화해 role/aria-label 탐색을 가능하게 한다.
-        pw_page.wait_for_selector("flt-semantics-placeholder", timeout=60000)
-        pw_page.locator("flt-semantics-placeholder").evaluate("e => e.click()")
-        # 버튼이 여러 개 렌더될 때까지 semantics 트리 완성을 기다린다.
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if pw_page.locator('flt-semantics[role="button"]').count() > 5:
-                break
-            time.sleep(0.4)
-        else:
-            pytest.fail("대시보드 semantics 트리가 초기화되지 않았습니다.")
-        yield pw_page
-        # 런타임이 켜진 채 끝나면 다음 테스트가 오염되므로 중지 상태로 돌려놓는다.
-        try:
-            stop_button = pw_page.get_by_role("button", name="중지", exact=True)
-            if stop_button.count() and stop_button.first.is_visible():
-                stop_button.first.click()
-                pw_page.get_by_role(
-                    "button", name="티켓 확인 시작", exact=True
-                ).wait_for(state="visible", timeout=10000)
-        except Exception:
-            pass
+        yield browser
         try:
             browser.close()
         except Exception:
             pass
+
+
+@pytest.fixture
+def page(flet_server, playwright_browser, request):
+    """semantics 접근성이 활성화된 Playwright 페이지를 제공한다."""
+    # 매 테스트 새 context를 만들어 쿠키·스토리지 격리를 유지한다.
+    context = playwright_browser.new_context(
+        viewport={"width": 1800, "height": 920},
+        permissions=["clipboard-read", "clipboard-write"],
+    )
+    pw_page = context.new_page()
+    # 실패 스크린샷 훅이 참조할 수 있도록 노드에 보관한다.
+    request.node._e2e_page = pw_page
+    pw_page.goto(flet_server["base_url"], wait_until="domcontentloaded")
+    # Flutter 접근성 트리를 활성화해 role/aria-label 탐색을 가능하게 한다.
+    pw_page.wait_for_selector("flt-semantics-placeholder", timeout=60000)
+    pw_page.locator("flt-semantics-placeholder").evaluate("e => e.click()")
+    # 버튼이 여러 개 렌더될 때까지 semantics 트리 완성을 기다린다.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if pw_page.locator('flt-semantics[role="button"]').count() > 5:
+            break
+        time.sleep(0.4)
+    else:
+        pytest.fail("대시보드 semantics 트리가 초기화되지 않았습니다.")
+    yield pw_page
+    # 런타임이 켜진 채 끝나면 다음 테스트가 오염되므로 중지 상태로 돌려놓는다.
+    try:
+        stop_button = pw_page.get_by_role("button", name="중지", exact=True)
+        if stop_button.count() and stop_button.first.is_visible():
+            stop_button.first.click()
+            pw_page.get_by_role(
+                "button", name="티켓 확인 시작", exact=True
+            ).wait_for(state="visible", timeout=10000)
+    except Exception:
+        pass
+    try:
+        context.close()
+    except Exception:
+        pass
 
 
 @pytest.hookimpl(wrapper=True)
