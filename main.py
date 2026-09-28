@@ -134,9 +134,9 @@ class Application:
 
     def process_phone_qr(self, qr_url: str) -> dict[str, str]:
         """휴대폰 QR을 PC 스캔과 같은 런타임 순서로 처리한다."""
-        if self._load_ticket_debug_settings().offline_scan_mode:
-            return {"state": "rejected", "message": "오프라인 디버그 모드에서는 휴대폰 수령 처리를 사용할 수 없습니다."}
         if self._state not in (AppState.READY, AppState.PROCESSING) or self._is_stop_requested():
+            if self._load_ticket_debug_settings().offline_scan_mode:
+                return {"state": "rejected", "message": "PC 티켓 확인을 먼저 시작해주세요."}
             return {"state": "rejected", "message": "PC 티켓 확인과 윗치폼 로그인을 먼저 시작해주세요."}
         request = _PhoneScan(qr_url)
         self._phone_scans.put(request)
