@@ -228,20 +228,19 @@ def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> f
                     alignment=ft.alignment.center_left,
                 ),
                 ft.Container(
-                    content=ft.Column(
-                        controls=[
-                            ft.Text(
-                                (row.name or "-") + ("  [확인필요]" if row.needs_check else ""),
-                                size=14,
-                                weight=ft.FontWeight.W_600,
-                                color=STATUS_WARNING_TEXT if row.needs_check else "#1F1F1F",
-                            ),
-                            ft.Text(row.summary_text, size=12, color="#6B7787"),
-                        ],
-                        spacing=2,
-                        tight=True,
+                    content=ft.Text(
+                        (row.name or "-") + ("  [확인필요]" if row.needs_check else ""),
+                        size=14,
+                        weight=ft.FontWeight.W_600,
+                        color=STATUS_WARNING_TEXT if row.needs_check else "#1F1F1F",
                     ),
+                    width=120,
+                    alignment=ft.alignment.center_left,
+                ),
+                ft.Container(
+                    content=ft.Text(row.summary_text, size=12, color="#6B7787"),
                     expand=True,
+                    alignment=ft.alignment.center_left,
                 ),
                 ft.Container(
                     content=ft.Text(row.phone or "-", size=13, color="#333333"),
@@ -384,8 +383,9 @@ def build_work_log_panel(
                     content=ft.Row(
                         controls=[
                             _build_header_cell("순번", 44),
+                            _build_header_cell("이름", 120),
                             ft.Container(
-                                content=ft.Text("이름 / 내용", weight=ft.FontWeight.BOLD, size=13, color="#333333"),
+                                content=ft.Text("상품", weight=ft.FontWeight.BOLD, size=13, color="#333333"),
                                 expand=True,
                                 alignment=ft.alignment.center_left,
                             ),
