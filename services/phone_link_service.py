@@ -20,7 +20,7 @@ from services.api_v1_server import (
 )
 from services.cert_service import detect_lan_ips
 from services.excel_service import ExcelService
-from services.pairing_service import PairingService, PendingApproval
+from services.pairing_service import DeviceInfo, PairingService, PendingApproval
 
 DEFAULT_PORT = 18765  # 8765는 일부 환경에서 타 앱이 점유한다
 
@@ -33,13 +33,15 @@ class PhoneLinkService:
         port: int = DEFAULT_PORT,
         data_path: Path | None = None,
         scan_handler: Callable[[str], dict[str, str]] | None = None,
+        token_store_path: str | None = None,
     ):
         self._port = port
         self._data_path = data_path
         self._scan_handler = scan_handler
         self._lock = threading.RLock()
         self._server: LanApiServer | None = None
-        self._pairing: PairingService | None = None
+        # 기기 레지스트리는 서버 수명과 무관하게 상시 유지한다 (네트워크 관리 탭이 조회)
+        self._pairing = PairingService(token_store_path)
         self._payload: dict | None = None
 
     @property
@@ -58,17 +60,19 @@ class PhoneLinkService:
 
             data_path = self._data_path if self._data_path is not None else ensure_managed_data_file()
             excel = ExcelService(str(data_path))
-            server, pairing, fingerprint = create_server(
-                excel=excel, port=self._port, scan_handler=self._scan_handler
+            server, _, fingerprint = create_server(
+                excel=excel,
+                port=self._port,
+                pairing=self._pairing,
+                scan_handler=self._scan_handler,
             )
-            join_code = pairing.issue_join_code()
+            join_code = self._pairing.issue_join_code()
             generation, _ = DatasetTracker(excel).current()
 
             addr = f"https://{detect_lan_ips()[0]}:{self._port}"
             self._payload = build_pairing_qr_payload(addr, fingerprint, join_code, generation)
             server.start()
             self._server = server
-            self._pairing = pairing
             return self._payload
 
     def reissue_join_code(self) -> dict:
@@ -76,29 +80,46 @@ class PhoneLinkService:
         with self._lock:
             if self._server is None or self._payload is None:
                 return self.start()
-            assert self._pairing is not None
             self._payload = {**self._payload, "join_code": self._pairing.issue_join_code()}
             return self._payload
 
     def pending_approvals(self) -> list[PendingApproval]:
         with self._lock:
-            if self._pairing is None:
-                return []
             return self._pairing.pending_approvals()
 
     def approve(self, pair_ticket: str) -> bool:
         with self._lock:
-            return bool(self._pairing and self._pairing.approve(pair_ticket))
+            return self._pairing.approve(pair_ticket)
 
     def reject(self, pair_ticket: str) -> None:
         with self._lock:
-            if self._pairing is not None:
-                self._pairing.reject(pair_ticket)
+            self._pairing.reject(pair_ticket)
+
+    # ------------------------------------------------------------------
+    # 기기 레지스트리 조회/관리 (서버 상태와 무관하게 동작)
+    # ------------------------------------------------------------------
+
+    @property
+    def pairing(self) -> PairingService:
+        return self._pairing
+
+    def list_devices(self) -> list[DeviceInfo]:
+        return self._pairing.list_devices()
+
+    def rename_device(self, record_id: str, alias: str) -> bool:
+        return self._pairing.rename_device(record_id, alias)
+
+    def revoke_device(self, record_id: str) -> bool:
+        return self._pairing.revoke_device(record_id)
+
+    def forget_device(self, record_id: str) -> bool:
+        return self._pairing.forget_device(record_id)
 
     def stop(self) -> None:
         with self._lock:
             if self._server is not None:
                 self._server.stop()
+            # 레지스트리는 유지하고 미반영 활동 시각만 남긴다
+            self._pairing.flush()
             self._server = None
-            self._pairing = None
             self._payload = None

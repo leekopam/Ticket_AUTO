@@ -358,6 +358,25 @@ class PairingService:
             self._records = records
             return True
 
+    def revoke_device(self, record_id: str) -> bool:
+        """레코드 ID로 기기를 차단한다. 레코드와 이름은 보존한다."""
+        with self._lock:
+            found = self._records.get(record_id or "")
+            if found is None or found.revoked:
+                return False
+            records = dict(self._records)
+            record = replace(
+                found, previous_token_hashes=list(found.previous_token_hashes)
+            )
+            if record.token_hash:
+                record.previous_token_hashes.append(record.token_hash)
+            record.token_hash = ""
+            record.revoked = True
+            records[record.record_id] = record
+            self._save_tokens(records)
+            self._records = records
+            return True
+
     def revoke_all(self) -> int:
         """행사 종료 시 전체 토큰 폐기. 레코드는 보존하고 revoked로 전환한다."""
         with self._lock:

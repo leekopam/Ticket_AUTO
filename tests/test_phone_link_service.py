@@ -32,7 +32,11 @@ def _make_orders_xlsx(path: Path) -> None:
 def service(tmp_path: Path):
     data = tmp_path / "data.xlsx"
     _make_orders_xlsx(data)
-    svc = PhoneLinkService(port=_free_port(), data_path=data)
+    svc = PhoneLinkService(
+        port=_free_port(),
+        data_path=data,
+        token_store_path=str(tmp_path / "devices.json"),
+    )
     yield svc
     svc.stop()
 
@@ -89,3 +93,33 @@ def test_stop_clears_state(service):
     service.stop()
     assert not service.running
     assert service.payload is None
+
+
+def test_registry_survives_server_stop(service, tmp_path: Path):
+    """서버가 꺼져도 기기 레지스트리는 조회·관리 가능해야 한다 (네트워크 관리 탭)."""
+    payload = service.start()
+    addr = f"https://127.0.0.1:{payload['addr'].rsplit(':', 1)[1]}"
+    pending = _https_post(addr, "/v1/pair", {"join_code": payload["join_code"], "device_name": "테스트폰"})
+    service.approve(pending["pair_ticket"])
+
+    service.stop()
+    devices = service.list_devices()
+    assert [d.reported_name for d in devices] == ["테스트폰"]
+
+    # 서버 정지 상태에서도 이름 변경·차단이 동작한다
+    record_id = devices[0].record_id
+    assert service.rename_device(record_id, "입구1번")
+    assert service.list_devices()[0].custom_name == "입구1번"
+    assert service.revoke_device(record_id)
+    assert service.list_devices()[0].revoked is True
+
+
+def test_forget_device_removes_record(service):
+    payload = service.start()
+    addr = f"https://127.0.0.1:{payload['addr'].rsplit(':', 1)[1]}"
+    pending = _https_post(addr, "/v1/pair", {"join_code": payload["join_code"], "device_name": "테스트폰"})
+    service.approve(pending["pair_ticket"])
+
+    record_id = service.list_devices()[0].record_id
+    assert service.forget_device(record_id)
+    assert service.list_devices() == []
