@@ -398,6 +398,20 @@ def test_disconnect_marks_device_offline_immediately(env):
     assert presence_state(record, time.time()) == PRESENCE_ONLINE
 
 
+def test_status_reports_rtt_and_beat_metrics(env):
+    """폰이 보낸 RTT 헤더와 하트비트 도착 간격이 기기 품질 지표로 누적된다."""
+    token = _pair_device(env)
+    env["client"].get("/v1/status", headers=_auth(token))
+    env["client"].get("/v1/status", headers={**_auth(token), "X-Client-Rtt-Ms": "42"})
+    env["client"].get("/v1/status", headers=_auth(token))  # 헤더 없으면 RTT 갱신 안 함
+
+    pairing = env["pairing"]
+    info = pairing.record_for_device_id(pairing.device_id_for_token(token))
+    assert info.last_rtt_ms == 42
+    assert info.beat_interval_sec is not None  # 3회 관측 → 간격 산출됨
+    assert info.missed_beats == 0
+
+
 def test_disconnect_requires_auth(env):
     assert env["client"].post("/v1/disconnect").status_code == 401
 

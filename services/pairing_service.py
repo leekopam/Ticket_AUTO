@@ -22,6 +22,7 @@ import secrets
 import string
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -97,6 +98,18 @@ class _DeviceRecord:
     revoked: bool = False
 
 
+# 하트비트 품질 지표 — 디스크에 저장하지 않는 휘발성 측정치 (재시작 시 리셋)
+HEARTBEAT_MISSED_AFTER_SEC = 30.0  # 15초 주기의 2배 이상 공백은 누락으로 계산
+
+
+@dataclass
+class _DeviceMetrics:
+    """한 기기의 최근 하트비트 관측치 — 인메모리만 (record_id 기준)."""
+
+    beats: deque = field(default_factory=lambda: deque(maxlen=20))
+    last_rtt_ms: int | None = None
+
+
 @dataclass(frozen=True)
 class DeviceInfo:
     """UI에 노출하는 기기 정보 스냅샷."""
@@ -109,6 +122,10 @@ class DeviceInfo:
     last_seen_at: str
     revoked: bool
     device_ids: tuple[str, ...] = ()  # 현재+과거 토큰 해시 — 작업 이력 집계용
+    # 연결 품질 지표 (폰 보고 RTT + 서버 관측 하트비트 통계)
+    last_rtt_ms: int | None = None
+    beat_interval_sec: float | None = None
+    missed_beats: int = 0
 
 
 def sanitize_alias(value: str) -> str:
@@ -138,6 +155,7 @@ class PairingService:
         self._consecutive_failures = 0
         self._lockout_until = 0.0
         self._records: dict[str, _DeviceRecord] = {}  # record_id -> record
+        self._metrics: dict[str, _DeviceMetrics] = {}  # record_id -> 하트비트 관측치
         self._token_path = (
             Path(token_store_path)
             if token_store_path
@@ -373,6 +391,27 @@ class PairingService:
                 self._dirty = False
                 self._last_persisted = time.time()
 
+    def note_heartbeat(
+        self,
+        device_id: str,
+        *,
+        rtt_ms: int | None = None,
+        now: float | None = None,
+    ) -> None:
+        """하트비트 1회 관측을 기록한다 — 폰 보고 RTT와 도착 시각.
+
+        /v1/status 호출만 여기로 온다 — 스캔·조회 같은 일반 활동은 섞이지 않아
+        간격 통계가 실제 하트비트 주기를 반영한다. 디스크 I/O 없음.
+        """
+        with self._lock:
+            record = self._find_by_token_hash(device_id)
+            if record is None:
+                return
+            metrics = self._metrics.setdefault(record.record_id, _DeviceMetrics())
+            metrics.beats.append(time.time() if now is None else float(now))
+            if rtt_ms is not None:
+                metrics.last_rtt_ms = max(0, min(60000, int(rtt_ms)))
+
     def mark_disconnected(self, device_id: str) -> bool:
         """기기가 명시 통지로 연결을 끊었음을 기록한다 — presence를 즉시 끊김으로.
 
@@ -521,8 +560,10 @@ class PairingService:
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _to_info(record: _DeviceRecord) -> DeviceInfo:
+    def _to_info(self, record: _DeviceRecord) -> DeviceInfo:
+        metrics = self._metrics.get(record.record_id)
+        beats = list(metrics.beats) if metrics else []
+        diffs = [b - a for a, b in zip(beats, beats[1:])]
         return DeviceInfo(
             record_id=record.record_id,
             device_uid=record.device_uid,
@@ -534,6 +575,9 @@ class PairingService:
             device_ids=tuple(
                 h for h in [record.token_hash, *record.previous_token_hashes] if h
             ),
+            last_rtt_ms=metrics.last_rtt_ms if metrics else None,
+            beat_interval_sec=sum(diffs) / len(diffs) if diffs else None,
+            missed_beats=sum(1 for d in diffs if d > HEARTBEAT_MISSED_AFTER_SEC),
         )
 
     def _save_tokens(self, records: dict[str, _DeviceRecord]) -> None:

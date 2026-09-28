@@ -343,7 +343,11 @@ def create_api_v1_app(
     # ------------------------------ status ------------------------------
 
     @app.get("/v1/status")
-    def status(device: str = Depends(require_device)):
+    def status(request: Request, device: str = Depends(require_device)):
+        # 폰이 직전 왕복에서 측정한 RTT를 헤더로 보고 — PC 모니터의 응답속도 지표
+        raw_rtt = request.headers.get("x-client-rtt-ms", "")
+        rtt = int(raw_rtt) if raw_rtt.isdigit() else None
+        pairing.note_heartbeat(device, rtt_ms=rtt)
         dataset_generation, data_version = tracker.current()
         return {
             "state": "ok",

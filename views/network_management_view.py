@@ -55,6 +55,7 @@ class DeviceRowState:
     status_color: str
     signal_level: int
     last_seen_text: str
+    quality_text: str
     processed_text: str
     can_revoke: bool
     is_selected: bool
@@ -92,6 +93,13 @@ def _format_last_seen(last_seen_at: str, now: float) -> str:
     if delta < 86400:
         return f"{int(delta // 3600)}시간 전"
     return f"{int(delta // 86400)}일 전"
+
+
+def _format_quality(info: DeviceInfo) -> str:
+    """응답속도·하트비트 간격·누락을 한 줄로 — 측정치가 없으면 해당 항목은 '-'."""
+    rtt = f"응답 {info.last_rtt_ms}ms" if info.last_rtt_ms is not None else "응답 -"
+    beat = f"간격 {info.beat_interval_sec:.0f}초" if info.beat_interval_sec is not None else "간격 -"
+    return f"{rtt} · {beat} · 누락 {info.missed_beats}회"
 
 
 def _device_hashes(info: DeviceInfo) -> set[str]:
@@ -156,6 +164,7 @@ def build_network_view_state(
                 # 차단 기기는 신호 0 — 나머지는 마지막 활동 경과시간으로 단계 산출
                 signal_level=0 if state == PRESENCE_REVOKED else signal_level(info.last_seen_at, now),
                 last_seen_text=_format_last_seen(info.last_seen_at, now),
+                quality_text=_format_quality(info),
                 processed_text=f"처리 {processed}건",
                 can_revoke=not info.revoked,
                 is_selected=bool(selected_record_id) and info.record_id == selected_record_id,
@@ -305,6 +314,7 @@ def _build_device_row(
                                 f"원래 이름: {row.reported_name} · 마지막 활동 {row.last_seen_text}",
                                 size=12, color="#6B7787",
                             ),
+                            ft.Text(row.quality_text, size=11, color="#8B97A8"),
                         ],
                         spacing=2,
                         tight=True,

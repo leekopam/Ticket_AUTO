@@ -22,6 +22,9 @@ def _device(
     last_seen_at: str = "",
     revoked: bool = False,
     device_ids: tuple[str, ...] = ("hash-1",),
+    last_rtt_ms: int | None = None,
+    beat_interval_sec: float | None = None,
+    missed_beats: int = 0,
 ) -> DeviceInfo:
     return DeviceInfo(
         record_id=record_id,
@@ -32,6 +35,9 @@ def _device(
         last_seen_at=last_seen_at,
         revoked=revoked,
         device_ids=device_ids,
+        last_rtt_ms=last_rtt_ms,
+        beat_interval_sec=beat_interval_sec,
+        missed_beats=missed_beats,
     )
 
 
@@ -113,6 +119,24 @@ class NetworkViewStateTest(unittest.TestCase):
         ]
         state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now)
         self.assertEqual([r.signal_level for r in state.device_rows], [3, 2, 1, 0, 0])
+
+    def test_quality_text_shows_rtt_and_beat_stats(self) -> None:
+        """행 품질 지표 — 응답속도·하트비트 간격·누락 횟수를 한 줄로 표시."""
+        now = time.time()
+        device = _device(
+            last_seen_at=_seen_ago(5),
+            last_rtt_ms=23,
+            beat_interval_sec=15.2,
+            missed_beats=2,
+        )
+        state = build_network_view_state([device], [], [], server_running=True, server_addr="", now=now)
+        self.assertEqual(
+            state.device_rows[0].quality_text,
+            "응답 23ms · 간격 15초 · 누락 2회",
+        )
+        # 측정치가 없는 기기는 '-' 표기로 내려간다
+        state2 = build_network_view_state([_device()], [], [], server_running=True, server_addr="", now=now)
+        self.assertEqual(state2.device_rows[0].quality_text, "응답 - · 간격 - · 누락 0회")
 
     def test_pending_rows(self) -> None:
         pending = [PendingApproval(pair_ticket="t1", device_name="Fold", requested_at=time.time())]

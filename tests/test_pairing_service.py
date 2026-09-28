@@ -179,6 +179,31 @@ def test_record_activity_updates_last_seen(pairing: PairingService, tmp_path: Pa
     assert device.first_seen_at
 
 
+def test_note_heartbeat_tracks_rtt_interval_and_misses(pairing: PairingService):
+    """하트비트 관측치 — RTT 보고, 평균 간격, 30초 초과 공백은 누락 집계."""
+    token = _approve_one(pairing, "staff-1")
+    device_id = pairing.device_id_for_token(token)
+    base = time.time() - 1000
+    for i, gap in enumerate([0, 15, 15, 15, 60, 15]):  # 60초 공백 1회 → 누락
+        base += gap
+        pairing.note_heartbeat(device_id, rtt_ms=20 + i, now=base)
+    info = pairing.record_for_device_id(device_id)
+    assert info.last_rtt_ms == 25
+    assert info.beat_interval_sec is not None
+    assert abs(info.beat_interval_sec - (15 * 4 + 60) / 5) < 0.01
+    assert info.missed_beats == 1
+
+
+def test_note_heartbeat_ignores_unknown_and_clamps_rtt(pairing: PairingService):
+    token = _approve_one(pairing, "staff-1")
+    device_id = pairing.device_id_for_token(token)
+    pairing.note_heartbeat("unknown-hash", rtt_ms=10)  # 조용히 무시
+    pairing.note_heartbeat(device_id, rtt_ms=999999)   # 상한 클램프
+    info = pairing.record_for_device_id(device_id)
+    assert info.last_rtt_ms == 60000
+    assert info.beat_interval_sec is None  # 관측 1회로는 간격 산출 불가
+
+
 def test_activity_save_is_throttled(pairing: PairingService, tmp_path: Path):
     token = _approve_one(pairing, "staff-1")
     path = tmp_path / "devices.json"
