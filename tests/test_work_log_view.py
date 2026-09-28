@@ -114,8 +114,10 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
             _order("A1", received_at="2026-04-26 10:00:00", goods=["입장권 x1", "아메리카노 x2"]),
         ]
         state = build_work_log_view_state(orders, {}, {"입장권"})
-        self.assertIn("입장권 x1", state.rows[0].summary_text)
-        self.assertIn("아메리카노 x2", state.rows[0].summary_text)
+        self.assertIn("입장권 x1", state.rows[0].ticket_text)
+        self.assertNotIn("아메리카노", state.rows[0].ticket_text)
+        self.assertIn("아메리카노 x2", state.rows[0].goods_text)
+        self.assertNotIn("입장권", state.rows[0].goods_text)
 
     def test_missing_selection_leaves_detail_hidden(self) -> None:
         orders = [_order("A1", received_at="2026-04-26 10:00:00")]

@@ -39,7 +39,8 @@ class WorkLogRowState:
     name: str
     phone: str
     time_text: str
-    summary_text: str
+    ticket_text: str
+    goods_text: str
     row_bgcolor: str
     is_selected: bool
     needs_check: bool
@@ -159,14 +160,16 @@ def build_work_log_view_state(
         is_selected = bool(selected_upper) and order.order_number.upper() == selected_upper
         needs_check = (order.order_status or "").strip() == RECONCILE_STATUS
         # 목록에서 누르지 않아도 티켓/상품 이름이 바로 보이게 실제 품목명을 나열한다.
-        summary_text = " · ".join(ticket_goods + general_goods) or "-"
+        ticket_text = " · ".join(ticket_goods) or "-"
+        goods_text = " · ".join(general_goods) or "-"
         rows.append(WorkLogRowState(
             order_number=order.order_number,
             seq=total - display_index,
             name=order.name,
             phone=order.phone,
             time_text=format_work_time(_work_log_time_key(order, ops_index)),
-            summary_text=summary_text,
+            ticket_text=ticket_text,
+            goods_text=goods_text,
             row_bgcolor=ACCENT_PRIMARY_SOFT if is_selected else ("#FFFFFF" if display_index % 2 == 0 else "#FAFAFA"),
             is_selected=is_selected,
             needs_check=needs_check,
@@ -238,7 +241,12 @@ def _build_list_row(row: WorkLogRowState, on_select: Callable[[str], None]) -> f
                     alignment=ft.alignment.center_left,
                 ),
                 ft.Container(
-                    content=ft.Text(row.summary_text, size=12, color="#6B7787"),
+                    content=ft.Text(row.ticket_text, size=12, color="#6B7787"),
+                    expand=True,
+                    alignment=ft.alignment.center_left,
+                ),
+                ft.Container(
+                    content=ft.Text(row.goods_text, size=12, color="#6B7787"),
                     expand=True,
                     alignment=ft.alignment.center_left,
                 ),
@@ -384,6 +392,11 @@ def build_work_log_panel(
                         controls=[
                             _build_header_cell("순번", 44),
                             _build_header_cell("이름", 120),
+                            ft.Container(
+                                content=ft.Text("티켓", weight=ft.FontWeight.BOLD, size=13, color="#333333"),
+                                expand=True,
+                                alignment=ft.alignment.center_left,
+                            ),
                             ft.Container(
                                 content=ft.Text("상품", weight=ft.FontWeight.BOLD, size=13, color="#333333"),
                                 expand=True,
