@@ -85,6 +85,8 @@ def test_network_tab_pair_pending_approve_rename(page, flet_server):
     page.get_by_text("아직 연결된 휴대폰이 없습니다.", exact=True).first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
+    # 휴대폰 연결 버튼은 네트워크 탭 서버 카드에 있다
+    wait_for_button(page, "휴대폰 연결", timeout_ms=_TIMEOUT_MS)
 
     # LAN 서버 기동 → 서버 주소 카드 표시
     send_control_command(control_url, {"cmd": "phone_link_start"})

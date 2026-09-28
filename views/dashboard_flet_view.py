@@ -2773,7 +2773,7 @@ class DashboardFletView:
             build_network_view_state,
         )
 
-        network_controls = build_network_panel()
+        network_controls = build_network_panel(link_button=btn_phone_link)
         network_panel = network_controls["panel"]
         network_selection: dict[str, str | None] = {"value": None}
         network_ops_cache: dict[str, list[dict[str, str]]] = {"ops": []}
@@ -3713,7 +3713,7 @@ class DashboardFletView:
                     spacing=3,
                 ),
                 ft.Row(
-                    controls=[btn_open_witchform, btn_phone_link, processed_count_reset_button],
+                    controls=[btn_open_witchform, processed_count_reset_button],
                     spacing=8,
                     wrap=True,
                 ),
