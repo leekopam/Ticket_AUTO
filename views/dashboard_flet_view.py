@@ -1,4 +1,4 @@
-﻿"""Integrated Flet control dashboard for Ticket_AUTO."""
+"""Integrated Flet control dashboard for Ticket_AUTO."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -158,12 +159,15 @@ def resolve_tab_content(
     ticket_panel: ft.Control,
     receipt_panel: ft.Control,
     work_panel: ft.Control | None = None,
+    network_panel: ft.Control | None = None,
 ) -> ft.Control:
     """Return panel for selected tab."""
     if tab_key == "ticket":
         return ticket_panel
     if tab_key == "work" and work_panel is not None:
         return work_panel
+    if tab_key == "network" and network_panel is not None:
+        return network_panel
     return receipt_panel
 
 
@@ -715,7 +719,8 @@ class SidebarTabState:
     ticket_tab_bgcolor: str
     receipt_tab_bgcolor: str
     work_tab_bgcolor: str
-    should_refresh_search: bool
+    network_tab_bgcolor: str = "#00000000"
+    should_refresh_search: bool = False
 
 
 @dataclass(frozen=True)
@@ -1382,12 +1387,15 @@ def build_dashboard_sidebar(
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
     btn_work_tab: ft.Control | None = None,
+    btn_network_tab: ft.Control | None = None,
 ) -> ft.Container:
     """좌측 사이드바 레이아웃을 조립한다."""
     tab_buttons = [btn_ticket_tab]
     if btn_work_tab is not None:
         tab_buttons.append(btn_work_tab)
     tab_buttons.append(btn_receipt_tab)
+    if btn_network_tab is not None:
+        tab_buttons.append(btn_network_tab)
     return ft.Container(
         width=DASHBOARD_SIDEBAR_WIDTH,
         bgcolor="#F5F6F8",
@@ -1563,7 +1571,9 @@ def bootstrap_dashboard_page(
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
     btn_work_tab: ft.Control | None = None,
+    btn_network_tab: ft.Control | None = None,
     work_panel: ft.Control | None = None,
+    network_panel: ft.Control | None = None,
     sidebar: ft.Control,
     btn_relogin: ft.Control,
     btn_start_stop: ft.ElevatedButton,
@@ -1590,6 +1600,7 @@ def bootstrap_dashboard_page(
             ticket_panel,
             receipt_settings_panel,
             work_panel,
+            network_panel,
         ),
         current_tab=current_tab,
         tab_key=current_tab["value"],
@@ -1597,6 +1608,7 @@ def bootstrap_dashboard_page(
         btn_ticket_tab=btn_ticket_tab,
         btn_receipt_tab=btn_receipt_tab,
         btn_work_tab=btn_work_tab,
+        btn_network_tab=btn_network_tab,
     )
 
     page.add(
@@ -1743,15 +1755,17 @@ def build_sidebar_tab_state(
     ticket_panel: ft.Control,
     receipt_panel: ft.Control,
     work_panel: ft.Control | None = None,
+    network_panel: ft.Control | None = None,
 ) -> SidebarTabState:
     """사이드바 탭 전환에 필요한 패널/스타일 상태를 계산한다."""
     active_bg = ACCENT_PRIMARY_SOFT
     inactive_bg = "#00000000"
     return SidebarTabState(
-        content=resolve_tab_content(tab_key, ticket_panel, receipt_panel, work_panel),
+        content=resolve_tab_content(tab_key, ticket_panel, receipt_panel, work_panel, network_panel),
         ticket_tab_bgcolor=active_bg if tab_key == "ticket" else inactive_bg,
         receipt_tab_bgcolor=active_bg if tab_key == "receipt" else inactive_bg,
         work_tab_bgcolor=active_bg if tab_key == "work" else inactive_bg,
+        network_tab_bgcolor=active_bg if tab_key == "network" else inactive_bg,
         should_refresh_search=tab_key in ("ticket", "work"),
     )
 
@@ -1782,9 +1796,11 @@ def apply_sidebar_tab_view_state(
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
     btn_work_tab: ft.Control | None = None,
+    btn_network_tab: ft.Control | None = None,
     ticket_hovered: bool = False,
     receipt_hovered: bool = False,
     work_hovered: bool = False,
+    network_hovered: bool = False,
 ) -> None:
     """사이드바 탭 상태를 선택 상태, 콘텐츠, 버튼 스타일에 반영한다."""
     current_tab["value"] = tab_key
@@ -1792,6 +1808,7 @@ def apply_sidebar_tab_view_state(
     ticket_active = tab_key == "ticket"
     receipt_active = tab_key == "receipt"
     work_active = tab_key == "work"
+    network_active = tab_key == "network"
     btn_ticket_tab.style = build_sidebar_nav_button_style(
         is_active=ticket_active,
         is_hovered=(not ticket_active) and ticket_hovered,
@@ -1806,6 +1823,12 @@ def apply_sidebar_tab_view_state(
             is_hovered=(not work_active) and work_hovered,
         )
         setattr(btn_work_tab, "icon_color", ACCENT_PRIMARY_DARK if work_active else ("#58ABA3" if work_hovered else "#5D6E82"))
+    if btn_network_tab is not None:
+        btn_network_tab.style = build_sidebar_nav_button_style(
+            is_active=network_active,
+            is_hovered=(not network_active) and network_hovered,
+        )
+        setattr(btn_network_tab, "icon_color", ACCENT_PRIMARY_DARK if network_active else ("#58ABA3" if network_hovered else "#5D6E82"))
     setattr(btn_ticket_tab, "icon_color", ACCENT_PRIMARY_DARK if ticket_active else ("#58ABA3" if ticket_hovered else "#5D6E82"))
     setattr(btn_receipt_tab, "icon_color", ACCENT_PRIMARY_DARK if receipt_active else ("#58ABA3" if receipt_hovered else "#5D6E82"))
 
@@ -1819,6 +1842,7 @@ def dispatch_sidebar_tab_change(
     btn_ticket_tab: ft.Control,
     btn_receipt_tab: ft.Control,
     btn_work_tab: ft.Control | None = None,
+    btn_network_tab: ft.Control | None = None,
     refresh_search_results: Callable[[], None],
     page: ft.Page,
     closing_event: threading.Event | None = None,
@@ -1833,6 +1857,7 @@ def dispatch_sidebar_tab_change(
         btn_ticket_tab=btn_ticket_tab,
         btn_receipt_tab=btn_receipt_tab,
         btn_work_tab=btn_work_tab,
+        btn_network_tab=btn_network_tab,
     )
     if tab_state.should_refresh_search:
         refresh_search_results()
@@ -2653,9 +2678,11 @@ class DashboardFletView:
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
         btn_work_tab = ft.TextButton("티켓 업무", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")
         btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
+        btn_network_tab = ft.TextButton("네트워크 관리", icon=ICONS.LAN_ROUNDED, key="dashboard_tab_network")
         btn_ticket_tab.icon_size = 18
         btn_work_tab.icon_size = 18
         btn_receipt_tab.icon_size = 18
+        btn_network_tab.icon_size = 18
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
         receipt_settings_panel_ref: dict[str, ft.Control | None] = {"value": None}
 
@@ -2667,7 +2694,7 @@ class DashboardFletView:
         search_blocked_state = {"value": False}
         search_result_highlight_state = {"value": False}
         search_feedback_override_state = {"value": ""}
-        sidebar_tab_hover_state = {"ticket": False, "receipt": False, "work": False}
+        sidebar_tab_hover_state = {"ticket": False, "receipt": False, "work": False, "network": False}
         print_job_state = {"in_progress": False}
         search_refresh_lock = threading.Lock()
         search_refresh_timer: threading.Timer | None = None
@@ -2690,6 +2717,7 @@ class DashboardFletView:
                 work_log_cache["ops_index"],
                 work_log_cache["ticket_names"],
                 selected_order_number=work_log_selection["value"],
+                device_lookup=phone_link_service.device_for_device_id,
             )
             apply_work_log_view_state(
                 work_log_panel,
@@ -2732,6 +2760,165 @@ class DashboardFletView:
             on_select=_on_work_log_select,
             on_refresh=lambda _e: refresh_work_log(),
         )
+
+        # 네트워크 관리 탭 — 페어링 기기 목록, 연결 상태, 이름 변경/차단
+        from views.network_management_view import (
+            apply_network_view_state,
+            build_network_panel,
+            build_network_view_state,
+        )
+
+        network_controls = build_network_panel()
+        network_panel = network_controls["panel"]
+        network_selection: dict[str, str | None] = {"value": None}
+        network_ops_cache: dict[str, list[dict[str, str]]] = {"ops": []}
+        network_ops_loaded = {"value": False}
+
+        def refresh_network_panel(push_update: bool = True, reload_ops: bool = False) -> None:
+            try:
+                if reload_ops or not network_ops_loaded["value"]:
+                    network_ops_cache["ops"] = excel_service.list_operations()
+                    network_ops_loaded["value"] = True
+                payload = phone_link_service.payload or {}
+                state = build_network_view_state(
+                    phone_link_service.list_devices(),
+                    phone_link_service.pending_approvals(),
+                    network_ops_cache["ops"],
+                    server_running=phone_link_service.running,
+                    server_addr=str(payload.get("addr") or ""),
+                    now=time.time(),
+                    selected_record_id=network_selection["value"],
+                )
+            except Exception as exc:
+                logger.error("네트워크 관리 정보 조회 실패: %s", exc, exc_info=True)
+                _show_dashboard_warning("기기 목록을 불러오지 못했습니다.")
+                return
+            apply_network_view_state(
+                network_controls,
+                state,
+                on_select=_on_network_select,
+                on_rename=_on_network_rename,
+                on_revoke=_on_network_revoke,
+                on_approve=_on_network_approve,
+                on_reject=_on_network_reject,
+            )
+            if push_update:
+                safe_page_update(page, search_refresh_stop)
+
+        def _on_network_select(record_id: str) -> None:
+            network_selection["value"] = (
+                None if network_selection["value"] == record_id else record_id
+            )
+            refresh_network_panel()
+
+        def _on_network_approve(pair_ticket: str) -> None:
+            phone_link_service.approve(pair_ticket)
+            refresh_network_panel()
+
+        def _on_network_reject(pair_ticket: str) -> None:
+            phone_link_service.reject(pair_ticket)
+            refresh_network_panel()
+
+        def _network_snackbar(text: str, *, success: bool) -> None:
+            page.snack_bar = build_dashboard_snack_bar(text, success=success)
+            page.snack_bar.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_network_rename(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            name_field = ft.TextField(
+                label="기기 이름",
+                value=info.custom_name or info.reported_name,
+                max_length=20,
+                autofocus=True,
+                width=320,
+            )
+
+            def _save(_e: ft.ControlEvent) -> None:
+                if phone_link_service.rename_device(record_id, name_field.value or ""):
+                    page.dialog.open = False
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar("기기 이름을 변경했습니다.", success=True)
+                else:
+                    _network_snackbar("이름 변경에 실패했습니다.", success=False)
+
+            def _cancel(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("기기 이름 변경"),
+                content=name_field,
+                actions=[
+                    ft.TextButton("취소", on_click=_cancel),
+                    ft.FilledButton("저장", on_click=_save),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_network_revoke(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "이 기기"
+
+            def _confirm(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                if phone_link_service.revoke_device(record_id):
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar(
+                        f"{label}을(를) 차단했습니다. 다시 연결하려면 재페어링이 필요합니다.",
+                        success=True,
+                    )
+                else:
+                    _network_snackbar("차단에 실패했습니다.", success=False)
+
+            def _cancel(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("기기 차단"),
+                content=ft.Text(
+                    f"{label}의 접근을 차단합니다. 기록과 이름은 유지되며, "
+                    "차단 후에는 이 토큰으로 접근할 수 없습니다."
+                ),
+                actions=[
+                    ft.TextButton("취소", on_click=_cancel),
+                    ft.FilledButton(
+                        "차단",
+                        on_click=_confirm,
+                        style=ft.ButtonStyle(bgcolor="#A12622", color="#FFFFFF"),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _network_watch_loop() -> None:
+            # 탭이 열려 있을 때만 주기 갱신 — 마지막 활동 시각/연결 상태 표시용
+            while not search_refresh_stop.wait(3.0):
+                if current_tab["value"] != "network":
+                    continue
+                try:
+                    call_page_from_thread(
+                        page,
+                        lambda: refresh_network_panel(push_update=True),
+                        search_refresh_stop,
+                    )
+                except Exception:
+                    logger.debug("네트워크 관리 갱신 실패", exc_info=True)
 
         def _reset_processed_success_count(_e: ft.ControlEvent | None = None) -> None:
             scan_success_count_store.save_success_count(0)
@@ -3073,6 +3260,7 @@ class DashboardFletView:
                 ticket_panel,
                 receipt_panel or receipt_settings_panel,
                 work_log_panel,
+                network_panel,
             )
             dispatch_sidebar_tab_change(
                 tab_key,
@@ -3082,11 +3270,14 @@ class DashboardFletView:
                 btn_ticket_tab=btn_ticket_tab,
                 btn_receipt_tab=btn_receipt_tab,
                 btn_work_tab=btn_work_tab,
+                btn_network_tab=btn_network_tab,
                 refresh_search_results=lambda: refresh_active_order_views(push_update=False),
                 page=page,
                 closing_event=search_refresh_stop,
                 push_update=push_update,
             )
+            if tab_key == "network":
+                refresh_network_panel(push_update=False, reload_ops=True)
             camera_focus_panel_state["value"] = False
             _apply_camera_focus_drawer(push_update=push_update)
 
@@ -3176,6 +3367,8 @@ class DashboardFletView:
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_work_tab.on_click = lambda _: set_tab("work")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")
+        btn_network_tab.on_click = lambda _: set_tab("network")
+        threading.Thread(target=_network_watch_loop, daemon=True).start()
 
         camera_view = build_camera_preview_image()
 
@@ -3930,6 +4123,7 @@ class DashboardFletView:
                 ticket_panel,
                 active_receipt_content,
                 work_log_panel,
+                network_panel,
             )
             apply_sidebar_tab_view_state(
                 tab_state,
@@ -3939,9 +4133,11 @@ class DashboardFletView:
                 btn_ticket_tab=btn_ticket_tab,
                 btn_receipt_tab=btn_receipt_tab,
                 btn_work_tab=btn_work_tab,
+                btn_network_tab=btn_network_tab,
                 ticket_hovered=sidebar_tab_hover_state["ticket"],
                 receipt_hovered=sidebar_tab_hover_state["receipt"],
                 work_hovered=sidebar_tab_hover_state["work"],
+                network_hovered=sidebar_tab_hover_state["network"],
             )
             if push_update:
                 safe_page_update(page, search_refresh_stop)
@@ -3953,11 +4149,13 @@ class DashboardFletView:
         btn_ticket_tab.on_hover = lambda e: _on_sidebar_tab_hover("ticket", e)
         btn_work_tab.on_hover = lambda e: _on_sidebar_tab_hover("work", e)
         btn_receipt_tab.on_hover = lambda e: _on_sidebar_tab_hover("receipt", e)
+        btn_network_tab.on_hover = lambda e: _on_sidebar_tab_hover("network", e)
 
         sidebar = build_dashboard_sidebar(
             btn_ticket_tab=btn_ticket_tab,
             btn_receipt_tab=btn_receipt_tab,
             btn_work_tab=btn_work_tab,
+            btn_network_tab=btn_network_tab,
         )
 
         _apply_camera_focus_drawer(push_update=False)
@@ -3973,7 +4171,9 @@ class DashboardFletView:
             btn_ticket_tab=btn_ticket_tab,
             btn_receipt_tab=btn_receipt_tab,
             btn_work_tab=btn_work_tab,
+            btn_network_tab=btn_network_tab,
             work_panel=work_log_panel,
+            network_panel=network_panel,
             sidebar=sidebar,
             btn_relogin=btn_relogin,
             btn_start_stop=btn_start_stop,
