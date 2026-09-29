@@ -2860,6 +2860,7 @@ class DashboardFletView:
                 on_unblock=_on_network_unblock,
                 on_reconnect=_on_network_reconnect,
                 on_history=_on_network_history,
+                on_remove=_on_network_remove,
                 on_approve=_on_network_approve,
                 on_reject=_on_network_reject,
             )
@@ -3189,6 +3190,30 @@ class DashboardFletView:
             )
             page.dialog.open = True
             safe_page_update(page, search_refresh_stop)
+
+        def _on_network_remove(record_id: str) -> None:
+            """장치 레코드 완전 삭제 — 처리 내역까지 지워지므로 별도 확인."""
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "이 기기"
+            _confirm_network_action(
+                title="장치 제거",
+                body=(
+                    f"{label}을(를) 목록에서 완전히 제거합니다. "
+                    "등록 정보와 이 기기의 연결 기록이 삭제되며 되돌릴 수 없습니다."
+                ),
+                confirm_label="제거",
+                danger=True,
+                on_confirm=lambda: (
+                    phone_link_service.forget_device(record_id),
+                    refresh_network_panel(push_update=False),
+                    _network_snackbar(f"{label}을(를) 제거했습니다.", success=True),
+                ),
+            )
 
         def _network_watch_loop() -> None:
             # 탭이 열려 있을 때만 주기 갱신 — 마지막 활동 시각/연결 상태 표시용

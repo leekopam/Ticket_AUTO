@@ -227,10 +227,13 @@ class NetworkViewStateTest(unittest.TestCase):
         device = _device(device_ids=("h1",))
         ops = [
             {"device_id": "h1", "order_id": "A1", "state": "succeeded", "updated_at": "2026-01-01 10:00:00"},
-            {"device_id": "h9", "order_id": "A9", "state": "failed", "updated_at": "2026-01-01 10:01:00"},
+            {"device_id": "h9", "order_id": "A9", "state": "succeeded", "updated_at": "2026-01-01 10:01:00"},
             {"device_id": "h1", "order_id": "", "result_json": '{"order_id": "A2"}', "state": "succeeded", "updated_at": "2026-01-01 10:02:00"},
+            {"device_id": "h1", "order_id": "", "state": "succeeded", "updated_at": "2026-01-01 10:03:00"},
         ]
-        rows = build_device_history(device, ops)
+        orders = [Order(order_number=oid, name="손님", goods=["상품 x1"]) for oid in ("A1", "A2", "A9")]
+        rows = build_device_history(device, ops, orders=orders)
+        # 최신순으로 h1의 주문 조인 성공 건만 — 다른 기기·주문 없는 기록은 제외
         self.assertEqual([r.order_id for r in rows], ["A2", "A1"])
 
     def test_device_history_joins_order_goods(self) -> None:
@@ -239,20 +242,20 @@ class NetworkViewStateTest(unittest.TestCase):
         ops = [
             {"device_id": "h1", "order_id": "A1", "state": "succeeded", "updated_at": "2026-01-01 10:00:00"},
             {"device_id": "h1", "order_id": "ZZZ", "state": "succeeded", "updated_at": "2026-01-01 10:01:00"},
+            {"device_id": "h1", "order_id": "A2", "state": "failed", "updated_at": "2026-01-01 10:02:00"},
         ]
         orders = [
             Order(
                 order_number="A1",
                 name="김철수",
                 goods=["입장권 x1", "아메리카노 x2"],
-            )
+            ),
+            Order(order_number="A2", name="박영희", goods=["콜라 x1"]),
         ]
         rows = build_device_history(device, ops, orders=orders, ticket_names={"입장권"})
-        missing, joined = rows
-        # 최신 레코드가 먼저 — ZZZ는 주문이 없어 상태 텍스트로 폴백
-        self.assertEqual(missing.order_id, "ZZZ")
-        self.assertEqual(missing.customer_name, "")
-        self.assertEqual(missing.ticket_items, ())
+        # ZZZ는 주문 데이터 없음, A2는 처리 미완료 — 둘 다 제외되고 A1만 남는다
+        self.assertEqual(len(rows), 1)
+        joined = rows[0]
         self.assertEqual(joined.customer_name, "김철수")
         self.assertEqual(joined.ticket_items, ("입장권 x1",))
         self.assertEqual(joined.goods_items, ("아메리카노 x2",))

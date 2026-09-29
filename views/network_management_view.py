@@ -202,7 +202,11 @@ def build_device_history(
     orders: list | None = None,
     ticket_names: list[str] | set[str] = (),
 ) -> tuple[RecentOpState, ...]:
-    """선택 기기의 최근 처리 이력 — 주문과 조인해 주문자·티켓·상품을 함께 보여준다."""
+    """선택 기기의 최근 처리 이력 — 주문과 조인해 주문자·티켓·상품을 함께 보여준다.
+
+    주문이 확인된 실제 처리 건만 포함한다 — 조인 실패로 "-"만 남는
+    자리표시 행은 목록에 올리지 않는다.
+    """
     from views.dashboard_flet_view import split_order_goods
 
     order_map = {
@@ -214,18 +218,19 @@ def build_device_history(
     for record in reversed(operations or []):
         if str(record.get("device_id") or "").strip() not in hashes:
             continue
-        order_id = _ops_record_order_id(record) or "-"
+        if str(record.get("state") or "").strip() not in _COUNTED_OP_STATES:
+            continue
+        order_id = _ops_record_order_id(record) or ""
         order = order_map.get(order_id)
-        goods: list[str] = []
-        tickets: list[str] = []
-        if order is not None:
-            goods, tickets = split_order_goods(order.goods, ticket_names)
+        if order is None:
+            continue
+        goods, tickets = split_order_goods(order.goods, ticket_names)
         rows.append(
             RecentOpState(
                 order_id=order_id,
                 state_text=str(record.get("state") or ""),
                 time_text=str(record.get("updated_at") or "")[5:16],
-                customer_name=(order.name or "") if order is not None else "",
+                customer_name=order.name or "",
                 ticket_items=tuple(tickets),
                 goods_items=tuple(goods),
             )
@@ -338,7 +343,7 @@ def _build_history_chip(item: str, *, ticket: bool) -> ft.Container:
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.END,
         ),
-        bgcolor="#E9F8F6" if ticket else "#F3F6F7",
+        bgcolor="#E7F8F7" if ticket else "#F3F6F7",
         border=ft.border.all(1, "#B8EAE6" if ticket else "#E0E4EA"),
         border_radius=7,
         padding=ft.padding.symmetric(horizontal=10, vertical=7),
@@ -516,6 +521,31 @@ def _build_pending_row(
     )
 
 
+def _action_button(
+    text: str,
+    on_click: Callable[[ft.ControlEvent], None],
+    *,
+    key: str | None = None,
+    danger: bool = False,
+) -> ft.OutlinedButton:
+    """관리 열 버튼 — OD .btn 스타일 (테두리 있는 작은 버튼)."""
+    return ft.OutlinedButton(
+        key=key,
+        content=ft.Text(
+            text,
+            size=12,
+            weight=ft.FontWeight.W_600,
+            color="#AE323B" if danger else "#17222E",
+        ),
+        on_click=on_click,
+        style=ft.ButtonStyle(
+            side=ft.BorderSide(1, "#E0E4EA"),
+            shape=ft.RoundedRectangleBorder(radius=8),
+            padding=ft.padding.symmetric(horizontal=9, vertical=6),
+        ),
+    )
+
+
 def _build_device_row(
     row: DeviceRowState,
     on_disconnect: Callable[[str], None],
@@ -524,32 +554,33 @@ def _build_device_row(
     on_unblock: Callable[[str], None],
     on_reconnect: Callable[[str], None],
     on_history: Callable[[str], None],
+    on_remove: Callable[[str], None],
 ) -> ft.Container:
     actions: list[ft.Control] = []
     if row.can_disconnect:
         actions.append(
-            ft.TextButton("연결 해제", on_click=lambda _e, r=row.record_id: on_disconnect(r),
-                          key=f"network_disconnect_{row.record_id}")
+            _action_button("연결 해제", lambda _e, r=row.record_id: on_disconnect(r),
+                           key=f"network_disconnect_{row.record_id}")
         )
     if row.can_reconnect:
         actions.append(
-            ft.TextButton("재연결 요청", on_click=lambda _e, r=row.record_id: on_reconnect(r),
-                          key=f"network_reconnect_{row.record_id}")
+            _action_button("재연결 요청", lambda _e, r=row.record_id: on_reconnect(r),
+                           key=f"network_reconnect_{row.record_id}")
         )
     if row.can_unblock:
         actions.append(
-            ft.TextButton("차단 해제", on_click=lambda _e, r=row.record_id: on_unblock(r),
-                          key=f"network_unblock_{row.record_id}")
+            _action_button("차단 해제", lambda _e, r=row.record_id: on_unblock(r),
+                           key=f"network_unblock_{row.record_id}")
         )
     if row.can_revoke:
         actions.append(
-            ft.TextButton(
-                "차단",
-                on_click=lambda _e, r=row.record_id: on_revoke(r),
-                key=f"network_revoke_{row.record_id}",
-                style=ft.ButtonStyle(color="#AE323B"),
-            )
+            _action_button("차단", lambda _e, r=row.record_id: on_revoke(r),
+                           key=f"network_revoke_{row.record_id}", danger=True)
         )
+    actions.append(
+        _action_button("제거", lambda _e, r=row.record_id: on_remove(r),
+                       key=f"network_remove_{row.record_id}", danger=True)
+    )
     return ft.Container(
         content=ft.Row(
             controls=[
@@ -594,20 +625,23 @@ def _build_device_row(
                         tight=True,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    expand=3,
+                    expand=_COL_DEVICE,
+                    alignment=ft.alignment.center_left,
                 ),
                 ft.Container(
                     content=_build_device_quality_cell(row),
-                    width=194,
+                    expand=_COL_QUALITY,
+                    alignment=ft.alignment.center,
                 ),
                 ft.Container(
                     content=_build_status_badge(row.status_text, row.status_bgcolor, row.status_color),
-                    width=82,
+                    expand=_COL_STATUS,
                     alignment=ft.alignment.center,
                 ),
                 ft.Container(
                     content=ft.Text(row.last_activity_text, size=12, color="#333333"),
-                    width=110,
+                    expand=_COL_ACTIVITY,
+                    alignment=ft.alignment.center,
                 ),
                 ft.Container(
                     content=ft.TextButton(
@@ -621,11 +655,19 @@ def _build_device_row(
                         on_click=lambda _e, r=row.record_id: on_history(r),
                         key=f"network_history_{row.record_id}",
                     ),
-                    width=90,
+                    expand=_COL_HISTORY,
+                    alignment=ft.alignment.center,
                 ),
                 ft.Container(
-                    content=ft.Row(controls=actions, spacing=0, tight=True),
-                    width=170,
+                    content=ft.Row(
+                        controls=actions,
+                        spacing=6,
+                        tight=True,
+                        wrap=True,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    expand=_COL_MANAGE,
+                    alignment=ft.alignment.center,
                 ),
             ],
             spacing=10,
@@ -634,25 +676,35 @@ def _build_device_row(
         bgcolor="#FFFFFF",
         padding=ft.padding.symmetric(horizontal=20, vertical=17),
         border=ft.border.only(bottom=ft.border.BorderSide(1, "#EDF0F2")),
+        on_hover=lambda e: _on_device_row_hover(e),
     )
+
+
+# 행 호버 배경 — OD의 tbody tr:hover (--row-hover: accent 6%)
+_DEVICE_ROW_HOVER_BG = "#F3FBFB"
+
+
+def _on_device_row_hover(e: ft.HoverEvent) -> None:
+    """마우스를 올린 장치 행을 연한 teal로 표시한다."""
+    e.control.bgcolor = _DEVICE_ROW_HOVER_BG if e.data == "true" else "#FFFFFF"
+    e.control.update()
+
+
+# 컬럼 비율 — 장치 열만 넓게, 나머지는 균등에 가깝게(장치:품질:상태:활동:내역:관리)
+_COL_DEVICE, _COL_QUALITY, _COL_STATUS, _COL_ACTIVITY, _COL_HISTORY, _COL_MANAGE = 26, 18, 12, 13, 11, 20
 
 
 def _build_header_cell(
     text: str,
-    width: float | None = None,
+    flex: int,
     *,
-    expand: bool = False,
     center: bool = False,
 ) -> ft.Container:
-    cell = ft.Container(
+    return ft.Container(
         content=ft.Text(text, weight=ft.FontWeight.BOLD, size=12, color="#145F59"),
         alignment=ft.alignment.center if center else ft.alignment.center_left,
+        expand=flex,
     )
-    if expand:
-        cell.expand = True
-    elif width is not None:
-        cell.width = width
-    return cell
 
 
 def _build_summary_cell(title: str, value_ref: ft.Text) -> ft.Container:
@@ -679,13 +731,13 @@ def build_network_panel(
     link_button: ft.Control | None = None,
     server_toggle_button: ft.Control | None = None,
     regen_cert_button: ft.Control | None = None,
-    revoke_all_button: ft.Control | None = None,
+    header_button: ft.Control | None = None,
     on_quality_check: Callable[[ft.ControlEvent], None] | None = None,
 ) -> dict[str, ft.Control]:
     """네트워크 관리 패널 컨트롤 묶음을 만든다. 내용은 apply_*로 채운다.
 
     link/server_toggle/regen_cert_button: 서버 상태 카드 오른쪽에 놓는 버튼 (호출부가 주입).
-    revoke_all_button: "등록된 장치" 제목 줄 오른쪽에 놓는 버튼.
+    header_button: "등록된 장치" 제목 줄 오른쪽에 놓는 버튼 (OD의 새로고침 버튼 자리).
     on_quality_check: 인터넷 품질 "다시 확인" 버튼 콜백.
     """
     server_addr_text = ft.Text("", size=13, weight=ft.FontWeight.W_600, color="#145F59")
@@ -707,7 +759,7 @@ def build_network_panel(
     )
     quality_trend = cv.Canvas(shapes=[], width=240, height=48)
     quality_range = ft.Text("—", size=11, color="#536474", key="network_quality_range")
-    quality_updated = ft.Text("5초마다 갱신", size=11, color="#536474", key="network_quality_updated")
+    quality_updated = ft.Text("3초마다 갱신", size=11, color="#536474", key="network_quality_updated")
 
     counts = {
         key: ft.Text("0", size=26, weight=ft.FontWeight.BOLD, key=f"network_count_{key}")
@@ -738,13 +790,20 @@ def build_network_panel(
         key="network_pending_section",
     )
 
+    # 필터 칩 — OD .filter 스타일: padding 7/12, radius 6, 활성 시 teal-soft 배경+bold
     filter_chips = {
         key: ft.TextButton(
-            label,
             key=f"network_filter_{key}",
-            style=ft.ButtonStyle(
-                bgcolor="#E9F8F6" if key == FILTER_ALL else "#00000000",
+            content=ft.Text(
+                label,
+                size=13,
+                weight=ft.FontWeight.BOLD if key == FILTER_ALL else ft.FontWeight.W_400,
                 color="#145F59" if key == FILTER_ALL else "#536474",
+            ),
+            style=ft.ButtonStyle(
+                bgcolor="#E7F8F7" if key == FILTER_ALL else "#00000000",
+                padding=ft.padding.symmetric(horizontal=12, vertical=7),
+                shape=ft.RoundedRectangleBorder(radius=6),
             ),
         )
         for key, label in FILTERS
@@ -806,7 +865,7 @@ def build_network_panel(
                                                 content=ft.Icon(ft.icons.MONITOR_ROUNDED, size=28, color="#145F59"),
                                                 width=52,
                                                 height=52,
-                                                bgcolor="#E9F8F6",
+                                                bgcolor="#E7F8F7",
                                                 border_radius=12,
                                                 alignment=ft.alignment.center,
                                             ),
@@ -822,7 +881,7 @@ def build_network_panel(
                                                             spacing=8,
                                                             tight=True,
                                                         ),
-                                                        bgcolor="#E9F8F6",
+                                                        bgcolor="#E7F8F7",
                                                         border=ft.border.all(1, "#E0E4EA"),
                                                         border_radius=6,
                                                         padding=ft.padding.symmetric(horizontal=10, vertical=4),
@@ -861,53 +920,62 @@ def build_network_panel(
                                 ],
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             ),
+                            # OD .quality-grid — 1.1fr / 1.5fr / 1.1fr, gap 24
                             ft.Row(
                                 controls=[
-                                    ft.Row(
-                                        controls=[
-                                            quality_bars,
-                                            ft.Column(
-                                                controls=[quality_status, quality_hint],
-                                                spacing=2,
-                                                tight=True,
-                                            ),
-                                        ],
-                                        spacing=12,
-                                        tight=True,
-                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    ),
-                                    ft.Row(
-                                        controls=[
-                                            ft.Column(
-                                                controls=[
-                                                    ft.Text("응답시간", size=12, weight=ft.FontWeight.W_600, color="#536474"),
-                                                    ft.Row(controls=[quality_latency, ft.Text("ms", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
-                                                ],
-                                                spacing=3,
-                                                tight=True,
-                                            ),
-                                            ft.Column(
-                                                controls=[
-                                                    ft.Text("지연 변동", size=12, weight=ft.FontWeight.W_600, color="#536474"),
-                                                    ft.Row(controls=[quality_jitter, ft.Text("ms", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
-                                                ],
-                                                spacing=3,
-                                                tight=True,
-                                            ),
-                                            ft.Column(
-                                                controls=[
-                                                    ft.Text("손실률", size=12, weight=ft.FontWeight.W_600, color="#536474"),
-                                                    ft.Row(controls=[quality_loss, ft.Text("%", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
-                                                ],
-                                                spacing=3,
-                                                tight=True,
-                                            ),
-                                        ],
-                                        spacing=16,
-                                        tight=True,
+                                    ft.Container(
+                                        expand=11,
+                                        content=ft.Row(
+                                            controls=[
+                                                quality_bars,
+                                                ft.Column(
+                                                    controls=[quality_status, quality_hint],
+                                                    spacing=2,
+                                                    tight=True,
+                                                ),
+                                            ],
+                                            spacing=12,
+                                            tight=True,
+                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        ),
                                     ),
                                     ft.Container(
-                                        width=280,
+                                        expand=15,
+                                        content=ft.Row(
+                                            controls=[
+                                                ft.Column(
+                                                    controls=[
+                                                        ft.Text("응답시간", size=12, weight=ft.FontWeight.W_600, color="#536474"),
+                                                        ft.Row(controls=[quality_latency, ft.Text("ms", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
+                                                    ],
+                                                    spacing=3,
+                                                    tight=True,
+                                                    expand=1,
+                                                ),
+                                                ft.Column(
+                                                    controls=[
+                                                        ft.Text("지연 변동", size=12, weight=ft.FontWeight.W_600, color="#536474"),
+                                                        ft.Row(controls=[quality_jitter, ft.Text("ms", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
+                                                    ],
+                                                    spacing=3,
+                                                    tight=True,
+                                                    expand=1,
+                                                ),
+                                                ft.Column(
+                                                    controls=[
+                                                        ft.Text("손실률", size=12, weight=ft.FontWeight.W_600, color="#536474"),
+                                                        ft.Row(controls=[quality_loss, ft.Text("%", size=12, color="#536474")], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.END),
+                                                    ],
+                                                    spacing=3,
+                                                    tight=True,
+                                                    expand=1,
+                                                ),
+                                            ],
+                                            spacing=16,
+                                        ),
+                                    ),
+                                    ft.Container(
+                                        expand=11,
                                         content=ft.Column(
                                             controls=[
                                                 ft.Container(
@@ -932,9 +1000,7 @@ def build_network_panel(
                                     ),
                                 ],
                                 spacing=24,
-                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                wrap=True,
                             ),
                             quality_updated,
                         ],
@@ -973,7 +1039,7 @@ def build_network_panel(
                                     controls=[
                                         ft.Text("등록된 장치", size=17, weight=ft.FontWeight.BOLD, color="#17222E"),
                                         ft.Row(
-                                            controls=[b for b in (revoke_all_button,) if b is not None],
+                                            controls=[b for b in (header_button,) if b is not None],
                                             spacing=8,
                                             tight=True,
                                         ),
@@ -985,27 +1051,26 @@ def build_network_panel(
                             ft.Container(
                                 content=ft.Row(
                                     controls=[
-                                        ft.Row(controls=list(filter_chips.values()), spacing=5, tight=True),
+                                        ft.Row(controls=list(filter_chips.values()), spacing=5, tight=True, wrap=True),
                                         search_field,
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                    wrap=True,
                                 ),
                                 padding=ft.padding.only(left=20, right=20, bottom=17),
                             ),
                             ft.Container(
                                 content=ft.Row(
                                     controls=[
-                                        _build_header_cell("장치", expand=True),
-                                        _build_header_cell("연결 품질", 194),
-                                        _build_header_cell("연결 상태", 82, center=True),
-                                        _build_header_cell("마지막 활동", 110),
-                                        _build_header_cell("처리 내역", 90),
-                                        _build_header_cell("관리", 170),
+                                        _build_header_cell("장치", _COL_DEVICE, center=True),
+                                        _build_header_cell("연결 품질", _COL_QUALITY, center=True),
+                                        _build_header_cell("연결 상태", _COL_STATUS, center=True),
+                                        _build_header_cell("마지막 활동", _COL_ACTIVITY, center=True),
+                                        _build_header_cell("처리 내역", _COL_HISTORY, center=True),
+                                        _build_header_cell("관리", _COL_MANAGE, center=True),
                                     ],
                                     spacing=10,
                                 ),
-                                bgcolor="#D2EFED",
+                                bgcolor="#CEF0EE",
                                 padding=ft.padding.symmetric(horizontal=20, vertical=11),
                                 border=ft.border.only(
                                     top=ft.border.BorderSide(1, "#B8EAE6"),
@@ -1122,7 +1187,7 @@ def apply_internet_quality(
         controls["quality_range"].value = (
             f"{min(history)}~{max(history)}ms" if history else "—"
         )
-        controls["quality_updated"].value = f"5초마다 갱신 · {state.measured_at} 갱신"
+        controls["quality_updated"].value = f"3초마다 갱신 · {state.measured_at} 갱신"
     else:
         controls["quality_latency"].value = "—"
         controls["quality_jitter"].value = "—"
@@ -1141,6 +1206,7 @@ def apply_network_view_state(
     on_unblock: Callable[[str], None],
     on_reconnect: Callable[[str], None],
     on_history: Callable[[str], None],
+    on_remove: Callable[[str], None],
     on_approve: Callable[[str], None],
     on_reject: Callable[[str], None],
 ) -> None:
@@ -1171,11 +1237,15 @@ def apply_network_view_state(
     active_filter = controls.get("_filter_key", FILTER_ALL)
     for key, chip in controls["filter_chips"].items():
         active = key == active_filter
-        chip.style.bgcolor = "#E9F8F6" if active else "#00000000"
-        chip.style.color = "#145F59" if active else "#536474"
+        chip.style.bgcolor = "#E7F8F7" if active else "#00000000"
+        chip.content.color = "#145F59" if active else "#536474"
+        chip.content.weight = ft.FontWeight.BOLD if active else ft.FontWeight.W_400
 
     controls["device_list"].controls = [
-        _build_device_row(row, on_disconnect, on_rename, on_revoke, on_unblock, on_reconnect, on_history)
+        _build_device_row(
+            row, on_disconnect, on_rename, on_revoke, on_unblock,
+            on_reconnect, on_history, on_remove,
+        )
         for row in state.device_rows
     ]
     controls["empty_text"].value = (

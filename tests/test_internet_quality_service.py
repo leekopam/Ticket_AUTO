@@ -56,6 +56,15 @@ class SummarizeQualityTest(unittest.TestCase):
         self.assertEqual(status, QUALITY_WARN)
         self.assertGreaterEqual(jitter, 20)
 
+    def test_single_spike_does_not_warn(self) -> None:
+        # 스파이크 1회(19→60→22 복귀)는 큰 diff 2개를 만들지만 지속 흔들림이 아니다.
+        # 지터 판정은 표시값(중앙값)과 같은 기준 — 표시 18ms인데 경고가 뜨는 모순 방지.
+        status, latency, jitter, *_ = summarize_quality(
+            (19, 22, 60, 24, 25, 23, 21, 26), 0, 8
+        )
+        self.assertEqual(status, QUALITY_GOOD)
+        self.assertLess(jitter, 20)
+
     def test_warn_on_high_latency(self) -> None:
         status, *_ = summarize_quality((95,), 0, 1)
         self.assertEqual(status, QUALITY_WARN)

@@ -275,3 +275,29 @@ def test_network_search_filter_reset_button(page, flet_server):
         state="attached", timeout=_POLL_MS
     )
     wait_for_button(page, "전체", timeout_ms=_TIMEOUT_MS)
+
+
+def test_network_tab_internet_quality_card_updates(page, flet_server):
+    """인터넷 품질 카드가 실제 측정 결과로 갱신된다.
+
+    watch 루프가 실제 멀티엔드포인트 프로브를 호출하므로 외부망이
+    있는 환경에서는 실제 상태, 없는 환경에서는 연결 불가로 표시된다.
+    어느 쪽이든 카드는 알려진 상태 라벨 중 하나를 보여야 한다.
+    """
+    control_url = flet_server["control_url"]
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    _open_network_tab(page)
+    page.get_by_text(re.compile("https://")).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    # 측정 완료까지 대기 — 알려진 상태 라벨 중 하나가 표시돼야 한다
+    status_label = page.get_by_text(
+        re.compile("^(양호|지연 주의|불안정|측정 전|연결 불가)$")
+    )
+    status_label.first.wait_for(state="visible", timeout=_POLL_MS)
+
+    # 갱신 시각 텍스트가 실제 측정 시각으로 바뀐다
+    page.get_by_text(re.compile(r"3초마다 갱신 · \d{2}:\d{2}:\d{2} 갱신")).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )

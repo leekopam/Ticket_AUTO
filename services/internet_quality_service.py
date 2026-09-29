@@ -181,10 +181,10 @@ def summarize_quality(
     jittery = False
     if len(latencies) >= 2:
         diffs = [abs(b - a) for a, b in zip(latencies, latencies[1:])]
-        # 지터도 중앙값 — 단발 스파이크가 평균을 오염시키지 않게 한다
+        # 지터는 인접 차이의 중앙값 — 단발 스파이크(진입·복귀 2개 diff만 큼)가
+        # 지속 흔들림으로 오인되지 않게, 판정도 표시값과 같은 중앙값을 쓴다
         jitter_ms = int(round(statistics.median(diffs)))
-        # 경고 판정은 지속 흔들림 기준 — 스파이크 1회(diffs 1건만 큼)는 무시한다
-        jittery = sum(1 for d in diffs if d >= JITTER_WARN_MS) >= 2
+        jittery = jitter_ms >= JITTER_WARN_MS
     if (loss_pct or 0) >= LOSS_POOR_PCT or latency_ms >= LATENCY_POOR_MS:
         status = QUALITY_POOR
     elif (loss_pct or 0) >= LOSS_WARN_PCT or latency_ms >= LATENCY_WARN_MS or jittery:
