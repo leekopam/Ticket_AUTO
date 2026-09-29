@@ -2672,20 +2672,25 @@ class DashboardFletView:
             icon=ICONS.OPEN_IN_NEW_ROUNDED,
             key="dashboard_open_witchform_button",
         )
+        # 네트워크 관리 버튼은 OD .btn과 같은 각진 라운드(8) 스타일로 통일
+        _net_btn_style = ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))
         btn_phone_link = ft.FilledButton(
             "장치 연결하기",
             icon=ICONS.QR_CODE_2_ROUNDED,
             key="dashboard_phone_link_button",
+            style=_net_btn_style,
         )
         btn_phone_server_toggle = ft.OutlinedButton(
             "서버 시작",
             icon=ICONS.PLAY_ARROW_ROUNDED,
             key="dashboard_phone_server_toggle_button",
+            style=_net_btn_style,
         )
         btn_cert_regen = ft.OutlinedButton(
             "인증서 재생성",
             icon=ICONS.VPN_KEY_ROUNDED,
             key="dashboard_cert_regen_button",
+            style=_net_btn_style,
         )
         btn_revoke_all = ft.TextButton(
             "전체 차단",
@@ -2694,6 +2699,7 @@ class DashboardFletView:
         btn_network_refresh = ft.OutlinedButton(
             "새로고침",
             key="dashboard_network_refresh_button",
+            style=_net_btn_style,
         )
         phone_link_service = self._phone_link_service or PhoneLinkService(
             scan_handler=self._runtime_manager.process_phone_qr
