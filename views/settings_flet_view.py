@@ -118,6 +118,14 @@ SETTINGS_PANEL_BORDER = "#C6D5E4"
 SETTINGS_CARD_BG = "#FFFFFF"
 SETTINGS_CARD_BORDER = "#C9D8E7"
 SETTINGS_INSET_BG = "#F3F8FD"
+# 캔버스 뷰포트는 창 크기에 맞춰 조정하고, 미리보기는 실제 px와 1:1을 유지한다.
+CANVAS_PREVIEW_MIN_WIDTH = 240
+CANVAS_LAYOUT_LEFT_OVERHEAD = 280    # 좌측 사이드바와 페이지 여백 추정치
+CANVAS_WORKSPACE_WIDTH_RATIO = 0.6   # 우측 작업영역이 남은 폭에서 차지하는 비율 (expand 3/5)
+CANVAS_INNER_PADDING = 70            # 작업영역 패딩+컨테이너 패딩+스크롤 거터 추정치
+CANVAS_VIEWPORT_VERTICAL_OVERHEAD = 300  # 탭·속성 패널·메타 등 캔버스 위쪽 높이 추정치
+CANVAS_VIEWPORT_MIN_HEIGHT = 280
+CANVAS_VIEWPORT_DEFAULT_MAX_HEIGHT = 500
 SCAN_SOUND_TRIGGER_OPTIONS: list[tuple[str, str]] = [
     ("always", "기본 랜덤"),
     ("every_n", "N 번마다"),
@@ -702,8 +710,25 @@ def _set_scan_sound_editor_visibility(
     setattr(trigger_value_host, "visible", not show_probability)
 
 
-def _preview_width_for_paper(paper_width: str) -> int:
-    return 300 if paper_width == "58" else 420
+def resolve_canvas_preview_width(window_width: float | None, real_canvas_width: int) -> int:
+    """미리보기는 실제 캔버스 px와 1:1을 유지하고, 창이 좁으면 가용 폭까지만 축소한다."""
+    if not window_width:
+        return real_canvas_width
+    available = (
+        (window_width - CANVAS_LAYOUT_LEFT_OVERHEAD) * CANVAS_WORKSPACE_WIDTH_RATIO
+        - CANVAS_INNER_PADDING
+    )
+    return max(CANVAS_PREVIEW_MIN_WIDTH, min(int(available), real_canvas_width))
+
+
+def resolve_canvas_viewport_max_height(window_height: float | None) -> int:
+    """창 높이에 맞춰 캔버스 스크롤 뷰포트 상한을 계산한다."""
+    if not window_height:
+        return CANVAS_VIEWPORT_DEFAULT_MAX_HEIGHT
+    return max(
+        CANVAS_VIEWPORT_MIN_HEIGHT,
+        int(window_height) - CANVAS_VIEWPORT_VERTICAL_OVERHEAD,
+    )
 
 
 def _coerce_int(value: str, default: int, minimum: int = 0) -> int:
@@ -2503,6 +2528,8 @@ def build_receipt_settings_panel(
         "last_pan_update_time": 0.0,
         "canvas_scroll_ctrl": None,
         "scroll_gutter_ctrl": None,
+        "window_width": None,
+        "window_height": None,
         "canvas_stack_ctrl": None,
         "canvas_meta_text_ctrl": None,
         "canvas_frame_ctrl": None,
@@ -2775,7 +2802,14 @@ def build_receipt_settings_panel(
         return max(1, int(_doc().meta.canvas_width_px))
 
     def _preview_canvas_width() -> int:
-        return _preview_width_for_paper(str(paper_width_dropdown.value or "80"))
+        """미리보기 폭 = 실제 캔버스 px (1:1). 좁은 창에서는 가용 폭까지만 축소."""
+        return resolve_canvas_preview_width(
+            state.get("window_width"), _real_canvas_width()
+        )
+
+    def _canvas_max_viewport_height() -> int:
+        """창 높이에 맞춰 캔버스 스크롤 뷰포트 상한을 계산한다."""
+        return resolve_canvas_viewport_max_height(state.get("window_height"))
 
     def _preview_scale() -> float:
         return _preview_canvas_width() / _real_canvas_width()
@@ -2848,7 +2882,7 @@ def build_receipt_settings_panel(
             padding=0,
         )
         canvas_frame = ft.GestureDetector(on_tap=_on_canvas_bg_click, content=canvas_frame_body)
-        max_viewport_h = 500
+        max_viewport_h = _canvas_max_viewport_height()
         viewport_h = min(preview_h, max_viewport_h)
         needs_scroll = preview_h > max_viewport_h
         # 스크롤바 전용 여백 - 캔버스 오른쪽에 배치하여 핸들과 겹침 방지
@@ -4880,7 +4914,7 @@ def build_receipt_settings_panel(
         preview_w = _preview_canvas_width()
         preview_h = _preview_canvas_height()
         scale = _preview_scale()
-        max_viewport_h = 500
+        max_viewport_h = _canvas_max_viewport_height()
         viewport_h = min(preview_h, max_viewport_h)
 
         canvas_stack, _canvas_frame, canvas_frame_body, scrollable_canvas, canvas_meta_text = _ensure_canvas_scaffold()
@@ -4936,6 +4970,24 @@ def build_receipt_settings_panel(
             page=page,
             push_update=push_update,
         )
+
+    def _apply_window_size(window_width: float | None, window_height: float | None) -> bool:
+        """창 크기를 반영해 캔버스 미리보기 폭과 뷰포트 높이를 다시 그린다.
+
+        리사이즈 이벤트는 연속 발생하므로 해상된 크기가 같으면 재구성을 생략하고,
+        실제 재구성 여부를 반환해 호출자가 불필요한 page.update를 건너뛰게 한다.
+        """
+        resolved = (
+            resolve_canvas_preview_width(window_width, _real_canvas_width()),
+            resolve_canvas_viewport_max_height(window_height),
+        )
+        state["window_width"] = window_width
+        state["window_height"] = window_height
+        if state.get("applied_canvas_size") == resolved:
+            return False
+        state["applied_canvas_size"] = resolved
+        _refresh_canvas()
+        return True
 
     def on_add_text(_: ft.ControlEvent) -> None:
         _add_element(_new_default_element("text"))
@@ -5636,7 +5688,15 @@ def build_receipt_settings_panel(
         padding=12,
         spacing=12,
     )
-    return _attach_ticket_product_reload_hook(panel, _load_ticket_checkboxes)
+    result = _attach_ticket_product_reload_hook(panel, _load_ticket_checkboxes)
+    # 창 크기가 바뀔 때 대시보드가 캔버스 재계산을 호출할 수 있게 노출한다.
+    _window = getattr(page, "window", None)
+    _apply_window_size(
+        getattr(page, "width", None) or getattr(_window, "width", None),
+        getattr(page, "height", None) or getattr(_window, "height", None),
+    )
+    setattr(result, "_apply_window_size", _apply_window_size)
+    return result
 
 
 def build_receipt_sidebar_settings_panel(
@@ -6589,7 +6649,17 @@ class SettingsFletView:
         page.window.height = 940
         page.scroll = ft.ScrollMode.AUTO
         page.bgcolor = "#ECECEC"
-        page.add(build_receipt_settings_panel(page, store_path=self._store_path))
+        panel = build_receipt_settings_panel(page, store_path=self._store_path)
+
+        def _on_window_resized(event: ft.WindowResizeEvent) -> None:
+            apply_window_size = getattr(panel, "_apply_window_size", None)
+            if callable(apply_window_size) and apply_window_size(
+                getattr(event, "width", None), getattr(event, "height", None)
+            ):
+                page.update()
+
+        page.on_resized = _on_window_resized
+        page.add(panel)
 
 
 def run_settings_app() -> None:
