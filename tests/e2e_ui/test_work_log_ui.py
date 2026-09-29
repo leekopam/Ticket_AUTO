@@ -35,7 +35,7 @@ def _mark_order_received(data_path: Path, order_number: str, timestamp: str) -> 
 
 
 def _open_work_log_tab(page) -> None:
-    wait_for_button(page, "티켓 업무", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "처리 현황 조회", timeout_ms=_TIMEOUT_MS).click()
 
 
 def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
@@ -52,13 +52,13 @@ def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
     page.get_by_text("테스트 사용자").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
-    page.get_by_text("처리 1건").first.wait_for(
+    page.get_by_text("처리 완료 손님").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
     # 상태 컬럼은 제거됨 — 수령완료 배지가 나오면 안 된다
     assert page.get_by_text("수령완료").count() == 0
-    # 티켓/상품 이름은 클릭 없이 목록 행에 바로 표시된다
-    page.get_by_text("테스트 상품 x1").first.wait_for(
+    # 티켓/상품 이름은 클릭 없이 목록 행에 바로 표시된다 (행 병합 라벨 기준 부분 매칭)
+    page.get_by_text("테스트 상품").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
     # PC 본체 처리 건은 행 우측에 처리 단말 칩 "PC"가 표시된다
@@ -70,10 +70,10 @@ def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
     # 행 선택 → 우측 상세에 주문 정보와 전달 상품이 표시된다.
     row = page.get_by_text("테스트 사용자").first
     row.click()
-    page.get_by_text("처리 상세").first.wait_for(
+    page.get_by_text("상세정보").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
-    page.get_by_text("테스트 상품 x1").first.wait_for(
+    page.get_by_text("테스트 상품").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
     page.get_by_text("010-0000-0000").first.wait_for(

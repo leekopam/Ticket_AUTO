@@ -5,8 +5,10 @@ import json
 import time
 import unittest
 
+from models.order_model import Order
 from services.pairing_service import DeviceInfo, PendingApproval
 from views.network_management_view import (
+    build_device_history,
     build_network_view_state,
     build_ops_device_counts,
 )
@@ -31,7 +33,7 @@ def _device(
         device_uid=device_uid,
         reported_name=reported_name,
         custom_name=custom_name,
-        first_seen_at="2026-01-01 00:00:00",
+        first_seen_at="",
         last_seen_at=last_seen_at,
         revoked=revoked,
         device_ids=device_ids,
@@ -45,56 +47,51 @@ def _seen_ago(seconds: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - seconds))
 
 
-class OpsRecordOrderIdTest(unittest.TestCase):
+class OpsHelpersTest(unittest.TestCase):
     def test_order_id_column_preferred(self) -> None:
-        record = {"order_id": "a1b2", "result_json": '{"order_id": "ZZ"}'}
-        self.assertEqual(_ops_record_order_id(record), "A1B2")
+        record = {"order_id": "a1", "result_json": '{"order_id": "B2"}'}
+        self.assertEqual(_ops_record_order_id(record), "A1")
 
     def test_result_json_fallback(self) -> None:
-        record = {"order_id": "", "result_json": json.dumps({"order_id": "AAAA1111"})}
-        self.assertEqual(_ops_record_order_id(record), "AAAA1111")
+        record = {"result_json": json.dumps({"order_id": "b2c3"})}
+        self.assertEqual(_ops_record_order_id(record), "B2C3")
 
     def test_broken_json_returns_empty(self) -> None:
-        self.assertEqual(_ops_record_order_id({"result_json": "{broken"}), "")
+        self.assertEqual(_ops_record_order_id({"result_json": "{"}), "")
 
     def test_index_uses_fallback(self) -> None:
-        ops = [{"order_id": "", "result_json": '{"order_id": "B2C3"}', "device_id": "h1"}]
+        ops = [{"result_json": '{"order_id": "B2C3"}', "device_id": "d1"}]
         self.assertIn("B2C3", build_ops_index(ops))
 
-
-class OpsDeviceCountsTest(unittest.TestCase):
     def test_counts_per_device_id(self) -> None:
         ops = [
             {"device_id": "h1", "state": "succeeded"},
             {"device_id": "h1", "state": "already_processed"},
             {"device_id": "h2", "state": "succeeded"},
-            {"device_id": "", "state": "succeeded"},
-            {},
+            {"device_id": "h1", "state": "failed"},
         ]
         self.assertEqual(build_ops_device_counts(ops), {"h1": 2, "h2": 1})
 
     def test_only_completed_states_counted(self) -> None:
-        """스캔 접수만으로는 건수가 증가하지 않는다 — 완료 상태만 집계."""
         ops = [
             {"device_id": "h1", "state": "succeeded"},
-            {"device_id": "h1", "state": "accepted"},
             {"device_id": "h1", "state": "failed"},
             {"device_id": "h1", "state": "rejected"},
-            {"device_id": "h1", "state": "needs_reconciliation"},
-            {"device_id": "h1"},  # 구형/누락 상태
+            {"device_id": "h1", "state": "already_processed"},
         ]
-        self.assertEqual(build_ops_device_counts(ops), {"h1": 1})
+        self.assertEqual(build_ops_device_counts(ops), {"h1": 2})
 
 
 class NetworkViewStateTest(unittest.TestCase):
     def test_empty_state(self) -> None:
         state = build_network_view_state([], [], [], server_running=False, server_addr="", now=time.time())
         self.assertTrue(state.empty_visible)
+        self.assertFalse(state.empty_filtered)
         self.assertEqual(state.device_rows, ())
-        self.assertEqual(state.server_addr_text, "서버가 꺼져 있습니다")
-        self.assertIn("전체 0", state.counts_text)
+        self.assertEqual(state.online_count, 0)
+        self.assertEqual(state.server_status_text, "서버 중지됨")
 
-    def test_online_offline_badges(self) -> None:
+    def test_status_counts_and_badges(self) -> None:
         now = time.time()
         devices = [
             _device("uid:a", last_seen_at=_seen_ago(5)),
@@ -102,10 +99,26 @@ class NetworkViewStateTest(unittest.TestCase):
             _device("uid:c", device_uid="c", revoked=True, last_seen_at=_seen_ago(5), device_ids=("h3",)),
         ]
         state = build_network_view_state(devices, [], [], server_running=True, server_addr="https://x", now=now)
-        badges = [row.status_text for row in state.device_rows]
-        self.assertEqual(badges, ["연결됨", "연결 끊김", "차단됨"])
-        self.assertIn("연결됨 1", state.counts_text)
-        self.assertFalse(state.device_rows[2].can_revoke)
+        self.assertEqual([row.status_text for row in state.device_rows], ["연결됨", "연결 끊김", "차단됨"])
+        self.assertEqual((state.online_count, state.offline_count, state.blocked_count), (1, 1, 1))
+        self.assertEqual(state.server_status_text, "서버 실행 중")
+
+    def test_action_flags_by_status(self) -> None:
+        """온라인=연결 해제+차단, 오프라인=재연결 요청+차단, 차단=차단 해제."""
+        now = time.time()
+        devices = [
+            _device("uid:a", last_seen_at=_seen_ago(5)),
+            _device("uid:b", device_uid="b", last_seen_at=_seen_ago(120), device_ids=("h2",)),
+            _device("uid:c", device_uid="c", revoked=True, last_seen_at=_seen_ago(5), device_ids=("h3",)),
+        ]
+        state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now)
+        online, offline, blocked = state.device_rows
+        self.assertTrue(online.can_disconnect and online.can_revoke)
+        self.assertFalse(online.can_reconnect or online.can_unblock)
+        self.assertTrue(offline.can_reconnect and offline.can_revoke)
+        self.assertFalse(offline.can_disconnect or offline.can_unblock)
+        self.assertTrue(blocked.can_unblock)
+        self.assertFalse(blocked.can_revoke or blocked.can_disconnect)
 
     def test_signal_level_reflects_last_seen(self) -> None:
         """기기 행의 신호 단계는 마지막 활동 경과시간으로 산출된다."""
@@ -120,29 +133,43 @@ class NetworkViewStateTest(unittest.TestCase):
         state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now)
         self.assertEqual([r.signal_level for r in state.device_rows], [3, 2, 1, 0, 0])
 
-    def test_quality_text_shows_rtt_and_beat_stats(self) -> None:
-        """행 품질 지표 — 응답속도·하트비트 간격·누락 횟수를 한 줄로 표시."""
+    def test_quality_metrics_text(self) -> None:
+        """행 품질 지표 — 폰 보고 응답시간과 누락 횟수를 표시."""
         now = time.time()
         device = _device(
             last_seen_at=_seen_ago(5),
             last_rtt_ms=23,
-            beat_interval_sec=15.2,
             missed_beats=2,
         )
         state = build_network_view_state([device], [], [], server_running=True, server_addr="", now=now)
-        self.assertEqual(
-            state.device_rows[0].quality_text,
-            "응답 23ms · 간격 15초 · 누락 2회",
-        )
-        # 측정치가 없는 기기는 '-' 표기로 내려간다
+        self.assertEqual(state.device_rows[0].rtt_text, "23")
+        self.assertEqual(state.device_rows[0].missed_text, "2")
+        # 누락 2건이면 '지연 주의'로 판정된다
+        self.assertEqual(state.device_rows[0].quality_key, "warn")
+        self.assertEqual(state.device_rows[0].quality_label, "지연 주의")
+        # 측정치가 없는 기기는 '—' 표기로 내려간다
         state2 = build_network_view_state([_device()], [], [], server_running=True, server_addr="", now=now)
-        self.assertEqual(state2.device_rows[0].quality_text, "응답 - · 간격 - · 누락 0회")
+        self.assertEqual(state2.device_rows[0].rtt_text, "—")
+        self.assertEqual(state2.device_rows[0].missed_text, "0")
+
+    def test_last_activity_text(self) -> None:
+        now = time.time()
+        devices = [
+            _device("uid:a", last_seen_at=_seen_ago(5)),
+            _device("uid:b", device_uid="b", last_seen_at=_seen_ago(120), device_ids=("h2",)),
+            _device("uid:c", device_uid="c", last_seen_at="", device_ids=("h3",)),
+        ]
+        state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now)
+        self.assertEqual(state.device_rows[0].last_activity_text, "현재 연결됨")
+        self.assertRegex(state.device_rows[1].last_activity_text, r"^\d{2}\.\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertEqual(state.device_rows[2].last_activity_text, "—")
 
     def test_pending_rows(self) -> None:
         pending = [PendingApproval(pair_ticket="t1", device_name="Fold", requested_at=time.time())]
         state = build_network_view_state([], pending, [], server_running=True, server_addr="", now=time.time())
         self.assertEqual(state.pending_rows[0].pair_ticket, "t1")
         self.assertEqual(state.pending_rows[0].device_name, "Fold")
+        self.assertEqual(state.pending_count, 1)
 
     def test_processed_count_uses_all_hashes(self) -> None:
         device = _device(device_ids=("cur", "old"))
@@ -169,20 +196,83 @@ class NetworkViewStateTest(unittest.TestCase):
         state = build_network_view_state([device], [], [], server_running=True, server_addr="", now=time.time())
         self.assertEqual(state.device_rows[0].display_name, "입구폰")
 
-    def test_selected_device_recent_ops(self) -> None:
+    def test_filter_by_status(self) -> None:
+        now = time.time()
+        devices = [
+            _device("uid:a", last_seen_at=_seen_ago(5)),
+            _device("uid:b", device_uid="b", last_seen_at=_seen_ago(120), device_ids=("h2",)),
+            _device("uid:c", device_uid="c", revoked=True, last_seen_at=_seen_ago(5), device_ids=("h3",)),
+        ]
+        online = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now, filter_key="online")
+        self.assertEqual([r.status_key for r in online.device_rows], ["online"])
+        blocked = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=now, filter_key="blocked")
+        self.assertEqual([r.status_key for r in blocked.device_rows], ["revoked"])
+
+    def test_search_by_name(self) -> None:
+        devices = [
+            _device("uid:a", reported_name="Galaxy S24"),
+            _device("uid:b", device_uid="b", reported_name="iPhone 15", device_ids=("h2",)),
+        ]
+        state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=time.time(), query="iphone")
+        self.assertEqual([r.display_name for r in state.device_rows], ["iPhone 15"])
+        self.assertTrue(state.empty_visible is False)
+
+    def test_filtered_empty_flag(self) -> None:
+        devices = [_device("uid:a", reported_name="Galaxy S24")]
+        state = build_network_view_state(devices, [], [], server_running=True, server_addr="", now=time.time(), query="없음")
+        self.assertTrue(state.empty_visible)
+        self.assertTrue(state.empty_filtered)
+
+    def test_device_history_rows(self) -> None:
         device = _device(device_ids=("h1",))
         ops = [
             {"device_id": "h1", "order_id": "A1", "state": "succeeded", "updated_at": "2026-01-01 10:00:00"},
             {"device_id": "h9", "order_id": "A9", "state": "failed", "updated_at": "2026-01-01 10:01:00"},
             {"device_id": "h1", "order_id": "", "result_json": '{"order_id": "A2"}', "state": "succeeded", "updated_at": "2026-01-01 10:02:00"},
         ]
-        state = build_network_view_state(
-            [device], [], ops, server_running=True, server_addr="", now=time.time(),
-            selected_record_id="uid:dev-1",
-        )
-        self.assertIn("Galaxy S24", state.recent_title)
-        self.assertEqual([r.order_id for r in state.recent_rows], ["A2", "A1"])
-        self.assertTrue(state.device_rows[0].is_selected)
+        rows = build_device_history(device, ops)
+        self.assertEqual([r.order_id for r in rows], ["A2", "A1"])
+
+    def test_device_history_joins_order_goods(self) -> None:
+        """내역 다이얼로그는 주문 데이터와 조인해 주문자·티켓/상품을 보여준다."""
+        device = _device(device_ids=("h1",))
+        ops = [
+            {"device_id": "h1", "order_id": "A1", "state": "succeeded", "updated_at": "2026-01-01 10:00:00"},
+            {"device_id": "h1", "order_id": "ZZZ", "state": "succeeded", "updated_at": "2026-01-01 10:01:00"},
+        ]
+        orders = [
+            Order(
+                order_number="A1",
+                name="김철수",
+                goods=["입장권 x1", "아메리카노 x2"],
+            )
+        ]
+        rows = build_device_history(device, ops, orders=orders, ticket_names={"입장권"})
+        missing, joined = rows
+        # 최신 레코드가 먼저 — ZZZ는 주문이 없어 상태 텍스트로 폴백
+        self.assertEqual(missing.order_id, "ZZZ")
+        self.assertEqual(missing.customer_name, "")
+        self.assertEqual(missing.ticket_items, ())
+        self.assertEqual(joined.customer_name, "김철수")
+        self.assertEqual(joined.ticket_items, ("입장권 x1",))
+        self.assertEqual(joined.goods_items, ("아메리카노 x2",))
+
+    def test_device_quality_labels(self) -> None:
+        """품질 라벨 — 서버 중지/차단/오프라인/미측정/양호 구분."""
+        now = time.time()
+        cases = [
+            (_device(last_seen_at=_seen_ago(5), last_rtt_ms=30), True, "good", "양호"),
+            (_device(last_seen_at=_seen_ago(5), last_rtt_ms=250), True, "poor", "불안정"),
+            (_device(last_seen_at=_seen_ago(120)), True, "inactive", "연결 없음"),
+            (_device(last_seen_at=_seen_ago(5), revoked=True), True, "inactive", "차단됨"),
+            (_device(last_seen_at=_seen_ago(5), last_rtt_ms=30), False, "inactive", "측정 중지"),
+            (_device(last_seen_at=_seen_ago(5)), True, "loading", "확인 중"),
+        ]
+        for device, running, key, label in cases:
+            with self.subTest(label=label):
+                state = build_network_view_state([device], [], [], server_running=running, server_addr="", now=now)
+                self.assertEqual(state.device_rows[0].quality_key, key)
+                self.assertEqual(state.device_rows[0].quality_label, label)
 
 
 if __name__ == "__main__":

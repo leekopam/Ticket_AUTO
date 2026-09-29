@@ -436,6 +436,26 @@ class PairingService:
             logger.info("기기 명시적 연결 해제: %s", record.record_id)
             return True
 
+    def disconnect_device(self, record_id: str) -> bool:
+        """레코드 ID로 기기를 즉시 끊김 처리한다 — 토큰은 유지되어 자동 재연결된다."""
+        with self._lock:
+            found = self._records.get(record_id or "")
+            if found is None:
+                return False
+            records = dict(self._records)
+            record = replace(found, last_seen_at="")
+            records[record.record_id] = record
+            try:
+                self._save_tokens(records)
+            except OSError:
+                logger.warning("기기 끊김 상태 저장 실패", exc_info=True)
+                return False
+            self._records = records
+            self._last_persisted = time.time()
+            self._dirty = False
+            logger.info("기기 연결 해제: %s", record.record_id)
+            return True
+
     def revoke_token(self, token: str) -> bool:
         """토큰을 폐기한다. 레코드와 별칭은 revoked 상태로 보존한다."""
         with self._lock:
@@ -475,6 +495,19 @@ class PairingService:
             self._save_tokens(records)
             self._records = records
             logger.info("기기 차단: %s", record_id)
+            return True
+
+    def unrevoke_device(self, record_id: str) -> bool:
+        """차단된 기기의 차단을 해제한다. 토큰은 이미 파기됐으므로 재페어링이 필요하다."""
+        with self._lock:
+            found = self._records.get(record_id or "")
+            if found is None or not found.revoked:
+                return False
+            records = dict(self._records)
+            records[found.record_id] = replace(found, revoked=False)
+            self._save_tokens(records)
+            self._records = records
+            logger.info("기기 차단 해제: %s", record_id)
             return True
 
     def revoke_all(self) -> int:

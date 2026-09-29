@@ -2672,9 +2672,9 @@ class DashboardFletView:
             icon=ICONS.OPEN_IN_NEW_ROUNDED,
             key="dashboard_open_witchform_button",
         )
-        btn_phone_link = ft.OutlinedButton(
-            "휴대폰 연결",
-            icon=ICONS.SMARTPHONE_ROUNDED,
+        btn_phone_link = ft.FilledButton(
+            "장치 연결하기",
+            icon=ICONS.QR_CODE_2_ROUNDED,
             key="dashboard_phone_link_button",
         )
         btn_phone_server_toggle = ft.OutlinedButton(
@@ -2696,7 +2696,7 @@ class DashboardFletView:
         )
 
         btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
-        btn_work_tab = ft.TextButton("티켓 업무", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")
+        btn_work_tab = ft.TextButton("처리 현황 조회", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")
         btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
         btn_network_tab = ft.TextButton("네트워크 관리", icon=ICONS.LAN_ROUNDED, key="dashboard_tab_network")
         btn_ticket_tab.icon_size = 18
@@ -2729,6 +2729,7 @@ class DashboardFletView:
         )
 
         work_log_selection: dict[str, str | None] = {"value": None}
+        work_log_query: dict[str, str] = {"value": ""}
         work_log_cache: dict[str, object] = {"orders": [], "ops_index": {}, "ticket_names": []}
 
         def _apply_work_log_state() -> None:
@@ -2738,6 +2739,7 @@ class DashboardFletView:
                 work_log_cache["ticket_names"],
                 selected_order_number=work_log_selection["value"],
                 device_lookup=phone_link_service.device_for_device_id,
+                query=work_log_query["value"],
             )
             apply_work_log_view_state(
                 work_log_panel,
@@ -2747,6 +2749,11 @@ class DashboardFletView:
 
         def _on_work_log_select(order_number: str) -> None:
             work_log_selection["value"] = order_number
+            _apply_work_log_state()
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_work_log_search(text: str) -> None:
+            work_log_query["value"] = text or ""
             _apply_work_log_state()
             safe_page_update(page, search_refresh_stop)
 
@@ -2779,23 +2786,32 @@ class DashboardFletView:
         work_log_panel = build_work_log_panel(
             on_select=_on_work_log_select,
             on_refresh=lambda _e: refresh_work_log(),
+            on_search=_on_work_log_search,
         )
 
         # 네트워크 관리 탭 — 페어링 기기 목록, 연결 상태, 이름 변경/차단
+        from services.internet_quality_service import InternetQualityMonitor
         from views.network_management_view import (
+            apply_internet_quality,
             apply_network_view_state,
+            build_device_history,
+            build_history_item_control,
             build_network_panel,
             build_network_view_state,
         )
 
+        quality_monitor = InternetQualityMonitor()
+        quality_state: dict[str, object] = {"value": None}
         network_controls = build_network_panel(
             link_button=btn_phone_link,
             server_toggle_button=btn_phone_server_toggle,
             regen_cert_button=btn_cert_regen,
             revoke_all_button=btn_revoke_all,
+            on_quality_check=lambda _e: _measure_internet_quality(manual=True),
         )
         network_panel = network_controls["panel"]
-        network_selection: dict[str, str | None] = {"value": None}
+        network_filter = {"key": "all", "query": ""}
+        network_controls["_filter_key"] = network_filter["key"]
         network_ops_cache: dict[str, list[dict[str, str]]] = {"ops": []}
         network_ops_loaded = {"value": False}
 
@@ -2812,7 +2828,8 @@ class DashboardFletView:
                     server_running=phone_link_service.running,
                     server_addr=str(payload.get("addr") or ""),
                     now=time.time(),
-                    selected_record_id=network_selection["value"],
+                    filter_key=network_filter["key"],
+                    query=network_filter["query"],
                 )
             except Exception as exc:
                 logger.error("네트워크 관리 정보 조회 실패: %s", exc, exc_info=True)
@@ -2823,23 +2840,73 @@ class DashboardFletView:
             btn_phone_server_toggle.icon = (
                 ICONS.STOP_CIRCLE_ROUNDED if running else ICONS.PLAY_ARROW_ROUNDED
             )
+            network_controls["_filter_key"] = network_filter["key"]
             apply_network_view_state(
                 network_controls,
                 state,
-                on_select=_on_network_select,
+                on_disconnect=_on_network_disconnect,
                 on_rename=_on_network_rename,
                 on_revoke=_on_network_revoke,
+                on_unblock=_on_network_unblock,
+                on_reconnect=_on_network_reconnect,
+                on_history=_on_network_history,
                 on_approve=_on_network_approve,
                 on_reject=_on_network_reject,
+            )
+            apply_internet_quality(
+                network_controls,
+                quality_state["value"],
+                server_running=running,
             )
             if push_update:
                 safe_page_update(page, search_refresh_stop)
 
-        def _on_network_select(record_id: str) -> None:
-            network_selection["value"] = (
-                None if network_selection["value"] == record_id else record_id
-            )
+        def _measure_internet_quality(*, manual: bool = False) -> None:
+            """인터넷 품질 1회 측정 — 프로브가 블로킹이라 별도 스레드에서 실행한다."""
+            if not phone_link_service.running:
+                quality_state["value"] = None
+                apply_internet_quality(
+                    network_controls, None, server_running=False
+                )
+                safe_page_update(page, search_refresh_stop)
+                return
+
+            def _run() -> None:
+                measured = quality_monitor.measure()
+                quality_state["value"] = measured
+
+                def _apply() -> None:
+                    apply_internet_quality(
+                        network_controls,
+                        measured,
+                        server_running=phone_link_service.running,
+                    )
+                    safe_page_update(page, search_refresh_stop)
+
+                call_page_from_thread(page, _apply, search_refresh_stop)
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        def _on_network_filter(key: str) -> None:
+            network_filter["key"] = key
             refresh_network_panel()
+
+        def _on_network_search(text: str) -> None:
+            network_filter["query"] = text or ""
+            refresh_network_panel()
+
+        for _filter_key, _chip in network_controls["filter_chips"].items():
+            _chip.on_click = (
+                lambda _e, key=_filter_key: _on_network_filter(key)
+            )
+        network_controls["search_field"].on_change = (
+            lambda e: _on_network_search(e.control.value or "")
+        )
+        network_controls["empty_reset"].on_click = lambda _e: (
+            network_filter.update({"key": "all", "query": ""}),
+            setattr(network_controls["search_field"], "value", ""),
+            refresh_network_panel(),
+        )
 
         def _on_network_approve(pair_ticket: str) -> None:
             phone_link_service.approve(pair_ticket)
@@ -2848,6 +2915,139 @@ class DashboardFletView:
         def _on_network_reject(pair_ticket: str) -> None:
             phone_link_service.reject(pair_ticket)
             refresh_network_panel()
+
+        def _on_network_disconnect(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "이 기기"
+
+            def _confirm(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                if phone_link_service.disconnect_device(record_id):
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar(f"{label}의 연결을 해제했습니다. 기존 처리 내역은 유지됩니다.", success=True)
+                else:
+                    _network_snackbar("연결 해제에 실패했습니다.", success=False)
+
+            def _cancel(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("장치 연결 해제"),
+                content=ft.Text(f"{label}의 연결을 해제할까요? 기존 처리 내역은 유지됩니다."),
+                actions=[
+                    ft.TextButton("취소", on_click=_cancel),
+                    ft.FilledButton(
+                        "연결 해제",
+                        on_click=_confirm,
+                        style=ft.ButtonStyle(bgcolor="#A12622", color="#FFFFFF"),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_network_unblock(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "이 기기"
+
+            def _confirm(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                if phone_link_service.unrevoke_device(record_id):
+                    refresh_network_panel(push_update=False)
+                    _network_snackbar(
+                        f"{label}의 차단을 해제했습니다. 다시 연결하려면 QR 재페어링이 필요합니다.",
+                        success=True,
+                    )
+                else:
+                    _network_snackbar("차단 해제에 실패했습니다.", success=False)
+
+            def _cancel(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            page.dialog = ft.AlertDialog(
+                title=ft.Text("장치 차단 해제"),
+                content=ft.Text(f"{label}의 차단을 해제할까요? 차단 해제 후 다시 페어링해 승인해야 합니다."),
+                actions=[
+                    ft.TextButton("취소", on_click=_cancel),
+                    ft.FilledButton("차단 해제", on_click=_confirm),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
+
+        def _on_network_reconnect(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "기기"
+            _network_snackbar(
+                f"{label}에서 앱을 열면 자동으로 다시 연결됩니다.",
+                success=True,
+            )
+
+        def _on_network_history(record_id: str) -> None:
+            info = next(
+                (d for d in phone_link_service.list_devices() if d.record_id == record_id),
+                None,
+            )
+            if info is None:
+                return
+            label = info.custom_name or info.reported_name or "기기"
+            try:
+                history_orders = excel_service.search_orders_all()
+                history_ticket_names = load_ticket_product_names(settings_store)
+            except Exception:
+                history_orders, history_ticket_names = [], []
+            rows = build_device_history(
+                info,
+                network_ops_cache["ops"],
+                orders=history_orders,
+                ticket_names=history_ticket_names,
+            )
+
+            def _close(_e: ft.ControlEvent) -> None:
+                page.dialog.open = False
+                safe_page_update(page, search_refresh_stop)
+
+            history_controls: list[ft.Control]
+            if rows:
+                history_controls = [build_history_item_control(row) for row in rows]
+            else:
+                history_controls = [ft.Text("아직 처리한 내역이 없습니다.", size=13, color="#8B97A8")]
+            page.dialog = ft.AlertDialog(
+                title=ft.Text(f"{label} · 처리 내역", size=18, weight=ft.FontWeight.BOLD),
+                content=ft.Container(
+                    content=ft.Column(
+                        controls=history_controls,
+                        spacing=0,
+                        scroll=ft.ScrollMode.AUTO,
+                        tight=True,
+                    ),
+                    width=440,
+                    height=360,
+                ),
+                actions=[ft.TextButton("닫기", on_click=_close)],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog.open = True
+            safe_page_update(page, search_refresh_stop)
 
         def _network_snackbar(text: str, *, success: bool) -> None:
             page.snack_bar = build_dashboard_snack_bar(text, success=success)
@@ -2867,15 +3067,33 @@ class DashboardFletView:
                 max_length=20,
                 autofocus=True,
                 width=320,
+                hint_text="현장에서 구분하기 쉬운 이름 (최대 20자)",
             )
+            name_error = ft.Text("", size=12, color="#A12622")
 
             def _save(_e: ft.ControlEvent) -> None:
-                if phone_link_service.rename_device(record_id, name_field.value or ""):
+                name = (name_field.value or "").strip()
+                error = ""
+                if not name:
+                    error = "기기 이름을 입력해주세요."
+                elif name == "PC 본체" or any(
+                    d.record_id != record_id
+                    and (d.custom_name or d.reported_name or "").strip().lower() == name.lower()
+                    for d in phone_link_service.list_devices()
+                ):
+                    error = "이미 사용 중인 이름입니다. 다른 이름을 입력해주세요."
+                if error:
+                    name_error.value = error
+                    name_field.focus()
+                    safe_page_update(page, search_refresh_stop)
+                    return
+                if phone_link_service.rename_device(record_id, name):
                     page.dialog.open = False
                     refresh_network_panel(push_update=False)
                     _network_snackbar("기기 이름을 변경했습니다.", success=True)
                 else:
-                    _network_snackbar("이름 변경에 실패했습니다.", success=False)
+                    name_error.value = "이름 변경에 실패했습니다."
+                    safe_page_update(page, search_refresh_stop)
 
             def _cancel(_e: ft.ControlEvent) -> None:
                 page.dialog.open = False
@@ -2883,7 +3101,7 @@ class DashboardFletView:
 
             page.dialog = ft.AlertDialog(
                 title=ft.Text("기기 이름 변경"),
-                content=name_field,
+                content=ft.Column(controls=[name_field, name_error], spacing=4, tight=True),
                 actions=[
                     ft.TextButton("취소", on_click=_cancel),
                     ft.FilledButton("저장", on_click=_save),
@@ -2947,6 +3165,7 @@ class DashboardFletView:
                         lambda: refresh_network_panel(push_update=True),
                         search_refresh_stop,
                     )
+                    _measure_internet_quality()
                 except Exception:
                     logger.debug("네트워크 관리 갱신 실패", exc_info=True)
 

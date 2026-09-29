@@ -1,4 +1,4 @@
-"""티켓 업무 탭 뷰 상태 계산 단위 테스트."""
+"""처리 현황 조회 탭 뷰 상태 계산 단위 테스트."""
 
 import unittest
 
@@ -8,43 +8,30 @@ from views.work_log_flet_view import (
     WorkLogViewState,
     build_ops_index,
     build_work_log_view_state,
-    filter_work_log_orders,
+    device_chip_colors,
     format_work_time,
+    parse_goods_item,
 )
 
 
 def _order(
     order_number: str,
     *,
+    name: str = "홍길동",
+    phone: str = "010-1234-5678",
     received_at: str = "",
     order_status: str = "",
     goods: list[str] | None = None,
 ) -> Order:
     return Order(
         order_number=order_number,
-        name="홍길동",
-        phone="010-1234-5678",
+        name=name,
+        phone=phone,
         seat="A-1",
         goods=goods or [],
         received_at=received_at,
         order_status=order_status,
     )
-
-
-class FilterWorkLogOrdersTest(unittest.TestCase):
-    def test_received_and_reconcile_orders_included(self) -> None:
-        orders = [
-            _order("A1", received_at="2026-04-26 10:00:00"),
-            _order("A2"),
-            _order("A3", order_status=RECONCILE_STATUS),
-            _order("A4", order_status="결제완료"),
-        ]
-        result = filter_work_log_orders(orders)
-        self.assertEqual([o.order_number for o in result], ["A1", "A3"])
-
-    def test_empty_input_returns_empty(self) -> None:
-        self.assertEqual(filter_work_log_orders([]), [])
-        self.assertEqual(filter_work_log_orders(None), [])
 
 
 class FormatWorkTimeTest(unittest.TestCase):
@@ -54,6 +41,15 @@ class FormatWorkTimeTest(unittest.TestCase):
     def test_short_and_empty_values(self) -> None:
         self.assertEqual(format_work_time(""), "-")
         self.assertEqual(format_work_time("14:32"), "14:32")
+
+
+class ParseGoodsItemTest(unittest.TestCase):
+    def test_qty_suffix_split(self) -> None:
+        self.assertEqual(parse_goods_item("응원봉 x2"), ("응원봉", 2))
+        self.assertEqual(parse_goods_item("슬로건 ×3"), ("슬로건", 3))
+
+    def test_no_suffix_defaults_one(self) -> None:
+        self.assertEqual(parse_goods_item("티셔츠"), ("티셔츠", 1))
 
 
 class BuildOpsIndexTest(unittest.TestCase):
@@ -70,6 +66,18 @@ class BuildOpsIndexTest(unittest.TestCase):
 
 
 class BuildWorkLogViewStateTest(unittest.TestCase):
+    def test_only_received_orders_listed(self) -> None:
+        """목록은 수령 완료 건만 — 확인필요/미처리는 집계로만 간다."""
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00"),
+            _order("A2", order_status=RECONCILE_STATUS),
+            _order("A3", order_status="결제완료"),
+        ]
+        state = build_work_log_view_state(orders, {}, [])
+        self.assertEqual([r.order_number for r in state.rows], ["A1"])
+        self.assertEqual(state.completed_count, 1)
+        self.assertEqual(state.pending_count, 2)
+
     def test_newest_first_and_seq_descending(self) -> None:
         orders = [
             _order("A1", received_at="2026-04-26 10:00:00"),
@@ -78,21 +86,7 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         ]
         state = build_work_log_view_state(orders, {}, [])
         self.assertEqual([r.order_number for r in state.rows], ["A3", "A2", "A1"])
-        # 처리 순번은 오래된 건이 1
         self.assertEqual([r.seq for r in state.rows], [3, 2, 1])
-        self.assertEqual(state.count_text, "처리 3건")
-
-    def test_reconcile_order_uses_op_updated_at(self) -> None:
-        orders = [
-            _order("A1", received_at="2026-04-26 10:00:00"),
-            _order("A9", order_status=RECONCILE_STATUS),
-        ]
-        ops_index = {"A9": {"order_id": "A9", "updated_at": "2026-04-26 12:00:00", "device_id": "phone-1"}}
-        state = build_work_log_view_state(orders, ops_index, [])
-        self.assertEqual(state.rows[0].order_number, "A9")
-        self.assertTrue(state.rows[0].needs_check)
-        self.assertFalse(state.rows[1].needs_check)
-        self.assertIn("확인필요 1건", state.count_text)
 
     def test_selection_produces_detail(self) -> None:
         orders = [
@@ -109,14 +103,13 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         self.assertEqual(state.detail.goods_items, ("아메리카노 x2",))
         self.assertTrue(state.rows[0].is_selected)
 
-    def test_row_summary_shows_actual_item_names(self) -> None:
+    def test_row_items_split_ticket_and_goods(self) -> None:
         orders = [
             _order("A1", received_at="2026-04-26 10:00:00", goods=["입장권 x1", "아메리카노 x2"]),
         ]
         state = build_work_log_view_state(orders, {}, {"입장권"})
-        self.assertIn("입장권 x1", state.rows[0].ticket_text)
-        self.assertNotIn("아메리카노", state.rows[0].ticket_text)
-        self.assertIn("아메리카노 x2", state.rows[0].goods_text)
+        self.assertEqual(state.rows[0].ticket_items, ("입장권 x1",))
+        self.assertEqual(state.rows[0].goods_items, ("아메리카노 x2",))
 
     def test_row_shows_operator_device(self) -> None:
         """행에도 처리 단말이 표시된다 — 상세를 열지 않아도 누가 처리했는지 보인다."""
@@ -129,11 +122,70 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         }
         state = build_work_log_view_state(orders, ops_index, [])
         by_order = {r.order_number: r for r in state.rows}
-        # _operations에 없는 PC 본체 처리는 "PC"
         self.assertEqual(by_order["A2"].device_text, "PC")
-        # 스냅샷 device_name 폴백
         self.assertEqual(by_order["A1"].device_text, "민기의 S24")
-        self.assertNotIn("입장권", state.rows[0].goods_text)
+
+    def test_device_chip_colors_stable(self) -> None:
+        """같은 기기명은 항상 같은 색 — 검색 결과가 바뀌어도 유지된다."""
+        self.assertEqual(device_chip_colors("폰 1"), device_chip_colors("폰 1"))
+        self.assertEqual(device_chip_colors("PC"), ("#EEF1F4", "#4B5A6E"))
+
+    def test_search_filters_rows(self) -> None:
+        orders = [
+            _order("A1", name="김민수", received_at="2026-04-26 10:00:00", goods=["응원봉 x1"]),
+            _order("A2", name="이서연", received_at="2026-04-26 11:00:00", goods=["슬로건 x1"]),
+        ]
+        state = build_work_log_view_state(orders, {}, [], query="김민수")
+        self.assertEqual([r.order_number for r in state.rows], ["A1"])
+
+    def test_search_by_goods_name(self) -> None:
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00", goods=["응원봉 x1"]),
+            _order("A2", received_at="2026-04-26 11:00:00", goods=["슬로건 x1"]),
+        ]
+        state = build_work_log_view_state(orders, {}, [], query="슬로건")
+        self.assertEqual([r.order_number for r in state.rows], ["A2"])
+
+    def test_search_by_phone_digits(self) -> None:
+        orders = [
+            _order("A1", phone="010-1111-2222", received_at="2026-04-26 10:00:00"),
+            _order("A2", phone="010-9999-0000", received_at="2026-04-26 11:00:00"),
+        ]
+        state = build_work_log_view_state(orders, {}, [], query="11112222")
+        self.assertEqual([r.order_number for r in state.rows], ["A1"])
+
+    def test_search_empty_result_message(self) -> None:
+        orders = [_order("A1", received_at="2026-04-26 10:00:00")]
+        state = build_work_log_view_state(orders, {}, [], query="없는이름")
+        self.assertEqual(state.rows, ())
+        self.assertEqual(state.empty_text, "검색 결과가 없습니다.")
+
+    def test_metrics_ignore_query(self) -> None:
+        """검색으로 행이 가려져도 상단 집계는 행사 전체 기준으로 유지된다."""
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00"),
+            _order("A2"),
+        ]
+        state = build_work_log_view_state(orders, {}, [], query="없는이름")
+        self.assertEqual(state.completed_count, 1)
+        self.assertEqual(state.pending_count, 1)
+
+    def test_goods_remaining_counts_unreceived_qty(self) -> None:
+        """상품별 미수령 = 전체 주문 수량 − 수령 완료 수량 (티켓 분류 제외)."""
+        orders = [
+            _order("A1", received_at="2026-04-26 10:00:00", goods=["응원봉 x2", "입장권 x1"]),
+            _order("A2", goods=["응원봉 x3", "슬로건 x1"]),
+            _order("A3", goods=["슬로건 x2"]),
+        ]
+        state = build_work_log_view_state(orders, {}, {"입장권"})
+        remaining = {item.name: item.remaining for item in state.goods_remaining}
+        # 응원봉: 주문 2+3=5, 수령 2 → 3 / 슬로건: 1+2=3 수령 0 → 3 / 티켓 제외
+        self.assertEqual(remaining, {"응원봉": 3, "슬로건": 3})
+
+    def test_goods_remaining_excludes_ticket_products(self) -> None:
+        orders = [_order("A1", goods=["입장권 x5"])]
+        state = build_work_log_view_state(orders, {}, {"입장권"})
+        self.assertEqual(state.goods_remaining, ())
 
     def test_missing_selection_leaves_detail_hidden(self) -> None:
         orders = [_order("A1", received_at="2026-04-26 10:00:00")]
@@ -145,7 +197,8 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         state = build_work_log_view_state([], {}, [])
         self.assertIsInstance(state, WorkLogViewState)
         self.assertEqual(state.empty_text, "아직 처리된 주문이 없습니다.")
-        self.assertEqual(state.count_text, "처리 0건")
+        self.assertEqual(state.completed_count, 0)
+        self.assertEqual(state.pending_count, 0)
 
 
 if __name__ == "__main__":

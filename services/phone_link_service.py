@@ -126,6 +126,14 @@ class PhoneLinkService:
     def revoke_device(self, record_id: str) -> bool:
         return self._pairing.revoke_device(record_id)
 
+    def disconnect_device(self, record_id: str) -> bool:
+        """기기를 즉시 끊김 상태로 만든다 — 토큰 유지, 기기 측이 다시 붙으면 자동 복귀."""
+        return self._pairing.disconnect_device(record_id)
+
+    def unrevoke_device(self, record_id: str) -> bool:
+        """차단 해제 — 재연결하려면 새 QR 페어링과 승인이 필요하다."""
+        return self._pairing.unrevoke_device(record_id)
+
     def revoke_all(self) -> int:
         """모든 기기 토큰을 폐기한다 — 행사 종료 정리용. 레코드는 보존한다."""
         return self._pairing.revoke_all()

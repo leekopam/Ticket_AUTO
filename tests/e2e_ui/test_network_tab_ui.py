@@ -35,8 +35,8 @@ def _open_network_tab(page) -> None:
 
 
 def _device_row(page, name_pattern: str):
-    """기기 행의 병합 semantics 노드(role=group, aria-label=행 전체 텍스트)."""
-    return page.get_by_role("group", name=re.compile(name_pattern, re.S))
+    """기기 행은 클릭 대상이 아니라 하위 텍스트가 개별 노드로 노출된다 — 텍스트 매칭."""
+    return page.get_by_text(re.compile(name_pattern))
 
 
 def _write_ops_record(data_path: Path, *, order_number: str, device_hash: str) -> None:
@@ -85,12 +85,12 @@ def test_network_tab_pair_pending_approve_rename(page, flet_server):
     page.get_by_text("아직 연결된 휴대폰이 없습니다.", exact=True).first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
-    # 휴대폰 연결 버튼은 네트워크 탭 서버 카드에 있다
-    wait_for_button(page, "휴대폰 연결", timeout_ms=_TIMEOUT_MS)
+    # 장치 연결 버튼은 네트워크 탭 서버 카드에 있다
+    wait_for_button(page, "장치 연결하기", timeout_ms=_TIMEOUT_MS)
 
     # LAN 서버 기동 → 서버 주소 카드 표시
     send_control_command(control_url, {"cmd": "phone_link_start"})
-    page.get_by_text("서버 주소: https://").first.wait_for(
+    page.get_by_text(re.compile("https://")).first.wait_for(
         state="visible", timeout=_POLL_MS
     )
 
@@ -108,10 +108,10 @@ def test_network_tab_pair_pending_approve_rename(page, flet_server):
     page.get_by_text("테스트폰").first.wait_for(state="visible", timeout=_POLL_MS)
 
     # UI에서 승인 → 스텁 폰의 백그라운드 티켓 교환 완료 → 기기 목록에 연결됨
-    wait_for_button(page, "승인", timeout_ms=_POLL_MS).click()
+    wait_for_button(page, "연결 승인", timeout_ms=_POLL_MS).click()
     _device_row(page, "테스트폰").first.wait_for(state="visible", timeout=_POLL_MS)
     _device_row(page, "연결됨").first.wait_for(state="visible", timeout=_POLL_MS)
-    page.get_by_text("연결됨 1 / 전체 1", exact=True).first.wait_for(
+    page.get_by_text("연결된 장치", exact=True).first.wait_for(
         state="visible", timeout=_POLL_MS
     )
 
@@ -176,29 +176,27 @@ def test_network_tab_processed_count_and_processor_name(page, flet_server):
 
         # 네트워크 탭 — 기기 행에 처리 건수와 연결됨 표시 (병합 라벨 기준)
         _open_network_tab(page)
-        row = _device_row(page, _DEVICE_NAME_2).first
-        row.wait_for(state="visible", timeout=_POLL_MS)
-        _device_row(page, f"{_DEVICE_NAME_2}.*연결됨").first.wait_for(
+        _device_row(page, _DEVICE_NAME_2).first.wait_for(
             state="visible", timeout=_POLL_MS
         )
-        _device_row(page, f"{_DEVICE_NAME_2}.*처리 1건").first.wait_for(
+        page.get_by_text("연결됨", exact=True).first.wait_for(
             state="visible", timeout=_POLL_MS
         )
 
-        # 기기 선택 → 최근 처리 목록에 주문번호 표시
-        # semantics 노드는 flutter-view 아래라 DOM click으로 탭을 전달한다.
-        row.evaluate("e => e.click()")
+        # 기기 행의 "처리 1건" 링크 → 처리 내역 다이얼로그에 주문번호 표시
+        wait_for_button(page, "처리 1건", timeout_ms=_POLL_MS).click()
         page.get_by_text(TEST_ORDER_NUMBER).first.wait_for(
             state="visible", timeout=_TIMEOUT_MS
         )
+        wait_for_button(page, "닫기", timeout_ms=_TIMEOUT_MS).click()
 
-        # 티켓 업무 탭 — 처리 단말이 기기 이름으로 조인된다
-        wait_for_button(page, "티켓 업무", timeout_ms=_TIMEOUT_MS).click()
+        # 처리 현황 조회 탭 — 처리 단말이 기기 이름으로 조인된다
+        wait_for_button(page, "처리 현황 조회", timeout_ms=_TIMEOUT_MS).click()
         page.get_by_text("테스트 사용자").first.wait_for(
             state="visible", timeout=_TIMEOUT_MS
         )
         page.get_by_text("테스트 사용자").first.click()
-        page.get_by_text(f"처리 단말: {_DEVICE_NAME_2}").first.wait_for(
+        page.get_by_text(_DEVICE_NAME_2).first.wait_for(
             state="visible", timeout=_TIMEOUT_MS
         )
     finally:
@@ -217,7 +215,7 @@ def test_network_tab_server_toggle_button(page, flet_server):
 
     # 시작: 토글 클릭 → 서버 주소 표시 + 버튼이 "서버 중지"로 바뀐다
     wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS).click()
-    page.get_by_text("서버 주소: https://").first.wait_for(
+    page.get_by_text(re.compile("https://")).first.wait_for(
         state="visible", timeout=_POLL_MS
     )
     wait_for_button(page, "서버 중지", timeout_ms=_TIMEOUT_MS)
@@ -239,11 +237,11 @@ def test_phone_link_dialog_opens_with_qr(page, flet_server):
     control_url = flet_server["control_url"]
     send_control_command(control_url, {"cmd": "phone_link_start"})
     _open_network_tab(page)
-    page.get_by_text("서버 주소: https://").first.wait_for(
+    page.get_by_text(re.compile("https://")).first.wait_for(
         state="visible", timeout=_POLL_MS
     )
 
-    wait_for_button(page, "휴대폰 연결", timeout_ms=_TIMEOUT_MS).click()
+    wait_for_button(page, "장치 연결하기", timeout_ms=_TIMEOUT_MS).click()
     # 모달 내부 텍스트는 flutter web semantics에 라벨이 안 붙으므로 role 구조로 확인한다.
     # 다이얼로그 = role=dialog 노드 + 액션 버튼 3개(QR 재발급/서버 중지/닫기)
     dialog = page.locator("flt-semantics[role='dialog']")

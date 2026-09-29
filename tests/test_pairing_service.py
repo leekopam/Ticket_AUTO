@@ -382,3 +382,37 @@ def test_repair_refreshes_expired_token(tmp_path: Path):
     assert pairing.device_id_for_token(new_token)
     refreshed = next(iter(pairing._records.values()))
     assert refreshed.token_expires_at > time.time()
+
+
+def test_unrevoke_clears_flag_but_token_stays_gone(pairing: PairingService):
+    """차단 해제는 revoked 플래그만 지운다 — 파기된 토큰은 복구되지 않아 재페어링이 필요하다."""
+    token = _approve_one(pairing, "staff-1")
+    record_id = pairing.list_devices()[0].record_id
+    assert pairing.revoke_device(record_id)
+    assert pairing.device_id_for_token(token) is None
+
+    assert pairing.unrevoke_device(record_id)
+    device = pairing.list_devices()[0]
+    assert device.revoked is False
+    assert pairing.device_id_for_token(token) is None
+
+    # 이미 해제됐거나 없는 레코드는 실패
+    assert not pairing.unrevoke_device(record_id)
+    assert not pairing.unrevoke_device("no-such-record")
+
+
+def test_disconnect_device_clears_last_seen_keeps_token(pairing: PairingService, tmp_path: Path):
+    """연결 해제는 presence만 끊김으로 — 토큰은 유지돼 기기가 스스로 복귀한다."""
+    token = _approve_one(pairing, "staff-1")
+    record_id = pairing.list_devices()[0].record_id
+    pairing.record_activity(pairing.device_id_for_token(token), force_save=True)
+    assert pairing.list_devices()[0].last_seen_at
+
+    assert pairing.disconnect_device(record_id)
+    device = pairing.list_devices()[0]
+    assert device.last_seen_at == ""
+    assert pairing.device_id_for_token(token)
+
+    reloaded = PairingService(str(tmp_path / "devices.json"))
+    assert reloaded.list_devices()[0].last_seen_at == ""
+    assert not pairing.disconnect_device("no-such-record")
