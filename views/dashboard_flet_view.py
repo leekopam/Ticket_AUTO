@@ -2691,6 +2691,10 @@ class DashboardFletView:
             "전체 차단",
             key="dashboard_revoke_all_button",
         )
+        btn_network_refresh = ft.OutlinedButton(
+            "새로고침",
+            key="dashboard_network_refresh_button",
+        )
         phone_link_service = self._phone_link_service or PhoneLinkService(
             scan_handler=self._runtime_manager.process_phone_qr
         )
@@ -2808,7 +2812,7 @@ class DashboardFletView:
             link_button=btn_phone_link,
             server_toggle_button=btn_phone_server_toggle,
             regen_cert_button=btn_cert_regen,
-            revoke_all_button=btn_revoke_all,
+            header_button=btn_network_refresh,
             on_quality_check=lambda _e: _measure_internet_quality(manual=True),
         )
         network_panel = network_controls["panel"]
@@ -2817,7 +2821,11 @@ class DashboardFletView:
         network_ops_cache: dict[str, list[dict[str, str]]] = {"ops": []}
         network_ops_loaded = {"value": False}
 
-        def refresh_network_panel(push_update: bool = True, reload_ops: bool = False) -> None:
+        def refresh_network_panel(
+            push_update: bool = True,
+            reload_ops: bool = False,
+            update_fn=None,
+        ) -> None:
             try:
                 if reload_ops or not network_ops_loaded["value"]:
                     network_ops_cache["ops"] = excel_service.list_operations()
@@ -2861,7 +2869,27 @@ class DashboardFletView:
                 server_running=running,
             )
             if push_update:
+                if update_fn is not None:
+                    update_fn()
+                else:
+                    safe_page_update(page, search_refresh_stop)
+
+        # 검색 필드 편집 중에는 전체 리렌더가 포커스를 뺏으므로 결과 영역만 갱신한다
+        _search_editing = {"active": False}
+
+        def _update_network_search_results() -> None:
+            refocus = _search_editing["active"]
+            try:
+                for key in ("device_list", "empty_box", "empty_text", "empty_reset"):
+                    network_controls[key].update()
+            except Exception:
                 safe_page_update(page, search_refresh_stop)
+            if refocus:
+                # 갱신 과정에서 포커스가 빠졌을 경우 되돌려 타이핑 연속성을 유지한다
+                try:
+                    network_controls["search_field"].focus()
+                except Exception:
+                    pass
 
         def _measure_internet_quality(*, manual: bool = False) -> None:
             """인터넷 품질 1회 측정 — 프로브가 블로킹이라 별도 스레드에서 실행한다."""
@@ -2895,7 +2923,7 @@ class DashboardFletView:
 
         def _on_network_search(text: str) -> None:
             network_filter["query"] = text or ""
-            refresh_network_panel()
+            refresh_network_panel(update_fn=_update_network_search_results)
 
         for _filter_key, _chip in network_controls["filter_chips"].items():
             _chip.on_click = (
@@ -2903,6 +2931,12 @@ class DashboardFletView:
             )
         network_controls["search_field"].on_change = (
             lambda e: _on_network_search(e.control.value or "")
+        )
+        network_controls["search_field"].on_focus = (
+            lambda _e: _search_editing.update(active=True)
+        )
+        network_controls["search_field"].on_blur = (
+            lambda _e: _search_editing.update(active=False)
         )
         network_controls["empty_reset"].on_click = lambda _e: (
             network_filter.update({"key": "all", "query": ""}),
@@ -3164,7 +3198,15 @@ class DashboardFletView:
                 try:
                     call_page_from_thread(
                         page,
-                        lambda: refresh_network_panel(push_update=True),
+                        lambda: refresh_network_panel(
+                            push_update=True,
+                            # 검색 입력 중엔 결과 영역만 갱신해 포커스를 유지한다
+                            update_fn=(
+                                _update_network_search_results
+                                if _search_editing["active"]
+                                else None
+                            ),
+                        ),
                         search_refresh_stop,
                     )
                     _measure_internet_quality()
@@ -3757,6 +3799,7 @@ class DashboardFletView:
         btn_phone_server_toggle.on_click = _on_server_toggle
         btn_cert_regen.on_click = _on_cert_regen
         btn_revoke_all.on_click = _on_revoke_all
+        btn_network_refresh.on_click = lambda _e: refresh_network_panel(reload_ops=True)
         btn_ticket_tab.on_click = lambda _: set_tab("ticket")
         btn_work_tab.on_click = lambda _: set_tab("work")
         btn_receipt_tab.on_click = lambda _: set_tab("receipt")

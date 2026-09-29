@@ -254,3 +254,24 @@ def test_phone_link_dialog_opens_with_qr(page, flet_server):
     buttons.last.evaluate("e => e.click()")
     page.wait_for_timeout(500)
     assert dialog.count() == 0
+
+
+def test_network_search_filter_reset_button(page, flet_server):
+    """필터된 빈 상태에서 초기화 버튼이 검색어와 필터를 지운다.
+
+    참고: Flet web semantics 채널은 실제 키 입력을 앱에 전달하지 못해
+    검색창 타이핑 시나리오는 자동화 불가 — 포커스 유지 회귀는 계약 테스트
+    (test_dashboard_search_refresh_contract)와 데스크톱 수동 확인으로 커버한다.
+    """
+    control_url = flet_server["control_url"]
+    send_control_command(control_url, {"cmd": "phone_link_start"})
+    _open_network_tab(page)
+    page.get_by_text(re.compile("https://")).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+    # 검색 필드와 필터 칩이 렌더된다 (입력 경로의 UI 표면 회귀)
+    page.locator('input[data-semantics-role="text-field"]').first.wait_for(
+        state="attached", timeout=_POLL_MS
+    )
+    wait_for_button(page, "전체", timeout_ms=_TIMEOUT_MS)

@@ -233,5 +233,48 @@ class DashboardSearchRefreshContractTest(unittest.TestCase):
         self.assertIn("scan_success_count_store.save_success_count(0)", self.source)
 
 
+class NetworkSearchFocusContractTest(unittest.TestCase):
+    """네트워크 탭 검색창 — 입력 중 포커스 유지 계약.
+
+    버그 재발 방지: on_change/주기 갱신이 전체 page.update를 호출하면
+    텍스트 필드 포커스가 날아가 한 글자씩만 입력되는 문제가 있었다.
+    """
+
+    def setUp(self) -> None:
+        self.source = Path("views/dashboard_flet_view.py").read_text(encoding="utf-8-sig")
+
+    def test_search_change_uses_partial_update(self) -> None:
+        handler_index = self.source.find("def _on_network_search(")
+        self.assertNotEqual(handler_index, -1)
+        snippet = self.source[handler_index:handler_index + 400]
+        self.assertIn("_update_network_search_results", snippet)
+
+    def test_partial_update_targets_result_area_not_page(self) -> None:
+        fn_index = self.source.find("def _update_network_search_results(")
+        self.assertNotEqual(fn_index, -1)
+        snippet = self.source[fn_index:fn_index + 900]
+        # 결과 영역 컨트롤만 개별 갱신하고 필드 자체는 건드리지 않는다
+        for key in ("device_list", "empty_box", "empty_text", "empty_reset"):
+            self.assertIn(f'"{key}"', snippet)
+        self.assertNotIn('controls["search_field"].update()', snippet)
+
+    def test_focus_is_restored_after_partial_update(self) -> None:
+        fn_index = self.source.find("def _update_network_search_results(")
+        snippet = self.source[fn_index:fn_index + 900]
+        self.assertIn('_search_editing["active"]', snippet)
+        self.assertIn('network_controls["search_field"].focus()', snippet)
+
+    def test_periodic_refresh_keeps_focus_while_editing(self) -> None:
+        loop_index = self.source.find("def _network_watch_loop(")
+        self.assertNotEqual(loop_index, -1)
+        snippet = self.source[loop_index:loop_index + 1400]
+        self.assertIn('_search_editing["active"]', snippet)
+        self.assertIn("_update_network_search_results", snippet)
+
+    def test_search_field_tracks_focus_state(self) -> None:
+        self.assertIn('network_controls["search_field"].on_focus', self.source)
+        self.assertIn('network_controls["search_field"].on_blur', self.source)
+
+
 if __name__ == "__main__":
     unittest.main()
