@@ -278,5 +278,31 @@ class NetworkViewStateTest(unittest.TestCase):
                 self.assertEqual(state.device_rows[0].quality_label, label)
 
 
+class QualityLabelCoverageTest(unittest.TestCase):
+    """서비스가 내는 모든 상태가 카드 라벨·색상으로 표시되는지 고정한다.
+
+    새 상태가 서비스에 추가됐는데 뷰 라벨이 없으면 '확인 중'으로 빠져
+    사용자가 실제 상태를 볼 수 없다 — 매핑 누락을 테스트로 막는다.
+    """
+
+    def test_every_service_status_has_label_and_color(self) -> None:
+        from services import internet_quality_service as svc
+        from views.network_management_view import (
+            _QUALITY_STATE_COLORS,
+            _QUALITY_STATE_LABELS,
+        )
+
+        statuses = {
+            value
+            for name, value in vars(svc).items()
+            if name.startswith("QUALITY_") and isinstance(value, str)
+        }
+        self.assertGreaterEqual(len(statuses), 4)
+        for status in statuses:
+            with self.subTest(status=status):
+                self.assertIn(status, _QUALITY_STATE_LABELS)
+                self.assertIn(status, _QUALITY_STATE_COLORS)
+
+
 if __name__ == "__main__":
     unittest.main()

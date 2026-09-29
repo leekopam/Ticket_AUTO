@@ -80,6 +80,33 @@ class SummarizeQualityTest(unittest.TestCase):
         status2, *_ = summarize_quality((20,), 5, 10)  # 과반(50%) 손실
         self.assertEqual(status2, QUALITY_POOR)
 
+    def test_status_always_matches_displayed_metrics(self) -> None:
+        """상태는 화면에 표시되는 수치와 같은 임계값으로만 결정돼야 한다 (불변식).
+
+        스크린샷 회귀 — 지터 18ms·손실 0%·응답 30ms가 표시되는데
+        '지연 주의'가 뜨는 모순은 표시-판정 기준 불일치에서 발생했다.
+        임의 표본에 대해 상태 ↔ 표시 수치의 매핑이 항상 성립하는지 검증한다.
+        """
+        import random
+
+        rng = random.Random(20240501)
+        for _ in range(400):
+            latencies = tuple(rng.randint(0, 400) for _ in range(rng.randint(1, 12)))
+            failures = rng.randint(0, 12)
+            attempts = 12
+            status, latency, jitter, loss = summarize_quality(latencies, failures, attempts)
+            poor_hit = latency >= 200 or loss >= 50
+            warn_hit = latency >= 80 or (jitter or 0) >= 20 or loss >= 10
+            if status == QUALITY_POOR:
+                self.assertTrue(poor_hit)
+            elif status == QUALITY_WARN:
+                self.assertFalse(poor_hit)
+                self.assertTrue(warn_hit)
+            elif status == QUALITY_GOOD:
+                self.assertFalse(poor_hit or warn_hit)
+            else:
+                self.fail(f"측정값이 있는데 알 수 없는 상태: {status}")
+
     def test_partial_endpoint_loss_warns_not_poor(self) -> None:
         # 다중 경로 중 일부(33%)만 실패하면 경로 불량 경고지 인터넷 불량이 아니다
         status, *_ = summarize_quality((20,), 2, 6)
