@@ -434,9 +434,27 @@ def test_devices_returns_self_only(env):
     assert self_dev["presence"] == "online"
     assert self_dev["signal_level"] == 3  # 방금 인증 활동 → 양호
     assert 0 <= self_dev["last_seen_sec"] <= 20
+    # RTT 미보고 상태 — 품질은 확인 중
+    assert self_dev["quality"] == {"key": "loading", "label": "확인 중", "lit": 0}
     # 노출 필드는 이름/상태/시각뿐 — 내부 식별자는 보내지 않는다
     assert "device_uid" not in self_dev
     assert "token" not in self_dev
+
+
+def test_devices_quality_matches_pc_tab_judgment(env):
+    """모바일의 품질 표시가 PC 네트워크 탭과 같은 판정(connection_quality)을 따른다."""
+    token = _pair_device(env)
+    # 폰이 직전 왕복시간 105ms를 보고 → PC 탭의 "지연 주의"와 동일해야 한다
+    env["client"].get("/v1/status", headers={**_auth(token), "X-Client-Rtt-Ms": "105"})
+    res = env["client"].get("/v1/devices", headers=_auth(token))
+    assert res.status_code == 200
+    quality = res.json()["devices"][0]["quality"]
+    assert quality == {"key": "warn", "label": "지연 주의", "lit": 2}
+
+    # 정상 응답으로 회복하면 양호로 바뀐다
+    env["client"].get("/v1/status", headers={**_auth(token), "X-Client-Rtt-Ms": "40"})
+    res = env["client"].get("/v1/devices", headers=_auth(token))
+    assert res.json()["devices"][0]["quality"] == {"key": "good", "label": "양호", "lit": 4}
 
 
 def test_devices_no_other_device_info_leaks(env):

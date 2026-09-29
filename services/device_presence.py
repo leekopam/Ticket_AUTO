@@ -21,6 +21,11 @@ PRESENCE_OFFLINE = "offline"
 PRESENCE_REVOKED = "revoked"
 PRESENCE_PENDING = "pending"
 
+# 연결 품질 판정 임계 — PC 네트워크 탭과 /v1/devices(모바일)가 같은 규칙을 공유한다
+QUALITY_RTT_WARN_MS = 80
+QUALITY_RTT_POOR_MS = 200
+QUALITY_MISSED_POOR = 3
+
 UNKNOWN_DEVICE_LABEL = "알 수 없는 기기"
 PC_DEVICE_LABEL = "PC"
 
@@ -76,6 +81,34 @@ def signal_level(last_seen_at: str, now: float) -> int:
     if age < SIGNAL_STALE_SEC:
         return 1
     return 0
+
+
+def connection_quality(
+    last_rtt_ms: int | None,
+    missed_beats: int,
+    presence: str,
+    *,
+    server_running: bool = True,
+) -> tuple[str, str, int]:
+    """연결 품질 (상태키, 라벨, 채워진 막대 수) — 폰이 보고한 RTT와 누락 하트비트 기준.
+
+    PC 네트워크 탭과 모바일 내 연결 상태 화면이 이 결과를 그대로 표시해
+    양쪽 표시가 항상 일치한다. 측정 불가 상태는 막대 0칸.
+    """
+    if not server_running:
+        return "inactive", "측정 중지", 0
+    if presence == PRESENCE_REVOKED:
+        return "inactive", "차단됨", 0
+    if presence != PRESENCE_ONLINE:
+        return "inactive", "연결 없음", 0
+    if last_rtt_ms is None:
+        return "loading", "확인 중", 0
+    missed = missed_beats or 0
+    if last_rtt_ms >= QUALITY_RTT_POOR_MS or missed >= QUALITY_MISSED_POOR:
+        return "poor", "불안정", 1
+    if last_rtt_ms >= QUALITY_RTT_WARN_MS or missed > 0:
+        return "warn", "지연 주의", 2
+    return "good", "양호", 4
 
 
 def display_name(device: DeviceLike, duplicate_ordinal: int | None = None) -> str:

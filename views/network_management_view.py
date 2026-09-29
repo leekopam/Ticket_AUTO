@@ -20,6 +20,7 @@ from services.device_presence import (
     PRESENCE_ONLINE,
     PRESENCE_PENDING,
     PRESENCE_REVOKED,
+    connection_quality,
     display_names,
     parse_seen_at,
     presence_state,
@@ -51,6 +52,19 @@ FILTERS: tuple[tuple[str, str], ...] = (
     (FILTER_OFFLINE, "연결 끊김"),
     (FILTER_BLOCKED, "차단됨"),
 )
+
+# 필터 칩 색상 — 선택 칩만 accent 단색, 나머지는 배경 없이 뮤트 텍스트(OD .filter)
+_FILTER_ACTIVE_BG = "#39C5BB"
+
+
+def _apply_filter_chip_styles(chips: dict[str, ft.TextButton], active_key: str) -> None:
+    """선택된 필터 칩만 teal 배경+흰 글자, 나머지는 배경 없는 기본 상태."""
+    for key, chip in chips.items():
+        active = key == active_key
+        chip.style.bgcolor = _FILTER_ACTIVE_BG if active else "#00000000"
+        chip.style.side = ft.BorderSide(0, "#00000000")
+        chip.content.color = "#FFFFFF" if active else "#536474"
+        chip.content.weight = ft.FontWeight.BOLD if active else ft.FontWeight.W_400
 
 STATUS_BADGE = {
     PRESENCE_ONLINE: ("연결됨", "#D8F4E3", "#1E6B45"),
@@ -149,7 +163,7 @@ def _format_metrics(info: DeviceInfo) -> tuple[str, str]:
     return rtt, str(info.missed_beats or 0)
 
 
-# 장치별 연결 품질 — 장치↔PC 하트비트 RTT·누락 기준 (OD 시안의 판정 임계와 동일)
+# 장치별 연결 품질 색상 — 판정 규칙은 device_presence.connection_quality와 /v1/devices가 공유한다
 _DEVICE_QUALITY_COLORS = {
     "good": ("#39C5BB", "#145F59"),
     "warn": ("#805600", "#805600"),
@@ -160,20 +174,12 @@ _DEVICE_QUALITY_COLORS = {
 
 def _device_quality(info: DeviceInfo, state: str, server_running: bool) -> tuple[str, str, int]:
     """(품질 상태키, 라벨, 채워진 막대 수) — 측정 불가 상태는 inactive 계열."""
-    if not server_running:
-        return "inactive", "측정 중지", 0
-    if state == PRESENCE_REVOKED:
-        return "inactive", "차단됨", 0
-    if state != PRESENCE_ONLINE:
-        return "inactive", "연결 없음", 0
-    if info.last_rtt_ms is None:
-        return "loading", "확인 중", 0
-    missed = info.missed_beats or 0
-    if info.last_rtt_ms >= 200 or missed >= 3:
-        return "poor", "불안정", 1
-    if info.last_rtt_ms >= 80 or missed > 0:
-        return "warn", "지연 주의", 2
-    return "good", "양호", 4
+    return connection_quality(
+        info.last_rtt_ms,
+        info.missed_beats or 0,
+        state,
+        server_running=server_running,
+    )
 
 
 def _device_hashes(info: DeviceInfo) -> set[str]:
@@ -792,24 +798,19 @@ def build_network_panel(
         key="network_pending_section",
     )
 
-    # 필터 칩 — OD .filter 스타일: padding 7/12, radius 6, 활성 시 teal-soft 배경+bold
+    # 필터 칩 — 선택 칩만 solid teal, 나머지는 상태별 soft 배경
     filter_chips = {
         key: ft.TextButton(
             key=f"network_filter_{key}",
-            content=ft.Text(
-                label,
-                size=13,
-                weight=ft.FontWeight.BOLD if key == FILTER_ALL else ft.FontWeight.W_400,
-                color="#145F59" if key == FILTER_ALL else "#536474",
-            ),
+            content=ft.Text(label, size=13),
             style=ft.ButtonStyle(
-                bgcolor="#E7F8F7" if key == FILTER_ALL else "#00000000",
                 padding=ft.padding.symmetric(horizontal=12, vertical=7),
                 shape=ft.RoundedRectangleBorder(radius=6),
             ),
         )
         for key, label in FILTERS
     }
+    _apply_filter_chip_styles(filter_chips, FILTER_ALL)
     search_field = ft.TextField(
         hint_text="장치 이름 검색",
         text_size=13,
@@ -1237,12 +1238,9 @@ def apply_network_view_state(
         for row in state.pending_rows
     ]
 
-    active_filter = controls.get("_filter_key", FILTER_ALL)
-    for key, chip in controls["filter_chips"].items():
-        active = key == active_filter
-        chip.style.bgcolor = "#E7F8F7" if active else "#00000000"
-        chip.content.color = "#145F59" if active else "#536474"
-        chip.content.weight = ft.FontWeight.BOLD if active else ft.FontWeight.W_400
+    _apply_filter_chip_styles(
+        controls["filter_chips"], controls.get("_filter_key", FILTER_ALL)
+    )
 
     controls["device_list"].controls = [
         _build_device_row(

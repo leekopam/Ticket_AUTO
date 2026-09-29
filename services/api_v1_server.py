@@ -19,7 +19,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 from typing_extensions import Annotated
 
-from services.device_presence import display_names, parse_seen_at, presence_state, signal_level
+from services.device_presence import (
+    connection_quality,
+    display_names,
+    parse_seen_at,
+    presence_state,
+    signal_level,
+)
 from services.excel_service import ExcelService
 from services.pairing_service import PairingService
 
@@ -387,6 +393,11 @@ def create_api_v1_app(
                 continue
             seen = parse_seen_at(info.last_seen_at)
             presence = presence_state(info, now)
+            quality_key, quality_label, quality_lit = connection_quality(
+                info.last_rtt_ms,
+                info.missed_beats or 0,
+                presence,
+            )
             items.append(
                 {
                     "id": info.record_id,
@@ -395,6 +406,12 @@ def create_api_v1_app(
                     "presence": presence,
                     # 차단된 기기만 신호 0 — offline도 45~120초 구간은 "불안정"으로 구분한다
                     "signal_level": 0 if presence == "revoked" else signal_level(info.last_seen_at, now),
+                    # 연결 품질 — PC 네트워크 탭과 같은 판정 결과를 그대로 전달한다
+                    "quality": {
+                        "key": quality_key,
+                        "label": quality_label,
+                        "lit": quality_lit,
+                    },
                     "last_seen_sec": max(0, int(now - seen)) if seen is not None else -1,
                 }
             )
