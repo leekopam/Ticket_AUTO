@@ -129,11 +129,12 @@ class AppSettingsModalContractTest(unittest.TestCase):
             self.assertIn("개발자 도구", strings)
             self.assertIn("QR 스캔 성공 시 누적 카운트 반영", strings)
             self.assertIn("중복 스캔 시 효과음 재생", strings)
-            self.assertIn("현재 활성 디버그 기능: 없음", strings)
+            self.assertNotIn("현재 활성 디버그 기능", strings)  # 요약 문구 영역은 제거됨
             self.assertNotIn("기존 처리 흐름은 유지한 채 기능 테스트용 분기만 별도로 켭니다.", strings)
             self.assertNotIn("카메라 테스트 모드", strings)
 
-    def test_ticket_debug_tools_summary_updates_with_enabled_flags(self) -> None:
+    def test_ticket_debug_tools_has_no_summary_area_even_when_enabled(self) -> None:
+        """디버그 요약 문구 영역은 제거됨 — 스위치를 켜도 다시 나타나지 않는다."""
         try:
             from views.settings_flet_view import build_app_settings_panel
         except ModuleNotFoundError as exc:
@@ -158,10 +159,7 @@ class AppSettingsModalContractTest(unittest.TestCase):
             duplicate_sound_switch.on_change(SimpleNamespace(control=duplicate_sound_switch))
 
             strings = self._collect_strings(panel)
-            self.assertIn(
-                "현재 활성 디버그 기능: QR 스캔 성공 시 누적 카운트 반영, 중복 스캔 시 효과음 재생",
-                strings,
-            )
+            self.assertNotIn("현재 활성 디버그 기능", strings)
 
     def test_app_settings_panel_persists_ticket_debug_tool_flags(self) -> None:
         try:

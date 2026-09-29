@@ -993,7 +993,6 @@ def _build_app_settings_ticket_panel(
 
 def _build_ticket_debug_tools_panel(
     *,
-    debug_status_summary_text: ft.Control,
     debug_count_scan_success_switch: ft.Control,
     debug_duplicate_sound_switch: ft.Control,
     debug_offline_scan_switch: ft.Control,
@@ -1007,13 +1006,6 @@ def _build_ticket_debug_tools_panel(
         content=ft.Column(
             controls=[
                 ft.Text("개발자 도구", size=18, weight=ft.FontWeight.BOLD),
-                ft.Container(
-                    bgcolor="#FFFFFF",
-                    border_radius=12,
-                    border=ft.border.all(1, "#DCE6F2"),
-                    padding=12,
-                    content=debug_status_summary_text,
-                ),
                 ft.Container(
                     bgcolor="#FFFFFF",
                     border_radius=12,
@@ -5921,13 +5913,6 @@ def build_app_settings_panel(
             spacing=8,
         ),
     )
-    debug_status_summary_text = ft.Text(
-        size=12,
-        color="#475569",
-        selectable=True,
-        key="settings_debug_status_summary",
-        tooltip="활성 디버그 기능 요약",
-    )
     scan_sound_rules_state: dict[str, object] = {
         "rules": _load_scan_success_sound_rules(settings),
         "selected_index": 0 if _load_scan_success_sound_rules(settings) else None,
@@ -5955,7 +5940,6 @@ def build_app_settings_panel(
     )
     scan_sound_rule_enabled_switch = ft.Switch(label="활성", value=True, **_switch_theme_kwargs())
     debug_tools_panel = _build_ticket_debug_tools_panel(
-        debug_status_summary_text=debug_status_summary_text,
         debug_count_scan_success_switch=debug_count_scan_success_switch,
         debug_duplicate_sound_switch=debug_duplicate_sound_switch,
         debug_offline_scan_switch=debug_offline_scan_switch,
@@ -5983,23 +5967,6 @@ def build_app_settings_panel(
 
     def _load_latest_debug_settings() -> TicketDebugSettings:
         return debug_tools_service.load_settings()
-
-    def _refresh_debug_settings_summary(*, push_update: bool = True) -> None:
-        enabled_items: list[str] = []
-        if bool(debug_count_scan_success_switch.value):
-            enabled_items.append("QR 스캔 성공 시 누적 카운트 반영")
-        if bool(debug_duplicate_sound_switch.value):
-            enabled_items.append("중복 스캔 시 효과음 재생")
-        if bool(debug_offline_scan_switch.value):
-            enabled_items.append("오프라인 스캔 테스트 모드")
-
-        if enabled_items:
-            debug_status_summary_text.value = "현재 활성 디버그 기능: " + ", ".join(enabled_items)
-        else:
-            debug_status_summary_text.value = "현재 활성 디버그 기능: 없음"
-
-        if push_update:
-            page.update()
 
     def _selected_ticket_names() -> list[str]:
         return [str(cb.label) for cb in ticket_checkboxes if cb.value]
@@ -6294,21 +6261,17 @@ def build_app_settings_panel(
         latest_debug.play_sound_for_duplicate_received_qr = bool(debug_duplicate_sound_switch.value)
         latest_debug.offline_scan_mode = bool(debug_offline_scan_switch.value)
         debug_tools_service.save_settings(latest_debug)
-        _refresh_debug_settings_summary(push_update=False)
         settings_status_text.value = message
         page.update()
         return latest_debug
 
     def on_debug_count_scan_success_change(_: ft.ControlEvent) -> None:
-        _refresh_debug_settings_summary(push_update=False)
         _save_debug_settings("디버그 누적 카운트 반영 설정 저장 완료")
 
     def on_debug_duplicate_sound_change(_: ft.ControlEvent) -> None:
-        _refresh_debug_settings_summary(push_update=False)
         _save_debug_settings("디버그 중복 스캔 효과음 설정 저장 완료")
 
     def on_debug_offline_scan_change(_: ft.ControlEvent) -> None:
-        _refresh_debug_settings_summary(push_update=False)
         _save_debug_settings("오프라인 스캔 테스트 모드 설정 저장 완료")
 
     def _make_test_qr_base64(order_number: str) -> str:
@@ -6385,7 +6348,6 @@ def build_app_settings_panel(
     _load_ticket_checkboxes()
     _refresh_focus_capability_state()
     _refresh_scan_sound_rule_controls(push_update=False)
-    _refresh_debug_settings_summary(push_update=False)
 
     def _handle_sound_files(files: list[ft.FilePickerFile]) -> None:
         if not files:
