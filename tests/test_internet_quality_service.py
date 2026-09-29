@@ -5,10 +5,18 @@ import unittest
 
 import http.client
 
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import http.client
+
 from services.internet_quality_service import (
     QUALITY_GOOD,
     QUALITY_OFFLINE,
     QUALITY_POOR,
+    QUALITY_UNREACHABLE,
     QUALITY_WARN,
     InternetQualityMonitor,
     KeepAliveProbe,
@@ -60,8 +68,13 @@ class SummarizeQualityTest(unittest.TestCase):
     def test_poor_on_very_high_latency_or_loss(self) -> None:
         status, *_ = summarize_quality((250,), 0, 1)
         self.assertEqual(status, QUALITY_POOR)
-        status2, *_ = summarize_quality((20,), 2, 8)  # 25% 손실
+        status2, *_ = summarize_quality((20,), 5, 10)  # 과반(50%) 손실
         self.assertEqual(status2, QUALITY_POOR)
+
+    def test_partial_endpoint_loss_warns_not_poor(self) -> None:
+        # 다중 경로 중 일부(33%)만 실패하면 경로 불량 경고지 인터넷 불량이 아니다
+        status, *_ = summarize_quality((20,), 2, 6)
+        self.assertEqual(status, QUALITY_WARN)
 
 
 class InternetQualityMonitorTest(unittest.TestCase):
@@ -94,6 +107,82 @@ class InternetQualityMonitorTest(unittest.TestCase):
         for _ in range(8):
             state = monitor.measure()
         self.assertEqual(len(state.history), 5)
+
+    def test_multi_endpoint_cycle_median_and_failed_label(self) -> None:
+        # 경로별 기준값이 달라도 사이클 대표값(중앙값)만 이력에 쌓인다
+        monitor = InternetQualityMonitor(
+            probes=[
+                ("fast", lambda: QualityProbeResult(True, 10)),
+                ("dead", lambda: QualityProbeResult(False, None)),
+                ("slow", lambda: QualityProbeResult(True, 50)),
+            ]
+        )
+        state = monitor.measure()
+        self.assertEqual(state.history, (30,))  # (10, 50) 중앙값
+        self.assertEqual(state.failed_endpoints, ("dead",))
+        self.assertEqual(state.status, QUALITY_WARN)  # 1/3 경로 실패 → 경고
+        state = monitor.measure()
+        self.assertEqual(state.history, (30, 30))
+        self.assertEqual(state.status, QUALITY_WARN)
+
+    def test_unreachable_after_consecutive_dead_cycles(self) -> None:
+        monitor = InternetQualityMonitor(
+            probes=[
+                ("a", lambda: QualityProbeResult(False, None)),
+                ("b", lambda: QualityProbeResult(False, None)),
+            ]
+        )
+        first = monitor.measure()
+        self.assertNotEqual(first.status, QUALITY_UNREACHABLE)  # 1회 실패는 일시 장애로 간주
+        second = monitor.measure()
+        self.assertEqual(second.status, QUALITY_UNREACHABLE)
+        self.assertEqual(second.failed_endpoints, ("a", "b"))
+
+    def test_recovers_from_unreachable(self) -> None:
+        alive = {"v": False}
+
+        def flaky() -> QualityProbeResult:
+            return QualityProbeResult(ok=alive["v"], latency_ms=20 if alive["v"] else None)
+
+        monitor = InternetQualityMonitor(probes=[("x", flaky)])
+        monitor.measure()
+        self.assertEqual(monitor.measure().status, QUALITY_UNREACHABLE)
+        alive["v"] = True
+        # 복귀 직후엔 창에 남은 실패 때문에 unreachable은 아니지만 바로 good은 아니다
+        self.assertNotEqual(monitor.measure().status, QUALITY_UNREACHABLE)
+        for _ in range(12):  # 실패가 롤링 창(12)을 빠져나가면 양호로 회복
+            state = monitor.measure()
+        self.assertEqual(state.status, QUALITY_GOOD)
+
+    def test_measure_writes_jsonl_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "q.jsonl"
+            monitor = InternetQualityMonitor(
+                probe=lambda: QualityProbeResult(ok=True, latency_ms=42),
+                log_path=str(log),
+            )
+            monitor.measure()
+            monitor.measure()
+            lines = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            record = json.loads(lines[0])
+            self.assertEqual(record["latency_ms"], 42)
+            self.assertIn("기본 경로", record["endpoints"])
+            self.assertIn("ts", record)
+
+    def test_log_rotates_when_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "q.jsonl"
+            monitor = InternetQualityMonitor(
+                probe=lambda: QualityProbeResult(ok=True, latency_ms=42),
+                log_path=str(log),
+                log_max_bytes=600,
+            )
+            for _ in range(10):
+                monitor.measure()
+            self.assertLessEqual(log.stat().st_size, 600 + 200)  # 절단 후 새 레코드 한 줄 여유
+            lines = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(lines)  # 최근 레코드는 남아 있다
 
 
 class _FakeResponse:
@@ -144,7 +233,23 @@ class KeepAliveProbeTest(unittest.TestCase):
         self.assertEqual(_FakeConn.created, 1)
         conn = probe._conn
         self.assertEqual(conn.connect_calls, 1)
+        # 첫 호출은 웜업+측정 2회, 이후는 측정 1회씩
+        self.assertEqual(conn.request_calls, 3)
+
+    def test_warmup_excluded_from_first_sample(self) -> None:
+        # 새 연결의 첫 요청(핸드셰이크 직후)은 측정값이 아니라 웜업으로 버린다
+        probe = self._probe()
+        self.assertTrue(probe().ok)
+        conn = probe._conn
+        self.assertFalse(probe._needs_warmup)
         self.assertEqual(conn.request_calls, 2)
+
+    def test_warmup_repeated_after_reconnect(self) -> None:
+        probe = self._probe()
+        self.assertTrue(probe().ok)
+        probe._close()
+        self.assertTrue(probe().ok)
+        self.assertEqual(_FakeConn.created, 2)  # 재연결도 웜업 포함
 
     def test_reconnects_once_on_stale_connection(self) -> None:
         probe = self._probe()

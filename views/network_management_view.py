@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import flet as ft
+import flet.canvas as cv
 
 from services.device_presence import (
     PRESENCE_OFFLINE,
@@ -28,6 +29,7 @@ from services.internet_quality_service import (
     QUALITY_GOOD,
     QUALITY_OFFLINE,
     QUALITY_POOR,
+    QUALITY_UNREACHABLE,
     QUALITY_WARN,
     InternetQualityState,
 )
@@ -61,13 +63,15 @@ _QUALITY_STATE_LABELS = {
     QUALITY_GOOD: ("양호", "안정적인 연결 상태"),
     QUALITY_WARN: ("지연 주의", "응답이 평소보다 느려요"),
     QUALITY_POOR: ("불안정", "인터넷 연결을 확인해주세요"),
-    QUALITY_OFFLINE: ("연결 끊김", "PC의 네트워크 연결을 확인해주세요"),
+    QUALITY_OFFLINE: ("측정 전", "아직 연결 품질을 측정하지 않았어요"),
+    QUALITY_UNREACHABLE: ("연결 불가", "모든 측정 경로가 응답하지 않아요 — 인터넷 연결 또는 방화벽을 확인해주세요"),
 }
 _QUALITY_STATE_COLORS = {
     QUALITY_GOOD: "#145F59",
     QUALITY_WARN: "#805600",
     QUALITY_POOR: "#AE323B",
-    QUALITY_OFFLINE: "#AE323B",
+    QUALITY_OFFLINE: "#536474",
+    QUALITY_UNREACHABLE: "#AE323B",
 }
 _QUALITY_LOADING = "loading"
 
@@ -701,14 +705,8 @@ def build_network_panel(
         vertical_alignment=ft.CrossAxisAlignment.END,
         key="network_quality_bars",
     )
-    quality_trend = ft.Row(
-        controls=[],
-        spacing=2,
-        tight=True,
-        vertical_alignment=ft.CrossAxisAlignment.END,
-        height=40,
-        key="network_quality_trend",
-    )
+    quality_trend = cv.Canvas(shapes=[], width=240, height=48)
+    quality_range = ft.Text("—", size=11, color="#536474", key="network_quality_range")
     quality_updated = ft.Text("5초마다 갱신", size=11, color="#536474", key="network_quality_updated")
 
     counts = {
@@ -908,13 +906,29 @@ def build_network_panel(
                                         spacing=16,
                                         tight=True,
                                     ),
-                                    ft.Column(
-                                        controls=[
-                                            quality_trend,
-                                            ft.Text("최근 응답시간", size=11, color="#536474"),
-                                        ],
-                                        spacing=2,
-                                        tight=True,
+                                    ft.Container(
+                                        width=280,
+                                        content=ft.Column(
+                                            controls=[
+                                                ft.Container(
+                                                    content=quality_trend,
+                                                    border=ft.border.only(left=ft.border.BorderSide(1, "#E0E4EA")),
+                                                    padding=ft.padding.only(left=20),
+                                                ),
+                                                ft.Container(
+                                                    content=ft.Row(
+                                                        controls=[
+                                                            ft.Text("최근 응답시간", size=11, color="#536474"),
+                                                            quality_range,
+                                                        ],
+                                                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                                    ),
+                                                    padding=ft.padding.only(left=20),
+                                                ),
+                                            ],
+                                            spacing=2,
+                                            tight=True,
+                                        ),
                                     ),
                                 ],
                                 spacing=24,
@@ -1026,6 +1040,7 @@ def build_network_panel(
         "quality_loss": quality_loss,
         "quality_bars": quality_bars,
         "quality_trend": quality_trend,
+        "quality_range": quality_range,
         "quality_updated": quality_updated,
         "counts": counts,
         "pending_count_badge": pending_count_badge,
@@ -1038,6 +1053,37 @@ def build_network_panel(
         "empty_reset": empty_reset,
         "empty_box": empty_box,
     }
+
+
+_TREND_W, _TREND_H = 240, 48
+_TREND_BASE_Y = 44  # OD SVG 기준선 y=44
+
+
+def _trend_shapes(history: tuple[int, ...], color: str) -> list:
+    """최근 응답시간 추이를 OD처럼 폴리라인으로 그린다 — 기준선 + 꺾은선."""
+    shapes = [
+        cv.Line(0, _TREND_BASE_Y, _TREND_W, _TREND_BASE_Y, paint=ft.Paint(color="#E0E4EA"))
+    ]
+    if history:
+        maximum = max(history) or 1
+        step = _TREND_W / max(len(history) - 1, 1)
+        elements: list = []
+        for i, value in enumerate(history):
+            x = i * step
+            y = _TREND_BASE_Y - (value / maximum) * (_TREND_BASE_Y - 6)
+            elements.append(cv.Path.MoveTo(x, y) if i == 0 else cv.Path.LineTo(x, y))
+        shapes.append(
+            cv.Path(
+                elements,
+                paint=ft.Paint(
+                    style=ft.PaintingStyle.STROKE,
+                    stroke_width=2.5,
+                    stroke_cap=ft.StrokeCap.ROUND,
+                    color=color,
+                ),
+            )
+        )
+    return shapes
 
 
 def apply_internet_quality(
@@ -1056,6 +1102,9 @@ def apply_internet_quality(
         color = "#536474"
     else:
         title, hint = _QUALITY_STATE_LABELS.get(state.status, ("확인 중", ""))
+        # 일부 경로만 실패한 경우 어느 경로가 안 되는지 함께 보여준다
+        if state.failed_endpoints and state.status != QUALITY_UNREACHABLE:
+            hint = f"{hint} · 응답 없음: {', '.join(state.failed_endpoints)}"
         status_key = state.status
         color = _QUALITY_STATE_COLORS.get(state.status, "#536474")
     lit = {QUALITY_GOOD: 4, QUALITY_WARN: 2, QUALITY_POOR: 1}.get(status_key, 0)
@@ -1069,22 +1118,17 @@ def apply_internet_quality(
         controls["quality_jitter"].value = str(state.jitter_ms) if state.jitter_ms is not None else "—"
         controls["quality_loss"].value = f"{state.loss_pct:g}" if state.loss_pct is not None else "—"
         history = state.history
-        maximum = max(history) if history else 0
-        controls["quality_trend"].controls = [
-            ft.Container(
-                width=8,
-                height=max(4, int(36 * value / max(maximum, 1))),
-                bgcolor=color,
-                border_radius=1.5,
-            )
-            for value in history
-        ]
+        controls["quality_trend"].shapes = _trend_shapes(history, color)
+        controls["quality_range"].value = (
+            f"{min(history)}~{max(history)}ms" if history else "—"
+        )
         controls["quality_updated"].value = f"5초마다 갱신 · {state.measured_at} 갱신"
     else:
         controls["quality_latency"].value = "—"
         controls["quality_jitter"].value = "—"
         controls["quality_loss"].value = "—"
-        controls["quality_trend"].controls = []
+        controls["quality_trend"].shapes = _trend_shapes((), "#536474")
+        controls["quality_range"].value = "—"
 
 
 def apply_network_view_state(

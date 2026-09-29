@@ -6,15 +6,23 @@
 from __future__ import annotations
 
 import http.client
+import json
 import statistics
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
-# 연결 확인용으로 널리 쓰이는 204 응답 엔드포인트
-PROBE_URL = "https://www.gstatic.com/generate_204"
+# 연결 확인용 엔드포인트 — 해외 CDN 2곳 + 국내 경로 1곳.
+# 단일 경로만 쓰면 그 경로의 장애를 인터넷 단절로 오판하므로 다중화한다.
+PROBE_ENDPOINTS: tuple[str, ...] = (
+    "https://www.gstatic.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://www.naver.com/",
+)
+PROBE_URL = PROBE_ENDPOINTS[0]  # 호환용 — 단일 경로 측정이 필요한 호출자
 PROBE_TIMEOUT_SEC = 3.0
 HISTORY_MAX = 12
 
@@ -22,12 +30,25 @@ HISTORY_MAX = 12
 LATENCY_WARN_MS = 80
 LATENCY_POOR_MS = 200
 JITTER_WARN_MS = 20
-LOSS_WARN_PCT = 3.0
+# 손실률은 프로브 단위 — 3경로 중 1개 사망(33%)이 과반 불량으로 오판되지 않게
+# 경고는 10%, 불량은 과반 실패(50%)부터 본다.
+LOSS_WARN_PCT = 10.0
+LOSS_POOR_PCT = 50.0
+# 전체 경로가 이 횟수만큼 연속 무응답이면 단절·차단으로 본다
+UNREACHABLE_CYCLES = 2
+# 품질 이력 로그 상한 — 초과 시 최근 절반만 남긴다
+LOG_MAX_BYTES = 64 * 1024
 
 QUALITY_GOOD = "good"
 QUALITY_WARN = "warn"
 QUALITY_POOR = "poor"
 QUALITY_OFFLINE = "offline"
+QUALITY_UNREACHABLE = "unreachable"
+
+
+def endpoint_label(url: str) -> str:
+    """프로브 엔드포인트의 표시용 라벨 — 호스트명."""
+    return urlsplit(url).hostname or url
 
 
 @dataclass(frozen=True)
@@ -60,6 +81,7 @@ class KeepAliveProbe:
 
     매번 DNS+TCP+TLS 핸드셰이크를 측정에 포함하면 정상 회선(40ms)에서도
     100ms 이상으로 관측돼 경고로 오판한다 — 연결을 유지하고 요청 구간만 잰다.
+    새 연결에서는 웜업 요청을 한 번 보내 모든 샘플이 웜 상태 RTT가 되게 한다.
     서버가 유휴 연결을 끊은 경우 1회 재연결 후 재측정한다.
     """
 
@@ -79,11 +101,13 @@ class KeepAliveProbe:
         self._timeout_sec = timeout_sec
         self._conn_factory = conn_factory or http.client.HTTPSConnection
         self._conn = None
+        self._needs_warmup = False
 
     def _ensure_conn(self):
         if self._conn is None:
             self._conn = self._conn_factory(self._host, self._port, timeout=self._timeout_sec)
             self._conn.connect()
+            self._needs_warmup = True
         return self._conn
 
     def _close(self) -> None:
@@ -93,9 +117,15 @@ class KeepAliveProbe:
             except OSError:
                 pass
             self._conn = None
+            self._needs_warmup = False
 
     def _round_trip_ms(self) -> int:
         conn = self._ensure_conn()
+        if self._needs_warmup:
+            # 핸드셰이크 직후 첫 요청은 버린다 — 측정값이 연결 수립 비용에 오염되지 않게
+            conn.request("HEAD", self._path)
+            conn.getresponse().read()
+            self._needs_warmup = False
         started = time.monotonic()
         conn.request("HEAD", self._path)
         resp = conn.getresponse()
@@ -125,6 +155,7 @@ class InternetQualityState:
     loss_pct: float | None
     history: tuple[int, ...]
     measured_at: str
+    failed_endpoints: tuple[str, ...] = field(default=())
 
 
 def _format_now() -> str:
@@ -154,7 +185,7 @@ def summarize_quality(
         jitter_ms = int(round(statistics.median(diffs)))
         # 경고 판정은 지속 흔들림 기준 — 스파이크 1회(diffs 1건만 큼)는 무시한다
         jittery = sum(1 for d in diffs if d >= JITTER_WARN_MS) >= 2
-    if (loss_pct or 0) >= 20 or latency_ms >= LATENCY_POOR_MS:
+    if (loss_pct or 0) >= LOSS_POOR_PCT or latency_ms >= LATENCY_POOR_MS:
         status = QUALITY_POOR
     elif (loss_pct or 0) >= LOSS_WARN_PCT or latency_ms >= LATENCY_WARN_MS or jittery:
         status = QUALITY_WARN
@@ -164,38 +195,109 @@ def summarize_quality(
 
 
 class InternetQualityMonitor:
-    """측정 이력을 유지하는 롤링 모니터 — 탭이 열려 있을 때만 호출된다."""
+    """측정 이력을 유지하는 롤링 모니터 — 탭이 열려 있을 때만 호출된다.
+
+    사이클(= measure 1회)마다 모든 엔드포인트를 순서대로 측정하고,
+    사이클 대표값(성공 샘플 중앙값)을 이력에 쌓는다 — 경로별 기준값 차이가
+    지터로 오염되지 않게 사이클 단위로만 비교한다.
+    """
 
     def __init__(
         self,
         probe: Callable[[], QualityProbeResult] | None = None,
+        probes: list[tuple[str, Callable[[], QualityProbeResult]]] | None = None,
         *,
         history_max: int = HISTORY_MAX,
+        log_path: str | None = None,
+        log_max_bytes: int = LOG_MAX_BYTES,
     ) -> None:
-        # 기본은 keep-alive 프로브 — 콜드 측정이면 핸드셰이크 비용이 지연으로 오계산된다
-        self._probe = probe if probe is not None else KeepAliveProbe()
+        if probes is not None:
+            self._probes = list(probes)
+        elif probe is not None:
+            self._probes = [("기본 경로", probe)]
+        else:
+            # 기본은 keep-alive 다중 프로브 — 콜드 측정·단일 경로 장애가 오판을 만든다
+            self._probes = [
+                (endpoint_label(url), KeepAliveProbe(url)) for url in PROBE_ENDPOINTS
+            ]
         self._history_max = history_max
-        self._latencies: list[int] = []
-        self._attempts = 0
-        self._failures = 0
+        self._latencies: list[int] = []  # 사이클 대표 응답시간(중앙값) 이력
+        # 프로브별 성공/실패도 롤링 — 과거 장애가 손실률에 영구 반영되지 않게 한다
+        self._outcomes: list[bool] = []
+        self._dead_cycles = 0
+        self._log_path = Path(log_path) if log_path else None
+        self._log_max_bytes = log_max_bytes
 
     def measure(self) -> InternetQualityState:
-        """프로브 1회를 실행하고 최신 품질 상태를 반환한다."""
-        result = self._probe()
-        self._attempts += 1
-        if result.ok and result.latency_ms is not None:
-            self._latencies.append(result.latency_ms)
+        """모든 경로를 1회씩 측정하고 최신 품질 상태를 반환한다."""
+        results: list[tuple[str, QualityProbeResult]] = []
+        for label, probe in self._probes:
+            try:
+                result = probe()
+            except Exception:  # 프로브 내부 오류가 측정 루프를 죽이지 않게
+                result = QualityProbeResult(ok=False, latency_ms=None)
+            results.append((label, result))
+
+        ok_latencies = [r.latency_ms for _, r in results if r.ok and r.latency_ms is not None]
+        failed = tuple(label for label, r in results if not (r.ok and r.latency_ms is not None))
+        self._outcomes.extend(r.ok and r.latency_ms is not None for _, r in results)
+        outcomes_cap = self._history_max * len(self._probes)
+        self._outcomes = self._outcomes[-outcomes_cap:]
+
+        if ok_latencies:
+            cycle_ms = int(round(statistics.median(ok_latencies)))
+            self._latencies.append(cycle_ms)
             self._latencies = self._latencies[-self._history_max:]
+            self._dead_cycles = 0
         else:
-            self._failures += 1
+            self._dead_cycles += 1
+
         status, latency_ms, jitter_ms, loss_pct = summarize_quality(
-            tuple(self._latencies), self._failures, self._attempts
+            tuple(self._latencies),
+            sum(1 for ok in self._outcomes if not ok),
+            len(self._outcomes),
         )
-        return InternetQualityState(
+        if self._dead_cycles >= UNREACHABLE_CYCLES:
+            # 전체 경로가 연속 무응답 — 단일 경로 장애와 인터넷 단절·차단을 구분한다
+            status = QUALITY_UNREACHABLE
+        state = InternetQualityState(
             status=status,
             latency_ms=latency_ms,
             jitter_ms=jitter_ms,
             loss_pct=loss_pct,
             history=tuple(self._latencies),
             measured_at=_format_now(),
+            failed_endpoints=failed,
         )
+        self._append_log(state, results)
+        return state
+
+    def _append_log(
+        self,
+        state: InternetQualityState,
+        results: list[tuple[str, QualityProbeResult]],
+    ) -> None:
+        """측정 결과를 JSONL로 영속화 — 로그 실패는 측정을 깨지 않게 무시한다."""
+        if self._log_path is None:
+            return
+        try:
+            record = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "status": state.status,
+                "latency_ms": state.latency_ms,
+                "jitter_ms": state.jitter_ms,
+                "loss_pct": state.loss_pct,
+                "endpoints": {
+                    label: {"ok": r.ok, "ms": r.latency_ms} for label, r in results
+                },
+            }
+            path = self._log_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > self._log_max_bytes:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                kept = "\n".join(lines[len(lines) // 2:])
+                path.write_text(kept + ("\n" if kept else ""), encoding="utf-8")
+            with path.open("a", encoding="utf-8") as fp:
+                fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass

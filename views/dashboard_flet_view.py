@@ -2800,7 +2800,9 @@ class DashboardFletView:
             build_network_view_state,
         )
 
-        quality_monitor = InternetQualityMonitor()
+        quality_monitor = InternetQualityMonitor(
+            log_path=str(resolve_project_path(".runtime/internet_quality_log.jsonl"))
+        )
         quality_state: dict[str, object] = {"value": None}
         network_controls = build_network_panel(
             link_button=btn_phone_link,
