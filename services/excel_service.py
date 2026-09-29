@@ -90,6 +90,7 @@ class ExcelService:
             phone_col = self._find_col(headers, ("주문자연락처", "수령자연락처"))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            processing_time_col = self._find_col(headers, (PROCESSING_TIME_HEADER,))
             status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
             progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
             goods_cols = self._parse_goods_cols(headers)
@@ -115,6 +116,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=goods_list,
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    processing_time=str(self._cell(row, processing_time_col)).strip() if processing_time_col else "",
                     order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 ))
                 if max_results is not None and len(results) >= max_results:
@@ -147,6 +149,7 @@ class ExcelService:
             phone_col = self._find_col(headers, ("주문자연락처", "수령자연락처"))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            processing_time_col = self._find_col(headers, (PROCESSING_TIME_HEADER,))
             status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
             progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
 
@@ -164,6 +167,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=self._build_goods_list(row, goods_cols),
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    processing_time=str(self._cell(row, processing_time_col)).strip() if processing_time_col else "",
                     order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 )
 
@@ -193,6 +197,7 @@ class ExcelService:
             recv_phone_col = self._find_col(headers, ("수령자연락처",))
             seat_col = self._find_col(headers, ("좌석번호",))
             received_col = self._find_col(headers, (RECEIPT_HEADER,))
+            processing_time_col = self._find_col(headers, (PROCESSING_TIME_HEADER,))
             status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
             progress_status_col = self._find_col(headers, (SOURCE_PROGRESS_STATUS_HEADER,))
             goods_cols = self._parse_goods_cols(headers)
@@ -224,6 +229,7 @@ class ExcelService:
                     seat=str(self._cell(row, seat_col)).strip() if seat_col else "",
                     goods=self._build_goods_list(row, goods_cols),
                     received_at=str(self._cell(row, received_col)).strip() if received_col else "",
+                    processing_time=str(self._cell(row, processing_time_col)).strip() if processing_time_col else "",
                     order_status=self._resolve_order_status(row, status_col, progress_status_col),
                 ))
 

@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from openpyxl import load_workbook
+
 import main as app_main
 from services.api_service import ApiService
 from services.browser_service import (
@@ -51,6 +53,23 @@ def _resolved_detail_result(order_number: str = TEST_ORDER_NUMBER) -> BrowserRes
     )
 
 
+def _read_order_cell(data_path: Path, order_number: str, header: str) -> str:
+    """워크북에서 주문번호 행의 지정 헤더 셀 값을 읽는다."""
+    workbook = load_workbook(data_path, read_only=True, data_only=True)
+    try:
+        ws = workbook.active
+        headers = {str(cell.value or "").strip(): idx for idx, cell in enumerate(ws[1], 1)}
+        order_col = headers.get("주문번호")
+        target_col = headers.get(header)
+        assert order_col and target_col, f"테스트 워크북에 필요한 헤더가 없습니다: {header}"
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if str(row[order_col - 1] or "").strip() == order_number:
+                return str(row[target_col - 1] or "").strip()
+        raise AssertionError(f"테스트 워크북에 주문 {order_number}가 없습니다.")
+    finally:
+        workbook.close()
+
+
 class S01OfflineModeEntryTest(unittest.TestCase):
     """S01: 오프라인 스캔 모드 진입/스캔/모드 OFF 복귀."""
 
@@ -80,6 +99,12 @@ class S01OfflineModeEntryTest(unittest.TestCase):
             http_get.assert_not_called()
             self.assertEqual(sound.success_count, 1)
             self.assertEqual(len(printer.jobs), 1)
+
+            # 오프라인 스캔도 수령확인과 처리시간을 모두 data.xlsx에 기록한다
+            received_at = _read_order_cell(data_path, TEST_ORDER_NUMBER, "수령확인")
+            processing_time = _read_order_cell(data_path, TEST_ORDER_NUMBER, "처리시간")
+            self.assertTrue(received_at)
+            self.assertEqual(processing_time, received_at)
 
             # 오프라인 모드 OFF: 브라우저 경로로 전환되어 AUTH_REQUIRED → 복구 대기 (QR §1-4)
             app._ticket_debug_tools_service.settings.offline_scan_mode = False

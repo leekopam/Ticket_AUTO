@@ -144,7 +144,10 @@ def build_ops_index(operations: list[dict[str, str]] | None) -> dict[str, dict[s
 
 
 def _work_log_time_key(order: Order, ops_index: dict[str, dict[str, str]]) -> str:
-    """정렬 기준 시각 — 수령 시각 우선, 없으면 작업 레코드 갱신 시각."""
+    """정렬·표시 기준 시각 — 실제 처리시간 컬럼 우선, 없으면 수령 시각, 둘 다 없으면 작업 레코드 갱신 시각."""
+    processing_time = (order.processing_time or "").strip()
+    if processing_time:
+        return processing_time
     received = (order.received_at or "").strip()
     if received:
         return received

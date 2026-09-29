@@ -933,7 +933,7 @@ class Application:
 
         try:
             processing_time_writer = getattr(self._excel_service, "mark_order_processing_time", None)
-            processing_time_saved = offline_mode or not callable(processing_time_writer) or processing_time_writer(order.order_number, received_at)
+            processing_time_saved = not callable(processing_time_writer) or processing_time_writer(order.order_number, received_at)
         except Exception as exc:
             logger.warning("처리시간 저장 실패 order=%s error=%s", order.order_number, exc)
             processing_time_saved = False

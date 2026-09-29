@@ -20,6 +20,7 @@ def _order(
     name: str = "홍길동",
     phone: str = "010-1234-5678",
     received_at: str = "",
+    processing_time: str = "",
     order_status: str = "",
     goods: list[str] | None = None,
 ) -> Order:
@@ -30,6 +31,7 @@ def _order(
         seat="A-1",
         goods=goods or [],
         received_at=received_at,
+        processing_time=processing_time,
         order_status=order_status,
     )
 
@@ -77,6 +79,24 @@ class BuildWorkLogViewStateTest(unittest.TestCase):
         self.assertEqual([r.order_number for r in state.rows], ["A1"])
         self.assertEqual(state.completed_count, 1)
         self.assertEqual(state.pending_count, 2)
+
+    def test_processing_time_column_preferred_over_received_at(self) -> None:
+        """재스캔으로 수령확인이 갱신돼도 표시 시각은 실제 처리시간 컬럼 값을 따른다."""
+        orders = [
+            _order(
+                "A1",
+                received_at="2026-04-26 15:30:00",
+                processing_time="2026-04-26 10:00:00",
+            ),
+        ]
+        state = build_work_log_view_state(orders, {}, [])
+        self.assertEqual(state.rows[0].time_text, "04-26 10:00:00")
+
+    def test_time_falls_back_to_received_at_when_processing_time_blank(self) -> None:
+        """처리시간 컬럼이 없는 구형 데이터는 수령 시각을 표시한다."""
+        orders = [_order("A1", received_at="2026-04-26 10:00:00")]
+        state = build_work_log_view_state(orders, {}, [])
+        self.assertEqual(state.rows[0].time_text, "04-26 10:00:00")
 
     def test_newest_first_and_seq_descending(self) -> None:
         orders = [
