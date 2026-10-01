@@ -75,7 +75,8 @@ class PhoneLinkService:
                 server.stop()
                 raise RuntimeError(
                     f"포트 {self._port}를 열 수 없습니다. "
-                    "다른 프로그램이 이 포트를 사용 중이거나 방화벽이 차단했을 수 있습니다."
+                    "Ticket_AUTO가 이미 실행 중이거나 다른 프로그램이 이 포트를 "
+                    "사용 중일 수 있습니다. 중복 실행 창을 닫은 뒤 다시 시도해주세요."
                 )
             ips = detect_lan_ips()
             if not ips:

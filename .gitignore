@@ -21,3 +21,5 @@ graphify-out/
 # Private AI worklogs and conversation archives (current-tree cleanup)
 docs/ai-worklog/
 docs/project-root/docs/ai-worklog/
+self_check_report.json
+.tmp_od/

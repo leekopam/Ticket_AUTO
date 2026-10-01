@@ -232,6 +232,48 @@ def test_network_tab_server_toggle_button(page, flet_server):
     send_control_command(control_url, {"cmd": "phone_link_start"})
 
 
+def test_network_tab_server_start_fails_when_port_occupied(page, flet_server):
+    """포트 점유 상태에서 '서버 시작'은 실패 후 꺼짐 상태를 유지하고, 해제되면 재시도로 복구된다.
+
+    snackbar 경고는 Flutter web semantics에 materialize되지 않으므로
+    관측 가능한 효과(꺼짐 표시 유지 + 버튼 복귀 + 재시도 성공)로 검증한다.
+    """
+    import socket
+
+    control_url = flet_server["control_url"]
+
+    # E2E 서버는 임의 포트를 쓰므로, 현재 서버의 포트를 addr에서 얻는다
+    result = send_control_command(control_url, {"cmd": "phone_link_start"})
+    port = int(str(result["result"]["addr"]).rsplit(":", 1)[1])
+    send_control_command(control_url, {"cmd": "phone_link_stop"})
+
+    _open_network_tab(page)
+    page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("0.0.0.0", port))
+    blocker.listen(1)
+    try:
+        wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS).click()
+        # 시작 실패 판정(wait_started 5초)이 끝날 때까지 기다린 뒤 꺼짐 상태를 확인한다
+        page.wait_for_timeout(8000)
+        page.get_by_text("서버가 꺼져 있습니다", exact=True).first.wait_for(
+            state="visible", timeout=_TIMEOUT_MS
+        )
+        wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS)
+    finally:
+        blocker.close()
+
+    # 포트 해제 후 재시도 → 정상 기동으로 복구된다
+    wait_for_button(page, "서버 시작", timeout_ms=_TIMEOUT_MS).click()
+    page.get_by_text(re.compile("https://")).first.wait_for(
+        state="visible", timeout=_POLL_MS
+    )
+
+
 def test_phone_link_dialog_opens_with_qr(page, flet_server):
     """'휴대폰 연결' 버튼이 연결 QR 다이얼로그를 연다 (ft.Colors 회귀 포함)."""
     control_url = flet_server["control_url"]

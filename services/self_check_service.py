@@ -132,6 +132,30 @@ def _check_playwright_runtime() -> SelfCheckResult:
         )
 
 
+def _check_lan_server() -> SelfCheckResult:
+    """LAN API 서버가 실제로 바인드·기동되는지 검증한다.
+
+    windowed exe(sys.stderr=None)에서 uvicorn 기본 log_config가
+    크래시했던 회귀를 잡기 위한 항목 — 생성+바인드까지만 확인하고 바로 내린다.
+    """
+    import socket
+
+    from services.api_v1_server import create_server
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    server = None
+    try:
+        server, _pairing, _fp = create_server(port=port)
+        server.start()
+        ok = server.wait_started(timeout=5.0)
+        return SelfCheckResult("lan_server", ok, f"port={port} started={ok}")
+    finally:
+        if server is not None:
+            server.stop()
+
+
 _SELF_CHECKS: tuple[tuple[str, Callable[[], SelfCheckResult]], ...] = (
     ("imports", _check_imports),
     ("project_paths", _check_project_paths),
@@ -141,6 +165,7 @@ _SELF_CHECKS: tuple[tuple[str, Callable[[], SelfCheckResult]], ...] = (
     ("printer_enum", _check_printer_enum),
     ("audio_init", _check_audio_init),
     ("playwright_runtime", _check_playwright_runtime),
+    ("lan_server", _check_lan_server),
 )
 
 

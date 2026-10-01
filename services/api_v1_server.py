@@ -728,6 +728,9 @@ class LanApiServer:
     def __init__(self, app: FastAPI, host: str, port: int, cert_path: str, key_path: str):
         import uvicorn
 
+        # log_config=None — windowed PyInstaller(runw)는 sys.stderr가 None이라
+        # 기본 dictConfig의 DefaultFormatter 생성이 실패해 서버가 시작되지 않는다.
+        # None이면 dictConfig를 건너뛰고 uvicorn 로그가 root 로거(app.log)로 전파된다.
         config = uvicorn.Config(
             app,
             host=host,
@@ -736,6 +739,7 @@ class LanApiServer:
             ssl_keyfile=key_path,
             log_level="warning",
             access_log=False,
+            log_config=None,
         )
         self._server = uvicorn.Server(config)
         self._thread: threading.Thread | None = None
