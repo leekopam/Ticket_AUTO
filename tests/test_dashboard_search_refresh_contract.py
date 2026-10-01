@@ -184,7 +184,7 @@ class DashboardSearchRefreshContractTest(unittest.TestCase):
 
 
     def test_dashboard_restores_receipt_panel_for_second_sidebar_tab(self) -> None:
-        self.assertIn('btn_receipt_tab = ft.TextButton("영수증 양식"', self.source)
+        self.assertIn('btn_receipt_tab = _nav_tab_button("영수증 양식"', self.source)
         self.assertIn("receipt_settings_panel=receipt_settings_panel", self.source)
         self.assertIn("receipt_panel = receipt_settings_panel_ref[\"value\"]", self.source)
         self.assertIn('if tab_key == "receipt" and receipt_panel is None:', self.source)

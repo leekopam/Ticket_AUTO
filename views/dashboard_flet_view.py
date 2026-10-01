@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import asyncio
+import base64
 import logging
 import re
 import sys
@@ -25,6 +26,7 @@ from models.order_model import Order
 from project_paths import (
     copy_data_file_to_managed_location,
     ensure_managed_data_file,
+    resolve_bundle_path,
     resolve_project_path,
 )
 from services.device_presence import PRESENCE_ONLINE, presence_state
@@ -52,7 +54,7 @@ CAMERA_SETTINGS_DRAWER_WIDTH = 500
 CAMERA_SETTINGS_DRAWER_MIN_WIDTH = 380
 CAMERA_SETTINGS_DRAWER_WIDTH_RATIO = 0.35
 CAMERA_SETTINGS_HANDLE_WIDTH = 28
-DASHBOARD_SIDEBAR_WIDTH = 244
+DASHBOARD_SIDEBAR_WIDTH = 196
 # 창 크기 조절을 허용하되, 레이아웃이 깨지지 않는 최소 크기를 지정한다.
 DASHBOARD_DEFAULT_WINDOW_WIDTH = 1800
 DASHBOARD_DEFAULT_WINDOW_HEIGHT = 920
@@ -1383,6 +1385,27 @@ def build_dashboard_overlay_host(
     )
 
 
+_SIDEBAR_LOGO_B64: dict[str, str] = {}
+
+
+def _sidebar_logo_control() -> ft.Control:
+    """Magical Play 로고 — Resources/images/magical_play_logo.png를 base64로 임베딩."""
+    if "png" not in _SIDEBAR_LOGO_B64:
+        data = b""
+        for resolver in (resolve_bundle_path, resolve_project_path):
+            try:
+                data = resolver("Resources/images/magical_play_logo.png").read_bytes()
+                break
+            except OSError:
+                continue
+        _SIDEBAR_LOGO_B64["png"] = base64.b64encode(data).decode("ascii") if data else ""
+    b64 = _SIDEBAR_LOGO_B64["png"]
+    if not b64:
+        # 로고 파일이 없으면 아이콘으로 폴백한다
+        return ft.Icon(ft.icons.AUTO_AWESOME_ROUNDED, size=32, color="#145F59")
+    return ft.Image(src_base64=b64, width=32, height=32, fit=ft.ImageFit.CONTAIN)
+
+
 def build_dashboard_sidebar(
     *,
     btn_ticket_tab: ft.Control,
@@ -1397,18 +1420,31 @@ def build_dashboard_sidebar(
     tab_buttons.append(btn_receipt_tab)
     if btn_network_tab is not None:
         tab_buttons.append(btn_network_tab)
+    # OD .rail — 폭 196, accent 3% 배경, 좌우 패딩 10, 항목 간격 4
     return ft.Container(
         width=DASHBOARD_SIDEBAR_WIDTH,
-        bgcolor="#F5F6F8",
-        border=ft.border.only(right=ft.BorderSide(1, "#D9E1EA")),
-        padding=ft.padding.only(left=18, right=16, top=22, bottom=18),
+        bgcolor="#F9FDFD",
+        border=ft.border.only(right=ft.BorderSide(1, "#E0E4EA")),
+        padding=ft.padding.only(left=10, right=10, top=18, bottom=18),
         content=ft.Column(
             controls=[
+                # OD .rail .logo — 흰 카드 + 얇은 teal 경계 + 미세 그림자
                 ft.Container(
-                    padding=ft.padding.only(left=6, top=6, bottom=4),
-                    content=ft.Text("Magical Play", size=28, weight=ft.FontWeight.W_700, color="#172235"),
+                    content=ft.Row(
+                        controls=[
+                            _sidebar_logo_control(),
+                            ft.Text("Magical Play", size=16, color="#17222E", font_family="Pretendard"),
+                        ],
+                        spacing=8,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor="#FFFFFF",
+                    border=ft.border.all(1, "#BFDEE1"),
+                    border_radius=10,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=10),
+                    margin=ft.margin.only(bottom=10),
                 ),
-                ft.Container(height=14),
                 *tab_buttons,
                 ft.Container(expand=True),
                 ft.Container(
@@ -1416,7 +1452,7 @@ def build_dashboard_sidebar(
                     content=ft.Text("v1 Control Center", color="#8B97A8", size=12),
                 ),
             ],
-            spacing=9,
+            spacing=4,
         ),
     )
 
@@ -1771,21 +1807,35 @@ def build_sidebar_tab_state(
     )
 
 
+# 사이드바 탭 색상 — OD .rail 기준: 활성 accent 20% 배경+deep 잉크, 호버 accent-soft
+_SIDEBAR_ACTIVE_BG = "#D8F3F1"
+_SIDEBAR_ACTIVE_INK = "#145F59"
+_SIDEBAR_IDLE_INK = "#4B5C65"
+_SIDEBAR_HOVER_BG = "#E7F8F7"
+
+
 def build_sidebar_nav_button_style(*, is_active: bool, is_hovered: bool) -> ft.ButtonStyle:
-    active_bg = ACCENT_PRIMARY_SOFT
-    hover_bg = "#F2FCFB"
-    idle_bg = "#00000000"
     return ft.ButtonStyle(
-        bgcolor=active_bg if is_active else (hover_bg if is_hovered else idle_bg),
-        color=ACCENT_PRIMARY_DEEP if is_active else ("#1A5F5A" if is_hovered else "#263547"),
-        side=(
-            ft.border.all(1, ACCENT_PRIMARY_BORDER)
-            if is_active
-            else (ft.border.all(1, "#D8EEEB") if is_hovered else ft.border.all(1, "#00000000"))
+        bgcolor=_SIDEBAR_ACTIVE_BG if is_active else (
+            _SIDEBAR_HOVER_BG if is_hovered else "#00000000"
         ),
-        shape=ft.RoundedRectangleBorder(radius=12),
-        padding=ft.padding.symmetric(horizontal=16, vertical=13),
+        shape=ft.RoundedRectangleBorder(radius=8),
+        padding=ft.padding.symmetric(horizontal=12, vertical=10),
     )
+
+
+def _apply_sidebar_nav_item(btn: ft.Control, *, is_active: bool, is_hovered: bool) -> None:
+    """탭 버튼 내부(아이콘·라벨·활성 점)를 상태에 맞게 갱신한다."""
+    btn.style = build_sidebar_nav_button_style(is_active=is_active, is_hovered=is_hovered)
+    ink = _SIDEBAR_ACTIVE_INK if is_active else _SIDEBAR_IDLE_INK
+    row = btn.content
+    if not isinstance(row, ft.Row) or len(row.controls) < 3:
+        return
+    row.controls[0].color = ink
+    label = row.controls[1].content
+    label.color = ink
+    label.weight = ft.FontWeight.BOLD if is_active else ft.FontWeight.W_400
+    row.controls[2].visible = is_active
 
 
 def apply_sidebar_tab_view_state(
@@ -1810,28 +1860,24 @@ def apply_sidebar_tab_view_state(
     receipt_active = tab_key == "receipt"
     work_active = tab_key == "work"
     network_active = tab_key == "network"
-    btn_ticket_tab.style = build_sidebar_nav_button_style(
-        is_active=ticket_active,
+    _apply_sidebar_nav_item(
+        btn_ticket_tab, is_active=ticket_active,
         is_hovered=(not ticket_active) and ticket_hovered,
     )
-    btn_receipt_tab.style = build_sidebar_nav_button_style(
-        is_active=receipt_active,
+    _apply_sidebar_nav_item(
+        btn_receipt_tab, is_active=receipt_active,
         is_hovered=(not receipt_active) and receipt_hovered,
     )
     if btn_work_tab is not None:
-        btn_work_tab.style = build_sidebar_nav_button_style(
-            is_active=work_active,
+        _apply_sidebar_nav_item(
+            btn_work_tab, is_active=work_active,
             is_hovered=(not work_active) and work_hovered,
         )
-        setattr(btn_work_tab, "icon_color", ACCENT_PRIMARY_DARK if work_active else ("#58ABA3" if work_hovered else "#5D6E82"))
     if btn_network_tab is not None:
-        btn_network_tab.style = build_sidebar_nav_button_style(
-            is_active=network_active,
+        _apply_sidebar_nav_item(
+            btn_network_tab, is_active=network_active,
             is_hovered=(not network_active) and network_hovered,
         )
-        setattr(btn_network_tab, "icon_color", ACCENT_PRIMARY_DARK if network_active else ("#58ABA3" if network_hovered else "#5D6E82"))
-    setattr(btn_ticket_tab, "icon_color", ACCENT_PRIMARY_DARK if ticket_active else ("#58ABA3" if ticket_hovered else "#5D6E82"))
-    setattr(btn_receipt_tab, "icon_color", ACCENT_PRIMARY_DARK if receipt_active else ("#58ABA3" if receipt_hovered else "#5D6E82"))
 
 
 def dispatch_sidebar_tab_change(
@@ -2472,6 +2518,12 @@ class DashboardFletView:
             "impact":      r"C:\Windows\Fonts\impact.ttf",
         }
         page.fonts = {k: v for k, v in _font_candidates.items() if Path(v).exists()}
+        # 사이드바 로고용 번들 폰트 (Pretendard — SIL OFL, 애플 SF 계열 대안)
+        for _resolver in (resolve_bundle_path, resolve_project_path):
+            _font_path = _resolver("Resources/fonts/Pretendard-Regular.otf")
+            if _font_path.exists():
+                page.fonts["Pretendard"] = str(_font_path)
+                break
 
         current_tab = {"value": "ticket"}
         current_state = {"value": "IDLE"}
@@ -2705,14 +2757,32 @@ class DashboardFletView:
             scan_handler=self._runtime_manager.process_phone_qr
         )
 
-        btn_ticket_tab = ft.TextButton("티켓 확인", icon=ICONS.CONFIRMATION_NUMBER_ROUNDED, key="dashboard_tab_ticket")
-        btn_work_tab = ft.TextButton("처리 현황 조회", icon=ICONS.FACT_CHECK_ROUNDED, key="dashboard_tab_work")
-        btn_receipt_tab = ft.TextButton("영수증 양식", icon=ICONS.RECEIPT_LONG_ROUNDED, key="dashboard_tab_receipt")
-        btn_network_tab = ft.TextButton("네트워크 관리", icon=ICONS.LAN_ROUNDED, key="dashboard_tab_network")
-        btn_ticket_tab.icon_size = 18
-        btn_work_tab.icon_size = 18
-        btn_receipt_tab.icon_size = 18
-        btn_network_tab.icon_size = 18
+        def _nav_tab_button(label: str, icon, key: str) -> ft.TextButton:
+            """사이드바 탭 버튼 — 아이콘 + 라벨 + 활성 시 우측 teal 점 (OD .rail button)."""
+            return ft.TextButton(
+                key=key,
+                width=176,
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(icon, size=20, color="#4B5C65"),
+                        ft.Container(
+                            content=ft.Text(label, size=13.5, color="#4B5C65"),
+                            expand=True,
+                        ),
+                        ft.Container(
+                            width=8, height=8, bgcolor="#39C5BB", border_radius=4,
+                            visible=False,
+                        ),
+                    ],
+                    spacing=9,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            )
+
+        btn_ticket_tab = _nav_tab_button("티켓 확인", ICONS.CONFIRMATION_NUMBER_ROUNDED, "dashboard_tab_ticket")
+        btn_work_tab = _nav_tab_button("처리 현황 조회", ICONS.FACT_CHECK_ROUNDED, "dashboard_tab_work")
+        btn_receipt_tab = _nav_tab_button("영수증 양식", ICONS.RECEIPT_LONG_ROUNDED, "dashboard_tab_receipt")
+        btn_network_tab = _nav_tab_button("네트워크 관리", ICONS.LAN_ROUNDED, "dashboard_tab_network")
         content_host = ft.Container(expand=True, padding=ft.padding.all(16))
         receipt_settings_panel_ref: dict[str, ft.Control | None] = {"value": None}
 
@@ -2793,10 +2863,50 @@ class DashboardFletView:
                 return
             do_search(push_update=push_update)
 
+        def _on_work_log_reset(_e: ft.ControlEvent) -> None:
+            def _work() -> None:
+                try:
+                    result = excel_service.reset_processing_state()
+                except Exception as exc:
+                    logger.warning("처리 데이터 초기화 실패: %s", exc, exc_info=True)
+                    call_page_from_thread(
+                        page,
+                        lambda: _show_dashboard_warning(
+                            "처리 데이터 초기화에 실패했습니다. "
+                            "data 파일이 다른 프로그램에서 열려 있는지 확인해주세요."
+                        ),
+                        search_refresh_stop,
+                    )
+                    return
+
+                def _done() -> None:
+                    work_log_selection["value"] = None
+                    refresh_work_log(push_update=False)
+                    refresh_network_panel(push_update=False, reload_ops=True)
+                    _show_dashboard_success(
+                        "처리 데이터를 초기화했습니다. "
+                        f"수령 표시 {result['receipts']}건, 처리 기록 {result['operations']}건을 비웠습니다."
+                    )
+
+                call_page_from_thread(page, _done, search_refresh_stop)
+
+            _confirm_network_action(
+                title="처리 데이터 초기화",
+                body=(
+                    "모든 주문의 수령 처리 표시(수령확인·처리시간·수령 상태)와 "
+                    "폰 처리 기록을 지웁니다. 주문 목록은 유지되며 "
+                    "data.xlsx.bak 백업이 자동 생성됩니다."
+                ),
+                confirm_label="초기화",
+                danger=True,
+                on_confirm=lambda: threading.Thread(target=_work, daemon=True).start(),
+            )
+
         work_log_panel = build_work_log_panel(
             on_select=_on_work_log_select,
             on_refresh=lambda _e: refresh_work_log(),
             on_search=_on_work_log_search,
+            on_reset=_on_work_log_reset,
         )
 
         # 네트워크 관리 탭 — 페어링 기기 목록, 연결 상태, 이름 변경/차단
@@ -2982,7 +3092,7 @@ class DashboardFletView:
 
             page.dialog = ft.AlertDialog(
                 title=ft.Text("장치 연결 해제"),
-                content=ft.Text(f"{label}의 연결을 해제할까요? 기존 처리 내역은 유지됩니다."),
+                content=ft.Text(f"{label}의 연결을 해제할까요?\n기존 처리 내역은 유지됩니다."),
                 actions=[
                     ft.TextButton("취소", on_click=_cancel),
                     ft.FilledButton(
@@ -3022,7 +3132,7 @@ class DashboardFletView:
 
             page.dialog = ft.AlertDialog(
                 title=ft.Text("장치 차단 해제"),
-                content=ft.Text(f"{label}의 차단을 해제할까요? 차단 해제 후 다시 페어링해 승인해야 합니다."),
+                content=ft.Text(f"{label}의 차단을 해제할까요?\n차단 해제 후 다시 페어링해 승인해야 합니다."),
                 actions=[
                     ft.TextButton("취소", on_click=_cancel),
                     ft.FilledButton("차단 해제", on_click=_confirm),
@@ -3181,8 +3291,8 @@ class DashboardFletView:
             page.dialog = ft.AlertDialog(
                 title=ft.Text("기기 차단"),
                 content=ft.Text(
-                    f"{label}의 접근을 차단합니다. 기록과 이름은 유지되며, "
-                    "차단 후에는 이 토큰으로 접근할 수 없습니다."
+                    f"{label}의 접근을 차단합니다.\n"
+                    "기록과 이름은 유지되며, 차단 후에는 이 토큰으로 접근할 수 없습니다."
                 ),
                 actions=[
                     ft.TextButton("취소", on_click=_cancel),
@@ -3209,7 +3319,7 @@ class DashboardFletView:
             _confirm_network_action(
                 title="장치 제거",
                 body=(
-                    f"{label}을(를) 목록에서 완전히 제거합니다. "
+                    f"{label}을(를) 목록에서 완전히 제거합니다.\n"
                     "등록 정보와 이 기기의 연결 기록이 삭제되며 되돌릴 수 없습니다."
                 ),
                 confirm_label="제거",
@@ -3370,11 +3480,11 @@ class DashboardFletView:
                     phone_link_service.start()
                 except Exception as exc:
                     logger.warning("휴대폰 연결 서버 시작 실패: %s", exc, exc_info=True)
+                    # exc는 except 블록이 끝나면 삭제되므로 메시지를 여기서 만든다
+                    message = f"휴대폰 연결 서버를 시작하지 못했습니다.\n{exc}"
                     call_page_from_thread(
                         page,
-                        lambda: _show_dashboard_warning(
-                            f"휴대폰 연결 서버를 시작하지 못했습니다.\n{exc}"
-                        ),
+                        lambda: _show_dashboard_warning(message),
                         search_refresh_stop,
                     )
                     return
@@ -3431,7 +3541,7 @@ class DashboardFletView:
             _confirm_network_action(
                 title="전체 기기 차단",
                 body=(
-                    f"{len(active)}대 기기의 접근을 모두 차단합니다. "
+                    f"{len(active)}대 기기의 접근을 모두 차단합니다.\n"
                     "기록과 이름은 유지되며 다시 쓰려면 재페어링이 필요합니다."
                 ),
                 confirm_label="전체 차단",
@@ -3460,10 +3570,12 @@ class DashboardFletView:
                     preview_items = render_receipt_preview_base64(order, receipt_settings)
                 except Exception as exc:
                     logger.error("영수증 미리보기 실패: %s", exc, exc_info=True)
+                    # exc는 except 블록이 끝나면 삭제되므로 메시지를 여기서 만든다
+                    message = f"미리보기 실패: {exc}"
 
                     def _show_error() -> None:
                         page.snack_bar = build_dashboard_snack_bar(
-                            f"미리보기 실패: {exc}",
+                            message,
                             success=False,
                         )
                         page.snack_bar.open = True

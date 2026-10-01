@@ -388,6 +388,60 @@ class ExcelService:
                     workbook.close()
         return 0
 
+    @_synchronized
+    def reset_processing_state(self) -> dict[str, int]:
+        """수령 처리 표시를 전부 초기화한다 (리허설/재운영용).
+
+        - 수령확인·처리시간: 모든 행에서 지운다
+        - 주문상태: 앱이 쓴 값(거래종료/확인필요)만 지워 원본 진행상태로 복귀한다
+        - _operations 시트: 폰 처리 기록을 전부 삭제한다
+        반환: {"receipts": 비워진 주문 수, "operations": 삭제된 작업 기록 수}
+        """
+        app_statuses = {"거래종료", "확인필요"}
+        for attempt in range(_WRITE_RETRY_COUNT):
+            workbook = None
+            try:
+                workbook = load_workbook(self._file_path)
+                ws = self._data_sheet(workbook)
+                headers = self._read_headers(ws)
+                received_col = self._find_col(headers, (RECEIPT_HEADER,))
+                processing_col = self._find_col(headers, (PROCESSING_TIME_HEADER,))
+                status_col = self._find_col(headers, (ORDER_STATUS_HEADER,))
+                cleared = 0
+                for row_idx in range(2, ws.max_row + 1):
+                    received = str(
+                        ws.cell(row=row_idx, column=received_col).value or ""
+                    ).strip() if received_col else ""
+                    status = str(
+                        ws.cell(row=row_idx, column=status_col).value or ""
+                    ).strip() if status_col else ""
+                    if not received and status not in app_statuses:
+                        continue
+                    # ws.cell(value=None)은 할당을 건너뛰므로 .value로 비운다
+                    if received_col:
+                        ws.cell(row=row_idx, column=received_col).value = None
+                    if processing_col:
+                        ws.cell(row=row_idx, column=processing_col).value = None
+                    if status_col and status in app_statuses:
+                        ws.cell(row=row_idx, column=status_col).value = None
+                    cleared += 1
+                ops_cleared = 0
+                if OPERATIONS_SHEET in workbook.sheetnames:
+                    ops_ws = workbook[OPERATIONS_SHEET]
+                    ops_cleared = max(ops_ws.max_row - 1, 0)
+                    if ops_cleared:
+                        ops_ws.delete_rows(2, ops_cleared)
+                self._save_atomic(workbook)
+                return {"receipts": cleared, "operations": ops_cleared}
+            except (PermissionError, OSError):
+                if attempt == _WRITE_RETRY_COUNT - 1:
+                    raise
+                time.sleep(_WRITE_RETRY_DELAY_SEC)
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        return {"receipts": 0, "operations": 0}
+
     def get_product_names(self) -> list[str]:
         """상품 컬럼명 리스트를 반환한다 (티켓 분류 UI용)."""
         workbook = load_workbook(self._file_path, read_only=True, data_only=True)

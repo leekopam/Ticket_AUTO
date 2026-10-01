@@ -470,8 +470,8 @@ class DashboardControlContractTest(unittest.TestCase):
         column = sidebar.content
         footer_text = column.controls[-1].content
 
-        self.assertEqual(sidebar.width, 244)
-        self.assertEqual(sidebar.bgcolor, "#F5F6F8")
+        self.assertEqual(sidebar.width, 196)
+        self.assertEqual(sidebar.bgcolor, "#F9FDFD")
         self.assertEqual(footer_text.value, "v1 Control Center")
 
 

@@ -257,5 +257,75 @@ class ExcelReceiptStateTest(unittest.TestCase):
             loaded.close()
 
 
+    def test_reset_processing_state_clears_app_marks_and_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append([
+                "주문번호",
+                "주문자명",
+                ORDER_STATUS_HEADER,
+                SOURCE_PROGRESS_STATUS_HEADER,
+                RECEIPT_HEADER,
+                PROCESSING_TIME_HEADER,
+            ])
+            # 앱이 처리한 주문 — 수령확인+처리시간+거래종료 전부 지워진다
+            worksheet.append(["ORDER-001", "A", "거래종료", "결제완료", "2026-02-23 09:00:00", "2026-02-23 09:00:01"])
+            # 원본 주문상태(결제완료)는 앱이 쓴 값이 아니므로 보존한다
+            worksheet.append(["ORDER-002", "B", "결제완료", "결제완료", "2026-02-23 10:00:00", ""])
+            # 정합성 표시(확인필요)는 수령확인이 없어도 지운다
+            worksheet.append(["ORDER-003", "C", "확인필요", "결제완료", "", ""])
+            # 손대지 않은 주문은 그대로 둔다
+            worksheet.append(["ORDER-004", "D", "", "결제완료", "", ""])
+            workbook.save(file_path)
+            workbook.close()
+
+            service = ExcelService(str(file_path))
+            self.assertTrue(service.append_operation({
+                "request_id": "req-1", "order_id": "ORDER-001", "action": "scan_receipt",
+                "device_id": "dev", "state": "succeeded",
+            }))
+
+            result = service.reset_processing_state()
+            self.assertEqual(result, {"receipts": 3, "operations": 1})
+
+            loaded = load_workbook(file_path, data_only=True)
+            worksheet = loaded.active
+            headers = {str(c.value): i for i, c in enumerate(worksheet[1], 1)}
+            rows = {
+                str(row[0]): row
+                for row in worksheet.iter_rows(min_row=2, values_only=True)
+            }
+            loaded.close()
+
+            status_col = headers[ORDER_STATUS_HEADER] - 1
+            received_col = headers[RECEIPT_HEADER] - 1
+            processing_col = headers[PROCESSING_TIME_HEADER] - 1
+            self.assertEqual(rows["ORDER-001"][received_col], None)
+            self.assertEqual(rows["ORDER-001"][processing_col], None)
+            self.assertEqual(rows["ORDER-001"][status_col], None)
+            self.assertEqual(rows["ORDER-002"][received_col], None)
+            # 원본 상태값은 보존된다
+            self.assertEqual(rows["ORDER-002"][status_col], "결제완료")
+            self.assertEqual(rows["ORDER-003"][status_col], None)
+            self.assertEqual(rows["ORDER-004"][status_col], None)
+            self.assertEqual(service.list_operations(), [])
+
+            # 초기화 후엔 수령 처리된 주문이 없어야 한다
+            self.assertFalse(any(o.is_received for o in service.search_orders_all()))
+
+    def test_reset_processing_state_leaves_untouched_workbook_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "data.xlsx"
+            _create_workbook(file_path)
+            service = ExcelService(str(file_path))
+            self.assertEqual(
+                service.reset_processing_state(), {"receipts": 0, "operations": 0}
+            )
+            order = service.find_order("ORDER-001")
+            self.assertIsNotNone(order)
+
+
 if __name__ == "__main__":
     unittest.main()

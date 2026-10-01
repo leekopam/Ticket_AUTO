@@ -98,3 +98,37 @@ def test_work_log_tab_empty_then_row_and_detail(page, flet_server):
     page.get_by_text("010-0000-0000").first.wait_for(
         state="visible", timeout=_TIMEOUT_MS
     )
+
+
+def test_work_log_reset_button_clears_processed_state(page, flet_server):
+    """처리 데이터 초기화 버튼이 확인 다이얼로그를 거쳐 수령 처리 표시를 비운다."""
+    data_path = Path(flet_server["runtime_dir"]) / "Resources" / "data" / "data.xlsx"
+    _mark_order_received(data_path, TEST_ORDER_NUMBER, "2026-09-27 18:45:00")
+
+    _open_work_log_tab(page)
+    page.get_by_text("테스트 사용자").first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+
+    # 초기화 버튼 → 확인 다이얼로그 → 초기화 확정
+    wait_for_button(page, "처리 데이터 초기화", timeout_ms=_TIMEOUT_MS).click()
+    page.get_by_text("수령 처리 표시", exact=False).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+    wait_for_button(page, "초기화", timeout_ms=_TIMEOUT_MS).click()
+
+    # 목록이 빈 상태로 돌아가고 주문 데이터 자체는 남는다
+    page.get_by_text("아직 처리된 주문이 없습니다.", exact=True).first.wait_for(
+        state="visible", timeout=_TIMEOUT_MS
+    )
+    workbook = load_workbook(data_path, read_only=True, data_only=True)
+    try:
+        headers = {str(c.value or "").strip(): i for i, c in enumerate(workbook.active[1], 1)}
+        order_col, received_col = headers["주문번호"], headers["수령확인"]
+        remaining = [
+            row for row in workbook.active.iter_rows(min_row=2, values_only=True)
+            if str(row[received_col - 1] or "").strip()
+        ]
+        assert remaining == []
+    finally:
+        workbook.close()

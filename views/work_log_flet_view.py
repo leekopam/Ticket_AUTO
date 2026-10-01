@@ -44,6 +44,11 @@ _DEVICE_PALETTE: tuple[tuple[str, str], ...] = (
 )
 _PC_CHIP_COLORS = ("#EEF1F4", "#4B5A6E")
 
+# 상단 집계 카드 높이 — OD .dashboard-grid의 stretch(가장 높은 카드에 맞춤)와 동일하게
+# 상품 카드 내부(패딩 32 + 헤더 24 + 간격 16 + 그리드 영역)에 맞춰 고정한다.
+GOODS_COUNTS_HEIGHT = 96
+DASHBOARD_CARD_HEIGHT = GOODS_COUNTS_HEIGHT + 32 + 24 + 16  # 168
+
 
 def parse_goods_item(item: str) -> tuple[str, int]:
     """'상품명 xN'을 (상품명, 수량)으로 분리한다. 수량 접미사가 없으면 1."""
@@ -470,10 +475,11 @@ def _build_detail_content(detail: WorkLogDetailState) -> ft.Column:
 
 def _build_metric_card(title: str, value_text: ft.Text, icon: str, icon_color: str) -> ft.Container:
     return ft.Container(
-        expand=True,
+        expand=10,
         bgcolor="#FFFFFF",
         border_radius=12,
         border=ft.border.all(1, "#E0E4EA"),
+        height=DASHBOARD_CARD_HEIGHT,
         padding=ft.padding.symmetric(horizontal=18, vertical=16),
         content=ft.Column(
             controls=[
@@ -495,7 +501,10 @@ def _build_metric_card(title: str, value_text: ft.Text, icon: str, icon_color: s
 
 
 def _metric_value(key: str, color: str) -> ft.Text:
-    return ft.Text("—", size=32, weight=ft.FontWeight.BOLD, color=color, key=key)
+    return ft.Text(
+        "—", size=32, weight=ft.FontWeight.BOLD, color=color, key=key,
+        style=ft.TextStyle(letter_spacing=-1),
+    )
 
 
 def build_work_log_panel(
@@ -503,6 +512,7 @@ def build_work_log_panel(
     on_select: Callable[[str], None],
     on_refresh: Callable[[ft.ControlEvent], None],
     on_search: Callable[[str], None] | None = None,
+    on_reset: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.Container:
     """처리 현황 조회 패널을 생성한다. refs는 panel._work_log_refs에 담긴다."""
     completed_text = _metric_value("work_log_completed_count", ACCENT_PRIMARY_DEEP)
@@ -519,10 +529,11 @@ def build_work_log_panel(
             _build_metric_card("처리 완료 손님", completed_text, ICONS.CHECK_CIRCLE_ROUNDED, ACCENT_PRIMARY_DEEP),
             _build_metric_card("미처리 손님", pending_text, ICONS.SCHEDULE_ROUNDED, "#7A6500"),
             ft.Container(
-                expand=3,
+                expand=28,
                 bgcolor="#FFFFFF",
                 border_radius=12,
                 border=ft.border.all(1, "#E0E4EA"),
+                height=DASHBOARD_CARD_HEIGHT,
                 padding=ft.padding.symmetric(horizontal=18, vertical=16),
                 content=ft.Column(
                     controls=[
@@ -540,6 +551,7 @@ def build_work_log_panel(
                                 ft.Text("티켓 제외 · 수량 기준", size=11, color="#6B7787"),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         ft.Container(
                             content=ft.Column(
@@ -548,10 +560,10 @@ def build_work_log_panel(
                                 tight=True,
                                 scroll=ft.ScrollMode.AUTO,
                             ),
-                            height=96,
+                            height=GOODS_COUNTS_HEIGHT,
                         ),
                     ],
-                    spacing=8,
+                    spacing=16,
                     tight=True,
                 ),
             ),
@@ -626,6 +638,13 @@ def build_work_log_panel(
                                 icon_size=18,
                                 on_click=on_refresh,
                                 key="work_log_refresh_button",
+                            ),
+                            ft.IconButton(
+                                icon=ICONS.RESTART_ALT_ROUNDED,
+                                tooltip="처리 데이터 초기화",
+                                icon_size=18,
+                                on_click=on_reset,
+                                key="work_log_reset_button",
                             ),
                         ],
                         spacing=10,
