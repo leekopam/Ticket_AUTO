@@ -416,8 +416,7 @@ class S08DuplicateQrTest(unittest.TestCase):
             scanner = FakeScannerView()
             app, browser, scanner, sound = _build_app(data_path, scanner=scanner)
             printer = FakePrinterBackend()
-            app._last_qr_url = ""
-            app._last_qr_timestamp = 0.0
+            app._recent_qr = {}
             app._qr_repeat_cooldown_sec = 2.0
 
             scanner.push_qr(TEST_QR_URL)

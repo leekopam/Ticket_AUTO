@@ -142,3 +142,17 @@ def test_phone_qr_rejected_when_offline_runtime_not_started():
         "state": "rejected",
         "message": "PC 티켓 확인을 먼저 시작해주세요.",
     }
+
+
+def test_duplicate_qr_cooldown_covers_alternating_scans():
+    """A→B→A 교대 스캔도 쿨다운 내 동일 QR은 중복으로 판정한다."""
+    app = Application.__new__(Application)
+    app._recent_qr = {}
+    app._qr_repeat_cooldown_sec = 2.0
+
+    assert app._is_duplicate_qr("qr-a") is False
+    assert app._is_duplicate_qr("qr-b") is False
+    assert app._is_duplicate_qr("qr-a") is True
+    # 쿨다운 경과 후에는 정상 스캔으로 통과한다
+    app._recent_qr["qr-a"] -= 3.0
+    assert app._is_duplicate_qr("qr-a") is False

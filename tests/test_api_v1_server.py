@@ -1,6 +1,7 @@
 """LAN API v1 서버 계약 테스트 (FastAPI TestClient, TLS는 실행 계층에서 검증)."""
 from __future__ import annotations
 
+import threading
 import uuid
 import time
 from pathlib import Path
@@ -351,7 +352,8 @@ def test_scan_saturated_slots_rejected(tmp_path: Path):
     token = _pair_device(env)
     payload = lambda: {
         "request_id": str(uuid.uuid4()),
-        "qr_url": "https://witchform.com/qrcode_link.php?opaque=abc",
+        # 슬롯 포화 검증이 목적이므로 요청마다 다른 QR을 쓴다 (동일 QR은 귀속된다).
+        "qr_url": f"https://witchform.com/qrcode_link.php?opaque={uuid.uuid4()}",
     }
     for _ in range(4):
         assert client.post("/v1/scan", json=payload(), headers=_auth(token)).status_code == 200
@@ -547,3 +549,80 @@ def test_work_log_device_name_from_ops(env):
     body = env["client"].get("/v1/work-log", headers=_auth(token)).json()
     item = body["items"][0]
     assert item["device_name"] == "매표소폰"
+
+
+def test_same_qr_scan_from_two_devices_coalesces_to_one_execution(tmp_path: Path):
+    """폰 2대가 동일 QR을 동시에 스캔하면 처리는 1회만 실행되고 두 요청 모두 같은 결과를 받는다."""
+    data = tmp_path / "data.xlsx"
+    _make_orders_xlsx(data)
+    excel = ExcelService(str(data))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+    calls: list[str] = []
+    gate = threading.Event()
+
+    def handle_scan(qr_url: str) -> dict[str, str]:
+        calls.append(qr_url)
+        gate.wait(timeout=5)
+        return {"state": "succeeded", "order_id": "AAAA1111_BBBB2222", "message": "수령 완료"}
+
+    env = {"client": TestClient(create_api_v1_app(excel, pairing, scan_handler=handle_scan)), "pairing": pairing}
+    token_a = _pair_device(env)
+    token_b = _pair_device(env)
+    qr_url = "https://witchform.com/qrcode_link.php?opaque=shared"
+    rid_a, rid_b = str(uuid.uuid4()), str(uuid.uuid4())
+
+    res_a = env["client"].post(
+        "/v1/scan", json={"request_id": rid_a, "qr_url": qr_url}, headers=_auth(token_a)
+    ).json()
+    assert res_a["state"] == "accepted"
+    # A의 처리가 진행 중인 동안 B가 같은 QR을 스캔 — 귀속되어 별도 실행되지 않는다
+    res_b = env["client"].post(
+        "/v1/scan", json={"request_id": rid_b, "qr_url": qr_url}, headers=_auth(token_b)
+    ).json()
+    assert res_b["state"] == "accepted"
+    assert res_b["request_id"] == rid_b
+    gate.set()
+
+    def wait_terminal(rid: str, token: str) -> dict:
+        result = {}
+        for _ in range(100):
+            result = env["client"].get(f"/v1/actions/{rid}", headers=_auth(token)).json()
+            if result["state"] in {"succeeded", "already_processed", "failed", "needs_reconciliation", "rejected"}:
+                return result
+            time.sleep(0.02)
+        return result
+
+    final_a = wait_terminal(rid_a, token_a)
+    final_b = wait_terminal(rid_b, token_b)
+    assert final_a["state"] == "succeeded"
+    assert final_b["state"] == "succeeded"
+    assert final_a["order_id"] == final_b["order_id"] == "AAAA1111_BBBB2222"
+    assert calls == [qr_url]
+
+
+def test_scan_after_terminal_reruns_normally(tmp_path: Path):
+    """첫 요청이 종결된 뒤 같은 QR 재스캔은 귀속되지 않고 정상 재처리된다."""
+    data = tmp_path / "data.xlsx"
+    _make_orders_xlsx(data)
+    excel = ExcelService(str(data))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+    calls: list[str] = []
+
+    def handle_scan(qr_url: str) -> dict[str, str]:
+        calls.append(qr_url)
+        return {"state": "already_processed", "order_id": "AAAA1111_BBBB2222", "message": "이미 수령된 주문입니다."}
+
+    env = {"client": TestClient(create_api_v1_app(excel, pairing, scan_handler=handle_scan)), "pairing": pairing}
+    token = _pair_device(env)
+    qr_url = "https://witchform.com/qrcode_link.php?opaque=again"
+
+    for _ in range(2):
+        rid = str(uuid.uuid4())
+        env["client"].post("/v1/scan", json={"request_id": rid, "qr_url": qr_url}, headers=_auth(token))
+        for _ in range(100):
+            result = env["client"].get(f"/v1/actions/{rid}", headers=_auth(token)).json()
+            if result["state"] == "already_processed":
+                break
+            time.sleep(0.02)
+        assert result["state"] == "already_processed"
+    assert calls == [qr_url, qr_url]

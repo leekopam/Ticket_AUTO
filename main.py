@@ -114,8 +114,7 @@ class Application:
         if self._order_view is not None:
             self._order_view.set_print_request_callback(self._handle_manual_print)
 
-        self._last_qr_url = ""
-        self._last_qr_timestamp = 0.0
+        self._recent_qr: dict[str, float] = {}
         self._qr_repeat_cooldown_sec = 2.0
 
         self._status_listener: StatusListener | None = None
@@ -684,12 +683,12 @@ class Application:
 
     def _is_duplicate_qr(self, qr_url: str) -> bool:
         now = time.monotonic()
-        is_duplicate = (
-            qr_url == self._last_qr_url
-            and (now - self._last_qr_timestamp) < self._qr_repeat_cooldown_sec
-        )
-        self._last_qr_url = qr_url
-        self._last_qr_timestamp = now
+        cutoff = now - self._qr_repeat_cooldown_sec
+        for url, ts in list(self._recent_qr.items()):
+            if ts < cutoff:
+                del self._recent_qr[url]
+        is_duplicate = qr_url in self._recent_qr
+        self._recent_qr[qr_url] = now
         return is_duplicate
 
     def _process_qr(self, qr_url: str, allow_auth_retry: bool) -> None:

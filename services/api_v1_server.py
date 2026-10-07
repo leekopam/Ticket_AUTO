@@ -134,6 +134,8 @@ class ActionRegistry:
         self._lock = threading.RLock()
         self._records: dict[str, dict[str, Any]] = {}
         self._order_locks: dict[str, str] = {}  # order_id -> request_id
+        self._inflight_scans: dict[str, str] = {}  # qr_url -> request_id (비종결 스캔)
+        self._scan_aliases: dict[str, str] = {}  # alias request_id -> primary request_id
         self._consecutive_failures = 0
         self._restore_from_sheet()
 
@@ -199,6 +201,22 @@ class ActionRegistry:
                 self._order_locks[order_id] = request_id
         self._persist_new(record)
 
+    def register_scan(self, request_id: str, qr_url: str, device_id: str) -> str | None:
+        """폰 스캔을 접수한다. 동일 qr_url의 비종결 요청이 있으면 귀속(alias)시키고 그 request_id를 반환한다."""
+        with self._lock:
+            primary = self._inflight_scans.get(qr_url)
+            if primary is not None:
+                self._scan_aliases[request_id] = primary
+            else:
+                self._inflight_scans[qr_url] = request_id
+        self.register(request_id, "", ACTION_SCAN_RECEIPT, device_id)
+        with self._lock:
+            record = self._records[request_id]
+            record["qr_url"] = qr_url
+            if primary is not None:
+                record["alias_of"] = primary
+        return primary
+
     def _persist_new(self, record: dict[str, Any]) -> None:
         self._excel.append_operation(
             {
@@ -243,6 +261,15 @@ class ActionRegistry:
         if name:
             updates["device_name"] = name
         self._excel.update_operation(request_id, updates)
+        if state in TERMINAL_STATES:
+            with self._lock:
+                qr_url = record.get("qr_url", "")
+                if qr_url and self._inflight_scans.get(qr_url) == request_id:
+                    del self._inflight_scans[qr_url]
+                # 동일 QR 귀속 요청들은 같은 결과를 받는다 (자동 재실행 없이 결과 공유).
+                alias_rids = [rid for rid, p in self._scan_aliases.items() if p == request_id]
+            for rid in alias_rids:
+                self.transition(rid, state, result)
         return record
 
     @property
@@ -605,10 +632,14 @@ def create_api_v1_app(
             if not scan_slots.acquire(blocking=False):
                 return _error("rejected", "SERVER_BUSY", "처리 중인 스캔이 많습니다. 잠시 후 다시 시도해주세요.", status_code=429)
             try:
-                registry.register(body.request_id, "", ACTION_SCAN_RECEIPT, device)
+                primary_rid = registry.register_scan(body.request_id, body.qr_url, device)
             except Exception:
                 scan_slots.release()
                 raise
+            if primary_rid is not None:
+                # 동일 QR의 진행 중 요청에 귀속 — 별도 처리 없이 그 결과를 공유한다.
+                scan_slots.release()
+                return _action_payload(registry.get(body.request_id) or {})
 
         def run_scan() -> None:
             try:

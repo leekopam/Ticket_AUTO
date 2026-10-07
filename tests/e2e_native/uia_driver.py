@@ -37,6 +37,11 @@ class NativeWindowDriver:
         pane.wait("exists", timeout=5)
         return pane.handle
 
+    @property
+    def hwnd(self) -> int:
+        """최상위 창 핸들 — 와치독의 프로세스 창 감시용."""
+        return int(self._window.handle)
+
     @classmethod
     def wait_for_window(cls, title: str, timeout: float = 30.0) -> "NativeWindowDriver":
         desktop = Desktop(backend="uia")

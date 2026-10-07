@@ -205,3 +205,27 @@ class TestWaitForCamera(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQrQueueDedup(unittest.TestCase):
+    """카메라 큐의 동일 QR 중복 적재 방지 검증."""
+
+    def _scanner(self) -> ScannerView:
+        scanner = ScannerView.__new__(ScannerView)
+        import queue as _q
+        scanner._qr_queue = _q.Queue(maxsize=10)
+        scanner._queued_qrs = set()
+        return scanner
+
+    def test_identical_qr_not_reenqueued_while_pending(self):
+        scanner = self._scanner()
+        assert scanner._enqueue_qr("u1") is True
+        assert scanner._enqueue_qr("u1") is False
+        assert scanner._enqueue_qr("u2") is True
+        assert scanner._qr_queue.qsize() == 2
+
+    def test_qr_can_be_enqueued_again_after_consume(self):
+        scanner = self._scanner()
+        scanner._enqueue_qr("u1")
+        assert scanner.get_next_qr() == "u1"
+        assert scanner._enqueue_qr("u1") is True

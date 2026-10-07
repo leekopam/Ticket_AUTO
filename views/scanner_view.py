@@ -309,6 +309,7 @@ class ScannerView:
         self._start_complete = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._qr_queue: queue.Queue[str] = queue.Queue(maxsize=10)
+        self._queued_qrs: set[str] = set()  # 큐 적재 중인 QR — 동일 QR 연쇄 재처리 방지
 
         self._last_emitted_qr = ""
         self._missing_qr_frames = 0
@@ -552,9 +553,19 @@ class ScannerView:
 
     def get_next_qr(self, timeout_sec: float = 0.1) -> str | None:
         try:
-            return self._qr_queue.get(timeout=max(0.01, timeout_sec))
+            qr_url = self._qr_queue.get(timeout=max(0.01, timeout_sec))
         except queue.Empty:
             return None
+        self._queued_qrs.discard(qr_url)
+        return qr_url
+
+    def _enqueue_qr(self, qr_url: str) -> bool:
+        """큐에 아직 없는 QR만 적재한다 — 처리 지연 중 동일 QR이 연쇄 재처리되지 않게 한다."""
+        if qr_url in self._queued_qrs or self._qr_queue.full():
+            return False
+        self._queued_qrs.add(qr_url)
+        self._qr_queue.put(qr_url)
+        return True
 
     def scan_qr(self) -> str | None:
         """하위 호환성을 유지하기 위한 블로킹 래퍼(Blocking wrapper)입니다."""
@@ -647,8 +658,7 @@ class ScannerView:
                 qr_url = self._decode_qr(decode_frame)
                 if qr_url:
                     if self._can_emit_qr(qr_url):
-                        if not self._qr_queue.full():
-                            self._qr_queue.put(qr_url)
+                        self._enqueue_qr(qr_url)
                         self.set_scanning_enabled(False)
                         self.set_status_message(_STATUS_PROCESSING)
                 else:
