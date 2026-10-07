@@ -18,6 +18,9 @@ binaries = []
 hiddenimports = ['e2e_harness']
 tmp_ret = collect_all('flet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# Flet 0.25+는 데스크톱 클라이언트(flet.exe)가 flet_desktop 패키지에 있다.
+tmp_ret = collect_all('flet_desktop')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('playwright')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 datas += collect_playwright_browser_datas()

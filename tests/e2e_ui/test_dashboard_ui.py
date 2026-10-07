@@ -119,7 +119,11 @@ def test_u02_dashboard_search_and_order_flow(page, flet_server):
     # 결과 행의 복사 버튼 → 실제 클립보드에 해당 주문번호가 들어간다.
     # (행 셀 텍스트는 Flutter web semantics에서 materialize되지 않아
     #  복사 값으로 행 내용을 검증한다.)
-    page.get_by_role("button", name="주문번호 복사").first.click()
+    # Flet 0.25 클라이언트는 IconButton tooltip을 부모 semantics 노드의
+    # aria-label(행 전체 라벨에 병합)로 올리고 버튼 노드는 자식으로 분리한다.
+    page.locator(
+        'flt-semantics[aria-label^="주문번호 복사"] >> flt-semantics[role="button"]'
+    ).first.click()
     page.wait_for_timeout(300)
     clipboard = page.evaluate("() => navigator.clipboard.readText()")
     assert clipboard == TEST_ORDER_NUMBER
