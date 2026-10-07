@@ -134,7 +134,10 @@ class Application:
 
     def process_phone_qr(self, qr_url: str) -> dict[str, str]:
         """휴대폰 QR을 PC 스캔과 같은 런타임 순서로 처리한다."""
-        if self._state not in (AppState.READY, AppState.PROCESSING) or self._is_stop_requested():
+        # ERROR는 직전 작업의 일시적 실패 상태 — 다음 스캔이 자체 복구 경로
+        # (AUTH_REQUIRED → 재로그인 유도)를 타므로 차단하지 않는다.
+        # AUTH_WAIT/RECOVERING은 인증 미확정이라 계속 거절한다.
+        if self._state not in (AppState.READY, AppState.PROCESSING, AppState.ERROR) or self._is_stop_requested():
             if self._load_ticket_debug_settings().offline_scan_mode:
                 return {"state": "rejected", "message": "PC 티켓 확인을 먼저 시작해주세요."}
             return {"state": "rejected", "message": "PC 티켓 확인과 윗치폼 로그인을 먼저 시작해주세요."}
@@ -439,6 +442,8 @@ class Application:
             return "수령 완료 처리 상태를 확인하지 못했습니다. 다시 스캔해주세요."
         if click_result.error_code == "NO_ACTIVE_PAGE":
             return "주문 상세 페이지를 확인하지 못했습니다. 다시 스캔해주세요."
+        if click_result.error_code == "VERIFY_FAILED":
+            return "수령 완료 여부를 확인하지 못했습니다. 다시 스캔하면 상태를 다시 확인합니다."
         return "수령 완료 처리에 실패했습니다. 다시 스캔해주세요."
 
     def _handle_manual_print(self, order: Order) -> None:
@@ -1133,6 +1138,12 @@ if __name__ == "__main__":
         from services.self_check_service import run_self_check_cli
 
         raise SystemExit(run_self_check_cli(sys.argv[1:]))
+
+    # E2E 하니스 모드 — 소스/패키징 exe 동일 표면으로 대시보드를 스텁 런타임으로 기동
+    if "--e2e" in sys.argv:
+        import e2e_harness
+
+        raise SystemExit(e2e_harness.main(sys.argv[1:]))
 
     from views.dashboard_flet_view import run_dashboard_app
 

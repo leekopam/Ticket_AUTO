@@ -74,6 +74,8 @@ class PageOrderDiscoveryResult:
 class BrowserService:
     _RECEIPT_PRE_CONFIRM_SETTLE_MS = 120
     _RECEIPT_POST_CONFIRM_SETTLE_MS = 250
+    _RECEIPT_VERIFY_TIMEOUT_SEC = 10.0
+    _RECEIPT_VERIFY_POLL_MS = 400
     _LOGIN_PAGE_WAIT_UNTIL = "domcontentloaded"
     _AUTH_STORAGE_CLEAR_SCRIPT = "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }"
 
@@ -645,15 +647,30 @@ class BrowserService:
                 error_message=f"수령 결과 재확인 실패: {exc}",
             )
 
+        # SPA 주문 상세는 load 직후에도 수령 상태가 렌더되기 전일 수 있어
+        # 마커가 나타날 때까지 폴링으로 확인한다 (단발 조회 시 오판 방지).
         try:
-            if self._page_shows_already_received():
-                result = ReceiptClickResult(success=True, verified=True)
-            else:
-                result = ReceiptClickResult(
-                    success=False,
-                    error_code="VERIFY_FAILED",
-                    error_message="수령 완료 표시를 확인하지 못했습니다.",
-                )
+            deadline = time.monotonic() + self._RECEIPT_VERIFY_TIMEOUT_SEC
+            while True:
+                if self._page_shows_already_received():
+                    result = ReceiptClickResult(success=True, verified=True)
+                    break
+                if time.monotonic() >= deadline:
+                    result = ReceiptClickResult(
+                        success=False,
+                        error_code="VERIFY_FAILED",
+                        error_message="수령 완료 표시를 확인하지 못했습니다.",
+                    )
+                    break
+                try:
+                    self._current_page.wait_for_timeout(self._RECEIPT_VERIFY_POLL_MS)
+                except Exception:
+                    result = ReceiptClickResult(
+                        success=False,
+                        error_code="VERIFY_FAILED",
+                        error_message="수령 완료 표시를 확인하지 못했습니다.",
+                    )
+                    break
         finally:
             self._close_current_page()
         return result

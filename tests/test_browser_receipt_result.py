@@ -881,6 +881,53 @@ class BrowserReceiptResultContractTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "AUTH_REQUIRED")
 
+    def _build_process_order_service(
+        self,
+        page: _FakePage,
+        received_checks: list[bool],
+    ) -> tuple[BrowserService, list[bool]]:
+        """재검증 경로용 서비스 스텁 — received_checks 순서대로 마커 판정을 반환한다."""
+        service = self._build_service()
+        service._handle_open_page = lambda url: True
+        service._handle_click_receipt = lambda: ReceiptClickResult(success=True)
+        service._open_page_with_current_context = (
+            lambda url, *, preserve_current_page: True
+        )
+        service._current_page = page
+        calls = list(received_checks)
+        service._page_shows_already_received = lambda: calls.pop(0) if calls else False
+        return service, calls
+
+    def test_process_order_receipt_polls_verify_until_marker_appears(self) -> None:
+        """SPA 렌더 지연으로 첫 조회에 마커가 없어도 폴링 후 성공으로 확정한다."""
+        page = _FakePage()
+        service, _ = self._build_process_order_service(page, [False, False, True])
+
+        result = service._handle_process_order_receipt("https://witchform.com/w/order/1")
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.verified)
+        self.assertEqual(
+            page.wait_calls,
+            [
+                BrowserService._RECEIPT_VERIFY_POLL_MS,
+                BrowserService._RECEIPT_VERIFY_POLL_MS,
+            ],
+        )
+        self.assertEqual(page.close_calls, 1)
+
+    def test_process_order_receipt_reports_verify_failed_after_timeout(self) -> None:
+        """타임아웃까지 마커가 없으면 VERIFY_FAILED를 반환한다."""
+        page = _FakePage()
+        service, _ = self._build_process_order_service(page, [])
+
+        with patch.object(BrowserService, "_RECEIPT_VERIFY_TIMEOUT_SEC", 0.05):
+            result = service._handle_process_order_receipt("https://witchform.com/w/order/1")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "VERIFY_FAILED")
+        self.assertEqual(page.close_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

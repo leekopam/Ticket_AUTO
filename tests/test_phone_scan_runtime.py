@@ -95,6 +95,39 @@ def test_phone_qr_allowed_in_offline_scan_mode():
     assert result["state"] == "succeeded"
 
 
+def test_phone_qr_accepted_after_previous_error_state():
+    """직전 스캔이 ERROR로 끝나도 다음 휴대폰 스캔은 처리된다."""
+    app = Application.__new__(Application)
+    app._state = AppState.ERROR
+    app._stop_requested = False
+    app._relogin_requested = False
+    app._control_lock = threading.Lock()
+    app._phone_scans = queue.Queue()
+    app._active_phone_scan = None
+    app._last_scan_order = None
+    app._phone_was_received = False
+    app._phone_web_already_received = False
+    app._last_status_message = ""
+    app._status_listener = None
+    app._order_listener = None
+    app._scanner_view = _Scanner()
+    app._excel_service = SimpleNamespace(find_order=lambda number: SimpleNamespace(is_received=True))
+    app._load_ticket_debug_settings = lambda: SimpleNamespace(offline_scan_mode=False)
+
+    def process(qr_url: str, allow_auth_retry: bool) -> None:
+        app._emit_order(SimpleNamespace(order_number="AAAA_BBBB", is_received=False))
+        app._enter_ready("수령 완료")
+        app._scanner_view.running = False
+
+    app._process_qr = process
+    worker = threading.Thread(target=app._main_loop)
+    worker.start()
+    result = app.process_phone_qr("https://witchform.com/qrcode_link.php?ticket=1")
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result["state"] == "succeeded"
+
+
 def test_phone_qr_rejected_when_offline_runtime_not_started():
     """오프라인 모드에서도 런타임 미시작이면 안내 메시지로 거절한다."""
     app = Application.__new__(Application)
