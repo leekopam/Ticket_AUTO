@@ -54,12 +54,14 @@ def _check_imports() -> SelfCheckResult:
 def _check_project_paths() -> SelfCheckResult:
     from project_paths import ensure_managed_data_file
 
+    # data.xlsx는 개인정보로 빌드에 포함되지 않는다. 첫 실행 시 없는 것이 정상이므로
+    # 관리 디렉토리가 생성 가능한지만 검증한다.
     path = ensure_managed_data_file()
     writable = path.parent.is_dir()
     return SelfCheckResult(
         "project_paths",
-        path.is_file() and writable,
-        f"data_file={path} frozen={getattr(sys, 'frozen', False)}",
+        writable,
+        f"data_file={path} exists={path.is_file()} frozen={getattr(sys, 'frozen', False)}",
     )
 
 
@@ -88,8 +90,17 @@ def _check_camera_enum() -> SelfCheckResult:
 
 
 def _check_excel_load() -> SelfCheckResult:
+    from project_paths import ensure_managed_data_file
     from services.excel_service import ExcelService
 
+    # 번들 미포함 정책상 첫 실행은 데이터 파일이 없는 상태 — 읽기 오류가
+    # FileNotFoundError로 깔끔하게 전파되는지만 확인한다.
+    if not ensure_managed_data_file().is_file():
+        try:
+            ExcelService().search_orders("자동차")
+        except FileNotFoundError:
+            return SelfCheckResult("excel_load", True, "no data file (import pending)")
+        return SelfCheckResult("excel_load", False, "missing file did not raise FileNotFoundError")
     orders = ExcelService().search_orders("자동차")
     return SelfCheckResult("excel_load", isinstance(orders, list), f"orders={len(orders)}")
 

@@ -9,12 +9,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from build_support.playwright_browsers import collect_playwright_browser_datas
 
+# Resources/data(data.xlsx)는 개인정보를 포함하므로 빌드에 포함하지 않는다.
+# 첫 실행 시 Resources/data/만 생성되고, 데이터 파일은 앱의 가져오기 기능으로 사용자가 넣는다.
 datas = [
     (str(PROJECT_ROOT / 'Resources' / 'templates'), 'Resources\\templates'),
-    (str(PROJECT_ROOT / 'Resources' / 'data'), 'Resources\\data'),
 ]
 binaries = []
-hiddenimports = []
+hiddenimports = ['e2e_harness']
 tmp_ret = collect_all('flet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('playwright')
