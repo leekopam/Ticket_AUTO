@@ -11,7 +11,13 @@ param(
 
     [string]$SpecPath = "build_support\specs\Ticket_AUTO_flat.spec",
     [double]$ExeStartupSeconds = 10,
-    [string]$ResultsPath = ""
+    [string]$ResultsPath = "",
+
+    # Android 게이트 — release APK를 실기기에 설치해 기동·UI·ANR을 검증한다.
+    [Parameter(ParameterSetName = "Release")]
+    [string]$ApkPath = "",
+    [Parameter(ParameterSetName = "Release")]
+    [string]$ApkSerial = ""
 )
 
 Set-StrictMode -Version Latest
@@ -126,6 +132,23 @@ try {
             $compareScript, "--src", $srcSelfCheck, "--exe", $exeSelfCheck
         ) (Join-Path $resultsRoot "selfcheck-parity.log")
         $completedSteps.Add("feature parity check")
+
+        if ($ApkPath) {
+            # Android 게이트 — release APK 설치·기동 → uiautomator2 첫 화면 UI →
+            # logcat ANR/FATAL 감시. 기기 미지정 시 스크립트 기본 시리얼 사용.
+            $apkGateScript = Join-Path $scriptRoot "apk_e2e.py"
+            $apkGateArgs = @(
+                $apkGateScript, "--apk", $ApkPath, "--ui",
+                "--screenshot", (Join-Path $resultsRoot "apk-ui.png")
+            )
+            if ($ApkSerial) {
+                $apkGateArgs += @("--serial", $ApkSerial)
+            }
+            Invoke-LoggedNativeCommand $venvPython $apkGateArgs (
+                Join-Path $resultsRoot "apk-gate.log"
+            )
+            $completedSteps.Add("APK gate (install/launch/UI/ANR)")
+        }
     }
 
     $status = "PASSED"
