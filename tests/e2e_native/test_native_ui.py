@@ -113,7 +113,9 @@ def test_n03_order_event_updates_buyer_panel_and_prints(driver, native_app):
     # 참고: '출력' 버튼은 네이티브 창에서 클릭이 삼켜지는 이상징후가 확인돼
     # (web에서는 동작) 별도 이슈로 추적한다. 출력 파이프라인 자체는 U02가 검증.
     print_button = driver.wait_for_element("Button", "출력", exact=True)
-    assert print_button.is_enabled(), "주문 수신 후 출력 버튼이 비활성 상태입니다"
+    assert driver.is_element_enabled(print_button), (
+        "주문 수신 후 출력 버튼이 비활성 상태입니다"
+    )
     driver.click("Button", "미리보기", exact=True)
     driver.wait_for_text("닫기", timeout=15.0)
     driver.click("Button", "닫기", exact=True)
