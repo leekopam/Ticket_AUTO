@@ -481,7 +481,12 @@ def run_control_server(
                     200,
                     {
                         "jobs": [
-                            {"printer_name": j.printer_name, "job_name": j.job_name}
+                            {
+                                "printer_name": j.printer_name,
+                                "job_name": j.job_name,
+                                "image_size": list(j.image.size),
+                                "image_sha256": _image_digest(j.image),
+                            }
                             for j in jobs
                         ]
                     },
@@ -519,6 +524,17 @@ def run_control_server(
                     return
                 self._send_json(200, {"ok": True, "result": result})
                 return
+            if cmd == "print_receipt":
+                if printer is None:
+                    self._send_json(503, {"ok": False, "error": "printer not wired"})
+                    return
+                try:
+                    result = _handle_print_receipt(printer)
+                except Exception as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, "result": result})
+                return
             if cmd.startswith("phone_"):
                 if phone_link is None:
                     self._send_json(503, {"ok": False, "error": "phone link not wired"})
@@ -543,6 +559,28 @@ def run_control_server(
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     return server
+
+
+def _image_digest(image: Any) -> str:
+    """렌더 결과의 픽셀 해시 — PNG 인코더 버전과 무관하게 픽셀만 비교한다."""
+    import hashlib
+
+    return hashlib.sha256(image.convert("RGB").tobytes()).hexdigest()
+
+
+def _handle_print_receipt(printer) -> dict:
+    """E2E 전용: 고정 더미 주문으로 실제 영수증 렌더→출력 파이프라인을 구동한다.
+
+    기본 ReceiptSettings를 사용해 실행 환경(src/exe) 간 결정성을 확보한다.
+    캔버스 템플릿은 ReceiptCanvasStore가 번들 루트에서 managed 경로로 시드하므로
+    exe 측은 실제 번들 리소스를 거쳐 번들 누락 회귀도 잡힌다.
+    """
+    from models.receipt_settings_model import ReceiptSettings
+    from services.receipt_print_pipeline import print_test_receipt
+
+    before = len(getattr(printer, "jobs", []))
+    print_test_receipt(ReceiptSettings(), printer_service=printer)
+    return {"printed": len(getattr(printer, "jobs", [])) - before}
 
 
 def _handle_runtime_command(runtime_manager, cmd: str) -> dict:

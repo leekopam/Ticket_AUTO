@@ -133,6 +133,25 @@ try {
         ) (Join-Path $resultsRoot "selfcheck-parity.log")
         $completedSteps.Add("feature parity check")
 
+        # 시나리오 동치 — 같은 --e2e 제어 명령을 소스/exe에 각각 실행하고
+        # 영수증 렌더 픽셀 해시까지 비교한다(self-check가 못 잡는 기능 회귀).
+        $parityDir = Join-Path $repoRoot "artifacts\test-results\parity"
+        if (Test-Path -LiteralPath $parityDir) {
+            Remove-Item -LiteralPath $parityDir -Recurse -Force
+        }
+        $parityTest = "tests\e2e_packaged\test_scenario_parity.py"
+        Invoke-LoggedNativeCommand $venvPython @(
+            "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            $parityTest, "--packaged-src"
+        ) (Join-Path $resultsRoot "parity-src.log")
+        $completedSteps.Add("scenario parity (source)")
+
+        Invoke-LoggedNativeCommand $venvPython @(
+            "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            $parityTest, "--packaged-exe", $exePath
+        ) (Join-Path $resultsRoot "parity-exe.log")
+        $completedSteps.Add("scenario parity (packaged EXE)")
+
         if ($ApkPath) {
             # Android 게이트 — release APK 설치·기동 → uiautomator2 첫 화면 UI →
             # logcat ANR/FATAL 감시. 기기 미지정 시 스크립트 기본 시리얼 사용.
