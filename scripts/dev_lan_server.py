@@ -26,6 +26,7 @@ from services.api_v1_server import (
     create_server,
 )
 from services.cert_service import detect_lan_ips
+from services.network_path_service import order_serving_ips
 
 
 def _make_orders_xlsx(path: Path) -> None:
@@ -85,9 +86,11 @@ def main() -> None:
     join_code = pairing.issue_join_code()
     generation, _ = DatasetTracker(excel).current()
 
-    lan_ip = detect_lan_ips()[0]
+    ordered_ips = order_serving_ips(detect_lan_ips())
+    lan_ip = ordered_ips[0]
     payload = build_pairing_qr_payload(
-        f"https://{lan_ip}:{server.port}", fingerprint, join_code, generation
+        f"https://{lan_ip}:{server.port}", fingerprint, join_code, generation,
+        alt_addrs=[f"https://{ip}:{server.port}" for ip in ordered_ips[1:]],
     )
 
     stop = threading.Event()

@@ -98,6 +98,18 @@ def classify_selfcheck_report(report: dict) -> list[str]:
     ]
 
 
+def _expected_serving_ip() -> str | None:
+    """호스트 기준 최적 서빙 IP — 스냅샷 수집 실패 시 검증 생략(None)."""
+    try:
+        from services.cert_service import detect_lan_ips
+        from services.network_path_service import order_serving_ips
+
+        ordered = order_serving_ips(detect_lan_ips())
+        return ordered[0] if ordered else None
+    except Exception:
+        return None
+
+
 def _app_log_path(exe_path: Path) -> Path:
     """패키징 앱의 로그 파일 경로 — exe 기준 .runtime/app.log."""
     return exe_path.parent / ".runtime" / "app.log"
@@ -337,6 +349,15 @@ def phase_e2e(exe: Path, work_dir: Path) -> tuple[bool, str]:
 
         link = send_control_command(control_url, {"cmd": "phone_link_start"})
         addr = link["result"]["addr"]
+        # QR 광고 주소가 실제 도달 가능한 서빙 주소인지 검증 —
+        # WSL·가상 어댑터가 ips[0]으로 실리는 회귀(연결시간 초과) 감지
+        expected_ip = _expected_serving_ip()
+        advertised_ip = addr.split("://", 1)[-1].rsplit(":", 1)[0]
+        if expected_ip and advertised_ip != expected_ip:
+            return False, (
+                f"QR 광고 주소가 최적 서빙 주소가 아님: 광고={addr} 기대 IP={expected_ip} "
+                "(가상 어댑터 오선택 회귀 가능)"
+            )
 
         try:
             started = send_control_command(control_url, {"cmd": "runtime_start"})
@@ -397,6 +418,9 @@ def phase_e2e(exe: Path, work_dir: Path) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # cp949 콘솔에서도 비ASCII 출력이 크래시하지 않도록
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description="패키징 exe 품질 게이트")
     parser.add_argument("--exe", default=str(DEFAULT_EXE), help="테스트 대상 exe 경로")
     parser.add_argument("--skip-selfcheck", action="store_true")

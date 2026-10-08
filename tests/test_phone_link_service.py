@@ -66,6 +66,42 @@ def test_start_returns_pairing_payload(service):
     assert service.start() == payload
 
 
+def test_start_advertises_reachable_addr_not_virtual(service, monkeypatch):
+    """WSL 가상 어댑터가 getaddrinfo 첫 항목이어도 실제 LAN 주소를 광고한다.
+
+    172.27.208.1(vEthernet WSL)이 ips[0]이면 폰이 도달 못 해 연결시간 초과 —
+    order_serving_ips가 Internet 프로필 어댑터의 주소를 골라야 한다.
+    """
+    snap = {
+        "Addresses": [
+            {"InterfaceAlias": "vEthernet (WSL (Hyper-V firewall))", "IPAddress": "172.27.208.1"},
+            {"InterfaceAlias": "이더넷", "IPAddress": "192.168.31.233"},
+        ],
+        "Profiles": [{"InterfaceAlias": "이더넷", "Name": "네트워크", "IPv4Connectivity": 4}],
+        "Adapters": [
+            {"Name": "이더넷", "InterfaceDescription": "Realtek PCIe GbE", "Status": "Up"},
+            {
+                "Name": "vEthernet (WSL (Hyper-V firewall))",
+                "InterfaceDescription": "Hyper-V Virtual Ethernet Adapter",
+                "Status": "Up",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        "services.phone_link_service.detect_lan_ips",
+        lambda: ["172.27.208.1", "192.168.31.233"],
+    )
+    monkeypatch.setattr(
+        "services.network_path_service._collect_snapshot", lambda: snap
+    )
+
+    payload = service.start()
+
+    port = payload["addr"].rsplit(":", 1)[1]
+    assert payload["addr"] == f"https://192.168.31.233:{port}"
+    assert payload["alt_addrs"] == [f"https://172.27.208.1:{port}"]
+
+
 def test_real_tls_pairing_roundtrip(service):
     payload = service.start()
     addr = f"https://127.0.0.1:{payload['addr'].rsplit(':', 1)[1]}"

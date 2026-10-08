@@ -21,6 +21,7 @@
 {
   "v": 1,
   "addr": "https://192.168.0.10:8765",
+  "alt_addrs": ["https://172.27.208.1:8765"],
   "cert_sha256": "AB:CD:...",
   "join_code": "482913",
   "server_id": "ticket-auto-pc",
@@ -28,6 +29,8 @@
 }
 ```
 
+- `addr`: 최적 서빙 주소 1개 — `order_serving_ips` 우선순위(핫스팟 > Internet 프로필 어댑터 > 비가상 어댑터)의 첫 항목. WSL·VMware 같은 가상 어댑터가 QR에 실리면 폰이 도달 못 해 연결시간 초과가 발생한다
+- `alt_addrs` (선택): `addr` 실패 시 폰이 순서대로 시도할 후보 주소. 구형 앱(v:1)은 무시하고 `addr`만 사용. 모든 후보에 동일한 `cert_sha256` 지문 고정 적용
 - `join_code`: 1회용 + 유효기간(10분). QR 노출만으로는 등록 불가 — PC 화면에서 운영자 승인 필요
 - `dataset_generation`: 현재 운영 XLSX 세대. 페어링 시점의 세대를 폰이 기억
 

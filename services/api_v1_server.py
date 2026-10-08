@@ -805,9 +805,14 @@ def build_pairing_qr_payload(
     cert_sha256: str,
     join_code: str,
     dataset_generation: str,
-) -> dict[str, str | int]:
-    """연결 QR 페이로드 (계약 §2)."""
-    return {
+    alt_addrs: list[str] | None = None,
+) -> dict[str, object]:
+    """연결 QR 페이로드 (계약 §2).
+
+    `alt_addrs`는 기본 주소 실패 시 폰이 순서대로 시도할 후보 — 선택 필드라
+    구형 앱(v:1)은 무시한다. addr 자체는 alt_addrs에 포함하지 않는다.
+    """
+    payload: dict[str, object] = {
         "v": 1,
         "addr": addr,
         "cert_sha256": cert_sha256,
@@ -815,6 +820,10 @@ def build_pairing_qr_payload(
         "server_id": SERVER_ID,
         "dataset_generation": dataset_generation,
     }
+    candidates = [a for a in (alt_addrs or []) if a and a != addr]
+    if candidates:
+        payload["alt_addrs"] = candidates
+    return payload
 
 
 def create_server(

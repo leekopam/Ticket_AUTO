@@ -19,6 +19,7 @@ from services.api_v1_server import (
     create_server,
 )
 from services.cert_service import detect_lan_ips, remove_server_cert
+from services.network_path_service import order_serving_ips
 from services.excel_service import ExcelService
 from services.pairing_service import DeviceInfo, PairingService, PendingApproval
 
@@ -83,10 +84,16 @@ class PhoneLinkService:
                 server.stop()
                 raise RuntimeError("LAN 주소를 찾지 못했습니다. 네트워크 연결 상태를 확인해주세요.")
 
+            # 기기가 실제 도달할 주소를 고른다 — getaddrinfo 순서는 무작위라
+            # WSL·가상 어댑터가 QR에 실리는 사고(연결시간 초과)를 막는다.
+            ordered = order_serving_ips(ips)
             join_code = self._pairing.issue_join_code()
             generation, _ = DatasetTracker(excel).current()
-            addr = f"https://{ips[0]}:{self._port}"
-            self._payload = build_pairing_qr_payload(addr, fingerprint, join_code, generation)
+            addr = f"https://{ordered[0]}:{self._port}"
+            alt_addrs = [f"https://{ip}:{self._port}" for ip in ordered[1:]]
+            self._payload = build_pairing_qr_payload(
+                addr, fingerprint, join_code, generation, alt_addrs=alt_addrs
+            )
             self._server = server
             return self._payload
 
