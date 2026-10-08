@@ -505,8 +505,8 @@ class BrowserService:
         try:
             self._current_page.click("text=수령 완료 처리", timeout=5000)
         except Exception as exc:
-            # 버튼이 없으면 이미 수령완료 상태인지 확인
-            if self._page_shows_already_received():
+            # 클릭이 디스패치된 뒤 요소 분리로 예외가 날 수 있어 짧게 재확인한다.
+            if self._wait_already_received():
                 print("RECEIPT_ALREADY_RECEIVED_ON_PAGE")
                 self._close_current_page()
                 self._invoke_receipt_complete_callback()
@@ -1168,6 +1168,31 @@ class BrowserService:
             return "****"
         return f"{text[:2]}***{text[-2:]}"
 
+    def _receipt_action_visible(self) -> bool:
+        """'수령 완료 처리' 액션 컨트롤이 클릭 가능한 상태로 보이는지 확인한다.
+
+        완료 페이지에도 '수령 완료 처리' 문자열이 잔존할 수 있어(비활성 버튼,
+        이력 라벨 등) 본문 부분문자열 대신 컨트롤의 실제 상태로 판정한다.
+        """
+        if not self._current_page or self._current_page.is_closed():
+            return False
+        try:
+            candidates = self._current_page.locator(
+                "button:has-text('수령 완료 처리'), "
+                "a:has-text('수령 완료 처리'), "
+                "[role='button']:has-text('수령 완료 처리')"
+            )
+            for idx in range(candidates.count()):
+                try:
+                    item = candidates.nth(idx)
+                    if item.is_visible() and item.is_enabled():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
     def _page_shows_already_received(self) -> bool:
         """현재 페이지에 이미 수령완료 표시가 있는지 확인한다."""
         if not self._current_page or self._current_page.is_closed():
@@ -1183,12 +1208,39 @@ class BrowserService:
             "중복스캔",
             "중복으로스캔",
             "수령완료되었습니다",
+            "수령완료처리되었습니다",
+            "수령완료처리됨",
             "처리완료된주문",
             "이미처리된주문",
         )
         if any(marker in normalized for marker in positive_markers):
             return True
-        return "수령완료" in normalized and "수령완료처리" not in normalized
+        # 액션 버튼이 활성 상태면 아직 미수령.
+        if self._receipt_action_visible():
+            return False
+        # "수령완료"는 "수령완료처리"의 부분문자열 — 액션 라벨 occurrences를
+        # 제거한 뒤 남는 "수령완료"만 완료 표시로 본다. 버튼 태그 종류와
+        # 무관하게 미수령 페이지(라벨만 존재)를 오탐하지 않는다.
+        residual = normalized.replace("수령완료처리", "")
+        return "수령완료" in residual
+
+    def _wait_already_received(self, *, attempts: int = 5) -> bool:
+        """수령완료 표시가 나타날 때까지 유한 횟수 폴링한다.
+
+        클릭이 서버에 반영된 뒤 Playwright가 요소 분리/전환 예외를 던지는
+        오탐 경로에서, SPA 반영 지연을 감안해 단발 확인 대신 재확인한다.
+        """
+        for _ in range(max(1, attempts)):
+            if self._page_shows_already_received():
+                return True
+            try:
+                if self._current_page and not self._current_page.is_closed():
+                    self._current_page.wait_for_timeout(self._RECEIPT_VERIFY_POLL_MS)
+                else:
+                    time.sleep(0.4)
+            except Exception:
+                time.sleep(0.4)
+        return self._page_shows_already_received()
 
     def _close_current_page(self) -> None:
         """수령완료 처리 후 구매자 정보 페이지를 닫는다."""
@@ -1240,7 +1292,9 @@ class BrowserService:
 
     @staticmethod
     def _warn(message: str) -> None:
+        # 패키징(console=False)에서는 print가 유실되므로 파일 로그에도 남긴다.
         print(f"BROWSER_WARN {message}")
+        logger.warning("BROWSER_WARN %s", message)
 
     def _enqueue_task(self, task: dict[str, Any]) -> None:
         self._ensure_lifecycle_state()

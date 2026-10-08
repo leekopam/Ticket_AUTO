@@ -874,7 +874,8 @@ class Application:
                         self._commit_scan_success_count()
                     self._enter_ready("이미 수령완료된 주문입니다 (주문정보만 표시)")
                     return
-                if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL"}:
+                # 클릭이 서버에 반영됐을 수 있는 애매한 실패 — 확인 알림음을 울린다.
+                if click_result.error_code in {"PRIMARY_CLICK_FAIL", "CONFIRM_CLICK_FAIL", "VERIFY_FAILED"}:
                     self._play_scan_success_sound(order, increment_count=False)
                 logger.warning(
                     "수령 완료 처리 실패 code=%s message=%s",

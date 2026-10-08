@@ -4784,6 +4784,10 @@ def _setup_file_logging() -> None:
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG)
         root_logger.addHandler(handler)
+        # flet은 프레임마다 base64 DEBUG 로그를 남겨 로테이션(2MB×3)이 수초 만에
+        # 소진된다 — 장애 시점 WARNING이 남도록 flet 계열은 WARNING으로 올린다.
+        for name in ("flet", "flet_core", "flet_runtime"):
+            logging.getLogger(name).setLevel(logging.WARNING)
     except Exception:
         pass
 

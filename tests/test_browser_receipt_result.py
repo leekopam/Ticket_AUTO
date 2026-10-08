@@ -929,5 +929,125 @@ class BrowserReceiptResultContractTest(unittest.TestCase):
         self.assertEqual(page.close_calls, 1)
 
 
+class _FakeActionElement:
+    """'수령 완료 처리' 컨트롤 후보 하나를 흉내낸다."""
+
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
+        self._visible = visible
+        self._enabled = enabled
+
+    def is_visible(self) -> bool:
+        return self._visible
+
+    def is_enabled(self) -> bool:
+        return self._enabled
+
+
+class _FakeMarkerLocator:
+    def __init__(self, elements: list | None = None) -> None:
+        self._elements = list(elements or [])
+
+    def count(self) -> int:
+        return len(self._elements)
+
+    def nth(self, index: int) -> _FakeActionElement:
+        return self._elements[index]
+
+
+class _FakeMarkerPage:
+    """수령완료 마커 판정용 페이지 — 액션 버튼 후보와 본문 텍스트를 주입한다."""
+
+    def __init__(
+        self,
+        *,
+        action_elements: list | None = None,
+        body_text: str = "",
+        closed: bool = False,
+    ) -> None:
+        self._action_locator = _FakeMarkerLocator(action_elements)
+        self._body_text = body_text
+        self._closed = closed
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def locator(self, selector: str):
+        if selector == "body":
+            body_text = self._body_text
+            return SimpleNamespace(inner_text=lambda timeout=None: body_text)
+        return self._action_locator
+
+
+class AlreadyReceivedMarkerTest(unittest.TestCase):
+    """실제 Witchform 완료 페이지 재현 — 마커 오판 회귀 방지."""
+
+    def _service_with_page(self, page) -> BrowserService:
+        service = BrowserService.__new__(BrowserService)
+        service._current_page = page
+        return service
+
+    def test_active_action_button_means_not_received(self) -> None:
+        """활성 '수령 완료 처리' 버튼이 있으면 본문에 수령완료가 있어도 미수령."""
+        page = _FakeMarkerPage(
+            action_elements=[_FakeActionElement(visible=True, enabled=True)],
+            body_text="주문 상세 수령완료 내역",
+        )
+        service = self._service_with_page(page)
+
+        self.assertFalse(service._page_shows_already_received())
+
+    def test_completed_page_with_residual_label_is_received(self) -> None:
+        """버튼이 사라진 완료 페이지 — '수령완료처리' 라벨이 남아 있어도 수령완료.
+
+        이전 구현은 '"수령완료처리" 미포함' 조건 때문에 이 케이스를 영구
+        미수령으로 오판했다(VERIFY_FAILED/PRIMARY_CLICK_FAIL 재발 원인).
+        """
+        page = _FakeMarkerPage(
+            action_elements=[],
+            body_text="수령 완료 처리 일시 2026-10-08 23:24 상태 수령완료",
+        )
+        service = self._service_with_page(page)
+
+        self.assertTrue(service._page_shows_already_received())
+
+    def test_disabled_action_button_falls_through_to_markers(self) -> None:
+        """비활성 버튼만 남은 완료 페이지도 마커 판정으로 수령완료를 인식한다."""
+        page = _FakeMarkerPage(
+            action_elements=[_FakeActionElement(visible=True, enabled=False)],
+            body_text="주문이 수령완료되었습니다",
+        )
+        service = self._service_with_page(page)
+
+        self.assertTrue(service._page_shows_already_received())
+
+    def test_label_only_page_is_not_received(self) -> None:
+        """본문에 '수령 완료 처리' 라벨만 있고 버튼 요소가 매칭되지 않아도 미수령.
+
+        액션 요소가 button/a/[role=button]이 아닌 경우에도 '수령완료' 부분문자열
+        오탐으로 미수령 주문을 수령완료로 잘못 기록하면 안 된다.
+        """
+        page = _FakeMarkerPage(
+            action_elements=[],
+            body_text="수령 완료 처리 버튼을 눌러주세요",
+        )
+        service = self._service_with_page(page)
+
+        self.assertFalse(service._page_shows_already_received())
+
+    def test_page_without_received_markers_is_not_received(self) -> None:
+        """버튼도 수령완료 문구도 없으면 미수령으로 판정한다."""
+        page = _FakeMarkerPage(action_elements=[], body_text="주문 상세 로딩 중")
+        service = self._service_with_page(page)
+
+        self.assertFalse(service._page_shows_already_received())
+
+    def test_positive_marker_still_detected(self) -> None:
+        """기존 양성 마커는 그대로 인식한다."""
+        page = _FakeMarkerPage(action_elements=[], body_text="이미 처리된 주문입니다")
+        service = self._service_with_page(page)
+
+        self.assertTrue(service._page_shows_already_received())
+
+
 if __name__ == "__main__":
     unittest.main()
