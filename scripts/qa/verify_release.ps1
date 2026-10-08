@@ -152,6 +152,16 @@ try {
         ) (Join-Path $resultsRoot "parity-exe.log")
         $completedSteps.Add("scenario parity (packaged EXE)")
 
+        # 패키징 UIA — 방금 실행한 exe(웜 상태)로 창 컨트롤·주문 플로우·
+        # 런타임 재시작·유도 hang 감지를 검증한다. 기본 pytest 수집에서는
+        # 제외되므로 여기서 명시 경로로 실행한다.
+        Invoke-LoggedNativeCommand $venvPython @(
+            "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "tests\e2e_packaged\test_packaged_app.py",
+            "--packaged-exe", $exePath
+        ) (Join-Path $resultsRoot "packaged-uia.log")
+        $completedSteps.Add("packaged EXE UIA + watchdog")
+
         if ($ApkPath) {
             # Android 게이트 — release APK 설치·기동 → uiautomator2 첫 화면 UI →
             # logcat ANR/FATAL 감시. 기기 미지정 시 스크립트 기본 시리얼 사용.

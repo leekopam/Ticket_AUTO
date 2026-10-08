@@ -113,8 +113,9 @@ def packaged_app(request, tmp_path_factory):
     try:
         if not wait_for_port(control_port, timeout_sec=60.0):
             raise RuntimeError("제어 서버 기동 실패")
-        # 방금 빌드된 exe는 Defender 콜드스캔으로 첫 창 표시가 늦을 수 있다.
-        driver = NativeWindowDriver.wait_for_window(window_title, timeout=180.0)
+        # 방금 빌드된 exe는 Defender 콜드스캔으로 첫 창 표시가 3분을 넘길 수 있다
+        # (실측: 신규 빌드 첫 실행에서 180s 초과 관측).
+        driver = NativeWindowDriver.wait_for_window(window_title, timeout=300.0)
         dog.set_hwnd(driver.hwnd)
         # 대시보드 시맨틱 트리가 materialize될 때까지 기다린다.
         driver.wait_for_tree(timeout=90.0)
