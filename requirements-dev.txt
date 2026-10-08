@@ -8,3 +8,7 @@ pyvirtualcam==0.15.0
 pygrabber==0.2
 # tests/e2e_native: 네이티브 Flet 창 UIA 자동화용 — Windows 데스크톱 세션 필요
 pywinauto==0.6.9
+# tests/e2e_packaged/watchdog.py: 프로세스 RSS·핸들 샘플링 (ctypes 대체, 검증된 구현)
+psutil==7.2.2
+# scripts/qa/apk_e2e.py: Android release APK 실기기 UI 게이트용
+uiautomator2==3.7.0
