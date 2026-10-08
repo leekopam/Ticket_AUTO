@@ -16,9 +16,13 @@
   서버의 요청 귀속(coalescing)으로 핸들러가 1회만 실행되고
   두 앱 모두 같은 종결 결과를 표시하는지 검증한다.
 
+실기기(--serial이 emulator-로 시작하지 않는 경우)는 PC의 LAN IP로 연결하고
+스캔 검증 뒤 Wi-Fi 끄기/켜기로 끊김 감지·복구까지 추가 검증한다.
+
 사용:
     python scripts/qa/emulator_link_e2e.py --apk <app-release.apk>
         [--serials emulator-5554] [--serials emulator-5554,emulator-5556]
+        [--serials R3CX2094YJW]   # 실기기
 """
 from __future__ import annotations
 
@@ -54,6 +58,15 @@ TEST_ORDER_ID = "AAAA1111_BBBB2222"
 TEST_QR_URL = "https://witchform.com/qrcode_link.php?opaque=emu-e2e"
 # 에뮬레이터에서 호스트(PC) 루프백에 도달하는 고정 주소
 EMU_HOST = "10.0.2.2"
+
+
+def _host_addr(serial: str) -> str:
+    """기기가 PC에 도달하는 주소 — 에뮬레이터는 10.0.2.2, 실기기는 PC의 LAN IP."""
+    if serial.startswith("emulator-"):
+        return EMU_HOST
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("8.8.8.8", 80))  # 패킷 없이 기본 라우트 인터페이스 IP만 얻는다
+        return probe.getsockname()[0]
 
 
 def _adb(adb: str, serial: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -97,6 +110,21 @@ def _ui_text_present(adb: str, serial: str, needle: str, timeout_sec: float) -> 
     return False
 
 
+def _ui_text_gone(adb: str, serial: str, needle: str, timeout_sec: float) -> bool:
+    """화면(UI dump)에서 문구가 사라질 때까지 기다린다."""
+    dump_path = f"/sdcard/emu_e2e_ui_{threading.get_ident()}.xml"
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        result = _adb(adb, serial, "shell", "uiautomator", "dump", dump_path)
+        if result.returncode == 0:
+            content = _adb(adb, serial, "shell", "cat", dump_path)
+            if content.stdout and needle not in content.stdout:
+                _adb(adb, serial, "shell", "rm", dump_path)
+                return True
+        time.sleep(0.7)
+    return False
+
+
 class EmuE2EFailure(RuntimeError):
     pass
 
@@ -125,7 +153,7 @@ def _prepare_device(adb: str, serial: str, apk: str | None) -> None:
 def _pair_device(adb: str, serial: str, pairing, fingerprint: str, port: int) -> None:
     join_code = pairing.issue_join_code()
     payload = build_pairing_qr_payload(
-        f"https://{EMU_HOST}:{port}", fingerprint, join_code, ""
+        f"https://{_host_addr(serial)}:{port}", fingerprint, join_code, ""
     )
     _inject_qr(adb, serial, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
@@ -168,7 +196,7 @@ def _start_test_server(scan_handler):
             time.sleep(0.2)
 
     threading.Thread(target=auto_approve, daemon=True).start()
-    print(f"테스트 서버 기동: https://{EMU_HOST}:{port} (자동 승인)", flush=True)
+    print(f"테스트 서버 기동: :{port} (자동 승인)", flush=True)
 
     def stop() -> None:
         stop_approver.set()
@@ -213,6 +241,8 @@ def run(serials: list[str], apk: str | None, adb: str) -> None:
 
         if len(serials) == 1:
             _run_single(adb, serials[0], scan_calls, entered, gate)
+            if not serials[0].startswith("emulator-"):
+                _run_wifi_cycle(adb, serials[0])
         else:
             _run_multi(adb, serials, scan_calls, entered, gate)
 
@@ -252,6 +282,22 @@ def _run_single(adb: str, serial: str, scan_calls: list[str], entered, gate) -> 
     _check("재스캔 서버측 도달", len(scan_calls) == 2, f"calls={scan_calls}")
     _check("앱 화면 '이미 수령된 주문'",
            _ui_text_present(adb, serial, "이미 수령된 주문", 20))
+
+
+def _run_wifi_cycle(adb: str, serial: str) -> None:
+    """실기기 전용 — 실제 Wi-Fi 라디오를 껐다 켜며 끊김 감지·복구를 검증한다."""
+    wifi_state = _adb(adb, serial, "shell", "settings", "get", "global", "wifi_on")
+    if "1" not in wifi_state.stdout:
+        print("[SKIP] Wi-Fi가 켜져 있지 않아 끊김/복구 검증 생략", flush=True)
+        return
+    _adb(adb, serial, "shell", "svc", "wifi", "disable")
+    try:
+        _check("Wi-Fi 끊김 감지(앱 화면 '서버 연결 끊김')",
+               _ui_text_present(adb, serial, "서버 연결 끊김", 45))
+    finally:
+        _adb(adb, serial, "shell", "svc", "wifi", "enable")
+    _check("Wi-Fi 복구 후 끊김 표시 해소",
+           _ui_text_gone(adb, serial, "서버 연결 끊김", 60))
 
 
 def _run_multi(adb: str, serials: list[str], scan_calls: list[str], entered, gate) -> None:
