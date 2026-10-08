@@ -220,6 +220,47 @@ class FakeDashboardRuntimeApp:
         self.calls.append(("request_stop", None))
         self._stop.set()
 
+    def process_phone_qr(self, qr_url: str) -> dict[str, str]:
+        """실 Application과 같은 결과 계약으로 폰 QR을 스텁 처리한다.
+
+        test_order 파라미터로 주문을 해석하고 관리 데이터 경로의
+        ExcelService로 수령 상태를 실제로 갱신한다.
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        from services.excel_service import ExcelService
+
+        self.calls.append(("process_phone_qr", qr_url))
+        order_number = parse_qs(urlparse(qr_url or "").query).get(
+            "test_order", [""]
+        )[0].strip()
+        excel = ExcelService()
+        order = excel.find_order(order_number) if order_number else None
+        if order is None:
+            return {
+                "state": "failed",
+                "order_id": "",
+                "message": f"주문을 찾을 수 없습니다: {order_number or qr_url}",
+            }
+        if order.is_received:
+            return {
+                "state": "already_processed",
+                "order_id": order.order_number,
+                "message": "이미 수령완료된 주문입니다",
+            }
+        received_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        if not excel.mark_order_received(order.order_number, received_at):
+            return {
+                "state": "failed",
+                "order_id": order.order_number,
+                "message": "수령확인 저장 실패",
+            }
+        return {
+            "state": "succeeded",
+            "order_id": order.order_number,
+            "message": "수령 처리가 완료되었습니다",
+        }
+
     # --- 테스트 주입 명령 ---
     def push_command(self, command: dict) -> None:
         self._commands.put(command)
@@ -405,6 +446,7 @@ def run_control_server(
     port: int,
     printer: Any | None = None,
     phone_link: Any | None = None,
+    runtime_manager: Any | None = None,
 ) -> ThreadingHTTPServer:
     """테스트 프로세스→앱 프로세스 명령 주입용 최소 HTTP 서버를 기동한다.
 
@@ -412,6 +454,7 @@ def run_control_server(
     `app_getter()`로 현재 인스턴스를 조회한다.
 
     - POST /command  body: {"cmd": "emit_status", ...} → 현재 앱 push_command
+    - POST /command  body: {"cmd": "runtime_start"|"runtime_stop"} → 런타임 매니저
     - GET /ping      → {"ok": true}
     - GET /calls     → 최근 앱 calls 스냅샷(JSON 직렬화 가능한 값만)
     - GET /printer-jobs → 스텁 프린터에 접수된 작업 목록
@@ -464,7 +507,19 @@ def run_control_server(
             if self.path != "/command":
                 self._send_json(404, {"ok": False, "error": "unknown path"})
                 return
-            if str(payload.get("cmd", "")).startswith("phone_"):
+            cmd = str(payload.get("cmd", ""))
+            if cmd in ("runtime_start", "runtime_stop"):
+                if runtime_manager is None:
+                    self._send_json(503, {"ok": False, "error": "runtime manager not wired"})
+                    return
+                try:
+                    result = _handle_runtime_command(runtime_manager, cmd)
+                except Exception as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, "result": result})
+                return
+            if cmd.startswith("phone_"):
                 if phone_link is None:
                     self._send_json(503, {"ok": False, "error": "phone link not wired"})
                     return
@@ -488,6 +543,21 @@ def run_control_server(
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     return server
+
+
+def _handle_runtime_command(runtime_manager, cmd: str) -> dict:
+    """런타임 기동/정지 명령 — UI 버튼 대신 테스트 프로세스가 직접 호출한다."""
+    if cmd == "runtime_start":
+        started = runtime_manager.start()
+        # 스텁 앱의 READY는 매니저 상태로 RUNNING에 매핑된다 — 거기까지 짧게 기다린다.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if runtime_manager.state == "RUNNING" and runtime_manager.is_running:
+                break
+            time.sleep(0.1)
+        return {"started": started, "state": runtime_manager.state}
+    runtime_manager.stop()
+    return {"stopped": True, "state": runtime_manager.state}
 
 
 # --- 스텁 폰: 제어 서버 안에서 실제 TLS 페어링/하트비트를 수행한다 ---
@@ -791,7 +861,7 @@ def run_e2e_app(
     )
     run_control_server(
         lambda: current_app["value"], control_port, printer=fake_printer,
-        phone_link=phone_link,
+        phone_link=phone_link, runtime_manager=runtime_manager,
     )
 
     if demo:
