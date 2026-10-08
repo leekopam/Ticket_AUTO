@@ -208,6 +208,7 @@ def run_link_flow(
         sys.path.insert(0, str(repo_root))
     from services.api_v1_server import build_pairing_qr_payload, create_server
     from services.cert_service import detect_lan_ips
+    from services.network_path_service import order_serving_ips
     from services.excel_service import ExcelService
     from services.qr_generator_service import generate_qr_image
 
@@ -242,9 +243,17 @@ def run_link_flow(
 
     threading.Thread(target=_auto_approve, daemon=True).start()
 
-    addr = f"https://{detect_lan_ips()[0]}:{port}"
+    # ips[0] 임의 선택은 WSL·가상 어댑터를 QR에 실을 수 있다 — 서빙 주소 정렬로
+    # 기본 주소와 alt 후보를 만들어 폰이 도달 가능한 주소로 페어링하게 한다.
+    ordered_ips = order_serving_ips(detect_lan_ips())
+    if not ordered_ips:
+        stop.set()
+        server.stop()
+        return False, [*report, "LAN 주소를 찾지 못했습니다. 네트워크 연결을 확인하세요"]
+    addr = f"https://{ordered_ips[0]}:{port}"
     payload = build_pairing_qr_payload(
-        addr, fingerprint, pairing.issue_join_code(), ""
+        addr, fingerprint, pairing.issue_join_code(), "",
+        alt_addrs=[f"https://{ip}:{port}" for ip in ordered_ips[1:]],
     )
     qr_path = work_dir / "pairing-qr.png"
     generate_qr_image(
