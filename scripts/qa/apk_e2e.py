@@ -448,6 +448,10 @@ def run_apk_gate(
             report.extend(lf_report)
             ok = ok and lf_ok
         else:
+            if ui:
+                # --ui는 신규 설치 상태(권한 다이얼로그+페어링 화면)를 검증한다.
+                # 이전 페어링 세션이 남아 있으면 스캔 화면으로 바로 진입해 오탐.
+                adb.run("shell", "pm", "clear", package)
             launch_app(adb, package, activity)
             if not wait_for_foreground(adb, package, timeout_sec=30.0):
                 report.append("포그라운드 진입 실패")
@@ -487,12 +491,6 @@ def run_apk_gate(
         report.append(watcher.tail_text())
         return False, report
     return ok, report
-
-    report.extend(watcher.summary_lines())
-    if watcher.events:
-        report.append("-- logcat tail --")
-        report.append(watcher.tail_text())
-        return False, report
     return True, report
 
 
