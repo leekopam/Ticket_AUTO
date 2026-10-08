@@ -304,3 +304,124 @@ def test_work_log_over_tls(link):
     assert isinstance(body["items"], list)
     if body["items"]:
         assert "*" in body["items"][0]["phone"]  # 연락처는 마스킹 유지
+
+
+@pytest.fixture
+def link_scan(tmp_path: Path):
+    """scan_handler를 주입할 수 있는 실 TLS 서버 — 다기기 동시 스캔 검증용."""
+    data_path = tmp_path / "orders.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "주문목록"
+    sheet.append(["주문번호", "주문자명", "주문자연락처", "좌석번호", "주문상태", "[상품1]티켓"])
+    sheet.append(["AAAA1111_BBBB2222", "홍길동", "010-1234-5678", "A-1", "결제완료", 1])
+    workbook.save(data_path)
+
+    import threading as _th
+
+    state = {"calls": [], "entered": _th.Event(), "release": _th.Event()}
+
+    def handle_scan(qr_url: str) -> dict:
+        state["calls"].append(qr_url)
+        state["entered"].set()
+        state["release"].wait(timeout=10)
+        return {"state": "succeeded", "order_id": "AAAA1111_BBBB2222", "message": "수령 완료"}
+
+    cert = ensure_server_cert(cert_dir=str(tmp_path / "cert"))
+    pairing = PairingService(str(tmp_path / "devices.json"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = LanApiServer(
+        create_api_v1_app(ExcelService(str(data_path)), pairing, scan_handler=handle_scan),
+        "127.0.0.1", port, cert.cert_path, cert.key_path,
+    )
+    server.start()
+    try:
+        yield port, cert.sha256_fingerprint, pairing, state
+    finally:
+        state["release"].set()
+        server.stop()
+
+
+def _pair_over_tls(port: int, fingerprint: str, pairing, uid: str, name: str) -> str:
+    code = pairing.issue_join_code()
+    _, pending = _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"join_code": code, "device_name": name, "device_uid": uid},
+    )
+    assert pairing.approve(pending["pair_ticket"])
+    return _pinned_json(
+        port, fingerprint, "POST", "/v1/pair",
+        body={"pair_ticket": pending["pair_ticket"]},
+    )[1]["device_token"]
+
+
+def _wait_terminal(port: int, fingerprint: str, token: str, rid: str) -> dict:
+    terminal = {"succeeded", "already_processed", "failed", "needs_reconciliation", "rejected"}
+    result = {}
+    for _ in range(200):
+        result = _pinned_json(port, fingerprint, "GET", f"/v1/actions/{rid}", token=token)[1]
+        if result.get("state") in terminal:
+            return result
+        time.sleep(0.025)
+    return result
+
+
+def test_two_phones_same_qr_coalesce_over_real_tls(link_scan):
+    """실 TLS로 연결된 폰 2대가 동일 QR을 동시에 스캔해도 처리는 1회만 실행되고 둘 다 같은 결과를 받는다."""
+    import threading
+
+    port, fingerprint, pairing, state = link_scan
+    token_a = _pair_over_tls(port, fingerprint, pairing, "uid-a", "입구A")
+    token_b = _pair_over_tls(port, fingerprint, pairing, "uid-b", "입구B")
+    qr_url = "https://witchform.com/qrcode_link.php?opaque=shared-tls"
+    rid_a, rid_b = "req-a-1", "req-b-1"
+
+    responses: dict[str, tuple[int, dict]] = {}
+
+    def scan(token: str, rid: str, key: str) -> None:
+        responses[key] = _pinned_json(
+            port, fingerprint, "POST", "/v1/scan",
+            body={"request_id": rid, "qr_url": qr_url}, token=token,
+        )
+
+    # A가 핸들러에 진입해 처리 중일 때 B가 같은 QR을 요청 — 귀속되어야 한다
+    t_a = threading.Thread(target=scan, args=(token_a, rid_a, "a"))
+    t_a.start()
+    assert state["entered"].wait(timeout=5)
+    scan(token_b, rid_b, "b")
+    state["release"].set()
+    t_a.join(timeout=5)
+
+    assert responses["a"][0] == 200 and responses["b"][0] == 200
+    final_a = _wait_terminal(port, fingerprint, token_a, rid_a)
+    final_b = _wait_terminal(port, fingerprint, token_b, rid_b)
+    assert final_a["state"] == "succeeded"
+    assert final_b["state"] == "succeeded"
+    assert final_a["order_id"] == final_b["order_id"] == "AAAA1111_BBBB2222"
+    assert state["calls"] == [qr_url]
+
+
+def test_two_phones_different_qr_both_processed_over_real_tls(link_scan):
+    """다른 QR의 동시 스캔은 귀속되지 않고 각각 처리된다."""
+    port, fingerprint, pairing, state = link_scan
+    token_a = _pair_over_tls(port, fingerprint, pairing, "uid-c", "입구C")
+    token_b = _pair_over_tls(port, fingerprint, pairing, "uid-d", "입구D")
+    qr_a = "https://witchform.com/qrcode_link.php?opaque=tls-a"
+    qr_b = "https://witchform.com/qrcode_link.php?opaque=tls-b"
+
+    state["release"].set()  # 핸들러 즉시 반환
+
+    status_a, _ = _pinned_json(
+        port, fingerprint, "POST", "/v1/scan",
+        body={"request_id": "req-a-2", "qr_url": qr_a}, token=token_a,
+    )
+    status_b, _ = _pinned_json(
+        port, fingerprint, "POST", "/v1/scan",
+        body={"request_id": "req-b-2", "qr_url": qr_b}, token=token_b,
+    )
+    assert status_a == 200 and status_b == 200
+    assert _wait_terminal(port, fingerprint, token_a, "req-a-2")["state"] == "succeeded"
+    assert _wait_terminal(port, fingerprint, token_b, "req-b-2")["state"] == "succeeded"
+    assert sorted(state["calls"]) == sorted([qr_a, qr_b])
